@@ -474,8 +474,12 @@ def _has_severe(findings: list[GuardWarning]) -> bool:
     return any(f.severity == "severe" for f in findings)
 
 
-def _guard_retry_key(stage: Stage, subagent_name: str) -> str:
-    return f"{stage.value}:{subagent_name}"
+def _guard_retry_key(stage: Stage, subagent_name: str, retry_count: int) -> str:
+    # retry_count is included so that each rollback round starts with a fresh
+    # GUARD_RETRY_LIMIT budget. Without it, guard_retries entries from a prior
+    # round persist and a severe finding in the new round goes straight to
+    # BLOCKED with no real retry attempt.
+    return f"{stage.value}:{subagent_name}:r{retry_count}"
 
 
 def _handle_guard_outcome(
@@ -504,7 +508,7 @@ def _handle_guard_outcome(
 
     severe_ids = sorted({f.check_id for f in findings if f.severity == "severe"})
     severe_str = ",".join(severe_ids)
-    key = _guard_retry_key(stage, subagent_name)
+    key = _guard_retry_key(stage, subagent_name, state.retry_count)
     attempts_so_far = state.guard_retries.get(key, 0)
 
     if attempts_so_far >= GUARD_RETRY_LIMIT:
@@ -921,17 +925,28 @@ def gate_1_node(state: WorkflowState) -> dict:
 
 def _parse_subtask_plan(result: object) -> list[SubtaskSpec]:
     """Extract a `subtask_plan: [{task_id, title, description}, ...]` list
-    from a planner stage-result, tolerating absence/malformation."""
+    from a planner stage-result, tolerating absence/malformation.
+
+    Skips items with blank task_id or duplicate task_id (first occurrence
+    wins). Without this filter, downstream subtask_results would key-collide
+    and the per-task guard_retries isolation would fail.
+    """
     raw = (result if isinstance(result, dict) else {}).get("subtask_plan", []) or []
     out: list[SubtaskSpec] = []
+    seen: set[str] = set()
     if isinstance(raw, list):
         for item in raw:
-            if isinstance(item, dict) and "task_id" in item:
-                out.append(SubtaskSpec(
-                    task_id=str(item.get("task_id", "")),
-                    title=str(item.get("title", "")),
-                    description=str(item.get("description", "")),
-                ))
+            if not (isinstance(item, dict) and "task_id" in item):
+                continue
+            tid = str(item.get("task_id", "")).strip()
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            out.append(SubtaskSpec(
+                task_id=tid,
+                title=str(item.get("title", "")),
+                description=str(item.get("description", "")),
+            ))
     return out
 
 
@@ -1154,14 +1169,13 @@ def planning_dev_consult_node(state: WorkflowState) -> dict:
     }
 
     result = interrupt(dispatch_payload)
-    guard = _run_anti_drop_guard(
-        result,
+    all_findings, verified_artifacts, gh = _run_full_guard_check(
+        state, result,
         current_stage=Stage.PLANNING_PHASE.value,
+        stage=Stage.PLANNING_PHASE,
         expected_artifacts=[],
         subagent_name="dev_agent[consult]",
-    )
-    gh = _handle_guard_outcome(
-        state, guard, stage=Stage.PLANNING_PHASE, subagent_name="dev_agent[consult]"
+        artifact_paths=state.artifact_paths,
     )
     if gh is not None:
         return {**clear_pending, **gh}
@@ -1193,7 +1207,8 @@ def planning_dev_consult_node(state: WorkflowState) -> dict:
     return {
         "stage": Stage.PLANNING_PHASE,
         "decisions": state.decisions + [audit],
-        "warnings": state.warnings + guard,
+        "warnings": state.warnings + all_findings,
+        "artifacts": {**state.artifacts, **verified_artifacts},
         "planning_consultation_round": next_round_index,
         "planning_consultations": state.planning_consultations + [record],
         "stage_log": _append_log(
@@ -1649,13 +1664,14 @@ def dev_codex_review_node(state: WorkflowState) -> dict:
     }
 
     result = interrupt(dispatch_payload)
-    guard = _run_anti_drop_guard(
-        result,
+    all_findings, verified_artifacts, gh = _run_full_guard_check(
+        state, result,
         current_stage=Stage.DEV_PHASE.value,
+        stage=Stage.DEV_PHASE,
         expected_artifacts=[],
         subagent_name=subagent_name,
+        artifact_paths=state.artifact_paths,
     )
-    gh = _handle_guard_outcome(state, guard, stage=Stage.DEV_PHASE, subagent_name=subagent_name)
     if gh is not None:
         return {**clear_pending, **gh}
 
@@ -1702,7 +1718,8 @@ def dev_codex_review_node(state: WorkflowState) -> dict:
 
     return {
         "decisions": state.decisions + [audit],
-        "warnings": state.warnings + guard,
+        "warnings": state.warnings + all_findings,
+        "artifacts": {**state.artifacts, **verified_artifacts},
         "subtask_results": {**state.subtask_results, subtask.task_id: merged},
         "stage_log": _append_log(
             state,
@@ -1878,7 +1895,7 @@ def rev_dispatch_node(state: WorkflowState) -> dict:
 
     return {
         "decisions": state.decisions + [audit],
-        "warnings": state.warnings + guard + verify_findings,
+        "warnings": state.warnings + all_findings,
         "artifacts": {**state.artifacts, **verified_artifacts},
         "phase_summaries": {**state.phase_summaries, Stage.REV_PHASE.value: phase_summary},
         "gate_results": {**state.gate_results, "Gate 3 - rev_agent": gate_claim},
@@ -1942,13 +1959,14 @@ def rev_codex_final_node(state: WorkflowState) -> dict:
     }
 
     result = interrupt(dispatch_payload)
-    guard = _run_anti_drop_guard(
-        result,
+    all_findings, verified_artifacts, gh = _run_full_guard_check(
+        state, result,
         current_stage=Stage.REV_PHASE.value,
+        stage=Stage.REV_PHASE,
         expected_artifacts=[],
         subagent_name="codex_final",
+        artifact_paths=state.artifact_paths,
     )
-    gh = _handle_guard_outcome(state, guard, stage=Stage.REV_PHASE, subagent_name="codex_final")
     if gh is not None:
         return {**clear_pending, **gh}
 
@@ -1983,7 +2001,8 @@ def rev_codex_final_node(state: WorkflowState) -> dict:
     return {
         "stage": Stage.GATE_3,
         "decisions": state.decisions + [audit],
-        "warnings": state.warnings + guard,
+        "warnings": state.warnings + all_findings,
+        "artifacts": {**state.artifacts, **verified_artifacts},
         "phase_summaries": {**state.phase_summaries, "REV_PHASE_CODEX": phase_summary},
         "gate_results": {**state.gate_results, "Gate 3": gate3},
         "stage_log": _append_log(
