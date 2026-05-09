@@ -1204,11 +1204,15 @@ def planning_dev_consult_node(state: WorkflowState) -> dict:
         recorded_at=now_iso(),
     )
 
+    # NOTE: dev_agent[consult] is read-only (PLANNING_DEV_CONSULT policy) so
+    # verified_artifacts is intentionally discarded — G5_PROVE still ran in
+    # _run_full_guard_check and caught any false artifact_updates claim, but
+    # we must not merge into state.artifacts because doing so would clobber
+    # written_by/written_at metadata from the real writer (planner/pm_agent).
     return {
         "stage": Stage.PLANNING_PHASE,
         "decisions": state.decisions + [audit],
         "warnings": state.warnings + all_findings,
-        "artifacts": {**state.artifacts, **verified_artifacts},
         "planning_consultation_round": next_round_index,
         "planning_consultations": state.planning_consultations + [record],
         "stage_log": _append_log(
@@ -1716,10 +1720,13 @@ def dev_codex_review_node(state: WorkflowState) -> dict:
         review_reasons=review_reasons,
     )
 
+    # NOTE: codex_reviewer is read-only (CODEX_REVIEW policy); verified_artifacts
+    # is dropped on purpose. G5_PROVE already verified any artifact_updates claim
+    # against disk during _run_full_guard_check; merging here would overwrite
+    # the dev_agent-written artifact metadata for the same key.
     return {
         "decisions": state.decisions + [audit],
         "warnings": state.warnings + all_findings,
-        "artifacts": {**state.artifacts, **verified_artifacts},
         "subtask_results": {**state.subtask_results, subtask.task_id: merged},
         "stage_log": _append_log(
             state,
@@ -1998,11 +2005,14 @@ def rev_codex_final_node(state: WorkflowState) -> dict:
         file_path=decision_file_path,
     )
 
+    # NOTE: codex_final is read-only (CODEX_REVIEW policy); verified_artifacts
+    # is dropped here. G5_PROVE during _run_full_guard_check still flags any
+    # claim about non-existent files; merging would overwrite rev_agent's
+    # written_by/written_at on rev_report / acceptance_checklist.
     return {
         "stage": Stage.GATE_3,
         "decisions": state.decisions + [audit],
         "warnings": state.warnings + all_findings,
-        "artifacts": {**state.artifacts, **verified_artifacts},
         "phase_summaries": {**state.phase_summaries, "REV_PHASE_CODEX": phase_summary},
         "gate_results": {**state.gate_results, "Gate 3": gate3},
         "stage_log": _append_log(

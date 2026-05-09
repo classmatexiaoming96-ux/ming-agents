@@ -540,7 +540,7 @@ planner 的 question **正文**不进 state——只把它存盘的 decision-fil
 
 | 严重度 | 第一次发生 | 第二次仍失败 |
 |---|---|---|
-| severe | **不立刻 BLOCKED**——先调度一次"带 hint 重试":`state.pending_guard_retry` 写入失败 findings,`state.guard_retries[<stage>:<subagent>]++`,stage 保持不变,LangGraph 条件边把控制权送回**同一个 dispatch 节点**;下次进入该节点,dispatch_payload 会挂 `guard_failure_hint` 把 findings 透传给 subagent;**`stage_log` 末位同时 append note** `guard-retry-pending:<subagent>:[<check_ids>] attempt=<N>/<MAX>`(graph.py line 528-530 实现),audit replay 可凭这条 note 识别"首次 severe 已触发带 hint 重试"路径,跟下一格的 `guard-blocked:...` 终止 note 形成"重试 → 仍失败 → BLOCKED" 完整事件轨迹 | `stage = BLOCKED`,`warnings` 再追加,`stage_log` 末位 note `guard-blocked:<subagent>:[<ids>] (after 1 retry)`,后继边短路到 END |
+| severe | **不立刻 BLOCKED**——先调度一次"带 hint 重试":`state.pending_guard_retry` 写入失败 findings,`state.guard_retries[<stage>:<subagent>:r<retry_count>]++`,stage 保持不变,LangGraph 条件边把控制权送回**同一个 dispatch 节点**;下次进入该节点,dispatch_payload 会挂 `guard_failure_hint` 把 findings 透传给 subagent;**`stage_log` 末位同时 append note** `guard-retry-pending:<subagent>:[<check_ids>] attempt=<N>/<MAX>`(graph.py line 528-530 实现),audit replay 可凭这条 note 识别"首次 severe 已触发带 hint 重试"路径,跟下一格的 `guard-blocked:...` 终止 note 形成"重试 → 仍失败 → BLOCKED" 完整事件轨迹 | `stage = BLOCKED`,`warnings` 再追加,`stage_log` 末位 note `guard-blocked:<subagent>:[<ids>] (after 1 retry)`,后继边短路到 END |
 | minor | `warnings` 追加一条,workflow 正常推进到下一个节点;不影响 stage | (同上,minor 不触发重试) |
 
 **G5_DECL / G5_PROVE 派发到上表的方式**:
@@ -552,7 +552,7 @@ planner 的 question **正文**不进 state——只把它存盘的 decision-fil
 | G5_PROVE — sha 不匹配 | 文件存在但 orch 算的 sha256 ≠ subagent 声明的 sha | 轻微 → 写 minor warning,workflow 推进(`state.artifacts[K].sha256` 用 orch 算的真值,subagent 声明被覆盖) |
 | G5_PROVE — 未知 key | subagent 声明 `artifact_updates[K]` 但 K 不在 `artifact_paths` 字典(orch 在 cmd_start 时没给该 key 分配路径) | 轻微 → 写 minor warning(detail `artifact key 'K' not in artifact_paths — orch can't verify`),workflow 推进(state.artifacts **不写 K**,orch 没路径可读;graph.py line 587-596 实现) |
 
-**重试上限**:`GUARD_RETRY_LIMIT = 1`(每个 `<stage>:<subagent_name>` 独立计数,K=1 一次重试机会)。
+**重试上限**:`GUARD_RETRY_LIMIT = 1`(每个 `<stage>:<subagent_name>:r<retry_count>` 独立计数,K=1 一次重试机会;`retry_count` 段保证 rollback 后该 subagent 拿到新 budget)。
 
 **计数键的粒度**:同一阶段不同 subagent 各自计数;DEV 内部 per-subTask 也是 `dev_agent[T-001]` / `codex_reviewer[T-001]` / `dev_agent[T-002]` 各一个键独立计数,所以 T-001 用尽重试不会影响 T-002 的额度。**完整 subagent_name 命名约定**(graph.py 各 dispatch 节点的 `_consume_pending_retry` subagent_name 参数):`pm_agent`(PM_PHASE) / `planner`(PLANNING_PHASE) / `dev_agent[consult]`(PLANNING_PHASE 咨询模式专用,跟 PM-Dev 协商章节"Hermes-side IM 同步"段的"stage 字段标注语义"一致,graph.py line 1108) / `dev_agent[<task_id>]` 与 `codex_reviewer[<task_id>]`(DEV per-subTask) / `rev_agent`(REV_PHASE) / `codex_final`(REV_PHASE 第二段)—— 这些就是 `state.guard_retries` 和 `pending_guard_retry.subagent` 字段实际看到的字符串集合。用户验证 `state.guard_retries` 看到 `PLANNING_PHASE:dev_agent[consult]` 时,`[consult]` 后缀表示这是协商模式的额度,跟 `dev_agent[T-001]` 等 DEV 模式额度独立。
 
@@ -680,7 +680,7 @@ scripts/workflows/<wid>/
 | `result_file` 里的 `state.gate_results[<gate>]` | 应**逐字**等于 subagent 给的 gate_result(代表 subagent 自己的声明,不是用户的最终批准)。**例外**:`state.gate_results["Gate 2"]` 是 orch 合成的(graph.py line 1473-1483 dev_loop_router 队列耗尽时根据 `all(r.review_passed for r in state.subtask_results.values())` 聚合 + `reasons` 拼出"subtask {sid} codex review failed" 列表),**不是**任何单一 subagent 的 verbatim claim——跟 `phase_summaries["DEV_PHASE"]` 是 synthetic-aggregate 同一类设计(N 个 codex_reviewer 没法产单一 gate_result,orch 必须聚合)。verbatim 来源在 `state.subtask_results[sid].review_passed` 与 `state.subtask_results[sid].review_reasons` —— 想审计某 subtask 的 codex 真实判定要查这两个字段,不要从合成 Gate 2 反推。其余 4 个 keys(`"Gate 1"` / `"Gate 1.5"` / `"Gate 3 - rev_agent"` / `"Gate 3"`)都仍是 verbatim subagent claim |
 | `result_file` 里的 `state.retry_count` / `rollback_counts` | rollback 一次就 +1,无 rollback 时为 0 / 空 dict |
 | `result_file` 里的 `state.warnings` | append-only;每次 dispatch 后只增不减,即便 subagent 返回完美也会保留历史 minor。**末位 `severity=severe` 不再等同于 BLOCKED**——如果只是首次 severe,workflow 正在 retry 中(看 `state.pending_guard_retry` 是否非 null);只有当 retry 也失败、`stage_log` 末位是 `guard-blocked:...` 才进入 BLOCKED |
-| `result_file` 里的 `state.guard_retries` | 每个 `<stage>:<subagent>` 键独立累加;append-only(BLOCKED 也保留)。出现 ≥1 表示该 dispatch 被 guard 严重拦截过,可对照 `state.warnings` 里同 stage/subagent 的 severe 条目验证 |
+| `result_file` 里的 `state.guard_retries` | 每个 `<stage>:<subagent>:r<retry_count>` 键独立累加;append-only(BLOCKED 也保留,跨 rollback 历史也保留)。出现 ≥1 表示该 dispatch 被 guard 严重拦截过,可对照 `state.warnings` 里同 stage/subagent 的 severe 条目验证;`r<retry_count>` 段让每轮 rollback 都有独立 budget |
 | `result_file` 里的 `state.pending_guard_retry` | 正常情况下 = `null`。非空时表示当前 dispatch 节点等待 subagent 重交一次结果;字段含 `stage / subagent / attempt / findings`,attempt = `guard_retries[key]`(同步) |
 | `result_file` 里的 `state.planning_consultation_round` / `state.planning_consultations` | 累计内部协商轮数;`continue_planning` 后 round 重置为 0,但 `planning_consultations` 仍保留全历史(不清);每条记录只有 sha + round 索引,无正文 |
 | `result_file` 里的 `state.user_planning_hints` | 每次 GATE_1.5 选 `continue_planning` 给的 hint 文件以 MsgRef 形式 append;字段含 `sha256` / `byte_length` / `text_path`,`sha256sum` 本地 hint 文件应等于这里的值 |
