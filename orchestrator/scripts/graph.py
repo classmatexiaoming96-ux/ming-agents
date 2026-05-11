@@ -1644,7 +1644,7 @@ def dev_codex_review_node(state: WorkflowState) -> dict:
         "type": "subagent_dispatch",
         "stage": "DEV_PHASE",
         "subagent": "codex_reviewer",
-        "skill_path": "shrimp/subagent/codex_reviewer/SKILL.md",
+        "skill_path": "shrimp/subagent/reviewer_agent/SKILL.md",
         "input_payload": {
             "workflow_id": state.workflow_id,
             "current_stage": "DEV_PHASE",
@@ -1826,7 +1826,7 @@ def rev_dispatch_node(state: WorkflowState) -> dict:
         "type": "subagent_dispatch",
         "stage": "REV_PHASE",
         "subagent": "rev_agent",
-        "skill_path": "shrimp/subagent/rev_agent/SKILL.md",
+        "skill_path": "shrimp/subagent/reviewer_agent/SKILL.md",
         "input_payload": {
             "workflow_id": state.workflow_id,
             "current_stage": "REV_PHASE",
@@ -1926,7 +1926,7 @@ def rev_codex_final_node(state: WorkflowState) -> dict:
         "type": "subagent_dispatch",
         "stage": "REV_PHASE",
         "subagent": "codex_final",
-        "skill_path": "shrimp/subagent/codex_reviewer/SKILL.md",
+        "skill_path": "shrimp/subagent/reviewer_agent/SKILL.md",
         "input_payload": {
             "workflow_id": state.workflow_id,
             "current_stage": "REV_PHASE",
