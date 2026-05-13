@@ -50,10 +50,12 @@ class IdeaRefiner:
     ]
 
     def __init__(self, raw_content: str = "", doc_type: str = "",
+                 input_sources: list = None,
                  orchestrator_mark: dict = None,
                  workspace: str = "/root/.openclaw/workspace"):
         self.raw_content = raw_content or ""
         self.doc_type = doc_type
+        self.input_sources = input_sources or []
         self.orchestrator_mark = orchestrator_mark or {}
         self.workspace = workspace
         self.idea_refinement_md = ""
@@ -74,8 +76,13 @@ class IdeaRefiner:
         word_count = len(content)
 
         if word_count == 0:
-            # 无输入内容，默认进入 idea-refine
-            return True
+            # 无 raw_content 时,仅在没有任何 input_sources 的情况下才进 idea-refine。
+            # 注意: 通过 --input-sources code_repository --repos ... 等命令行调用
+            # 通常没有显式 raw_content,但 input_sources 非空,不应被强行送入 idea-refine。
+            if not self.input_sources:
+                return True
+            # 有 input_sources -> 跳过 idea-refine, 走正常 fetch/render/publish 路径
+            return False
 
         if word_count < 200:
             # 条件3: 无明确输入源（以是否含 URL/文件路径 判断）
@@ -277,6 +284,7 @@ class DocOutput:
         refiner = IdeaRefiner(
             raw_content=self.raw_content,
             doc_type=self.doc_type,
+            input_sources=self.input_sources,
             orchestrator_mark=self.orchestrator_mark,
             workspace=self.workspace
         )
