@@ -109,20 +109,49 @@ description: |
 
 ## 前置条件：白板创建
 
-`design-lark-chart` skill **依赖一个已存在的飞书画板**。
+`design-lark-chart` skill **依赖一个已存在的飞书画板**。`lark-cli whiteboard` 子命令只有 `+query` 和 `+update`，没有独立的 `+create`，因此画板必须先以"空白占位"形式被创建出来，拿到 `whiteboard_token` 后再 `+update` 填内容。两条创建路径：
 
-由于 `lark-cli whiteboard` 目前只有 `+query` 和 `+update` 命令（没有 `+create`），
-使用 skill 前需要用户手动创建一个空白白板：
+### 路径 A：用户手动创建（适合临时/单张图）
 
 1. 打开 https://bytedance.larkoffice.com
 2. 新建 → 画板 → 空白画板
-3. 创建完成后，把白板 URL 发给 AI
+3. 把白板 URL 或 token 发给 AI
 
-**白板 URL 示例**: `https://bytedance.larkoffice.com/suite/board/BsxrdXXXXXX`
+URL 示例：`https://bytedance.larkoffice.com/suite/board/BsxrdXXXXXX`，AI 从中提取 token 后走 `+update --input_format mermaid` 填内容。
 
-AI 会从 URL 中提取白板 token，然后走 `+update --input_format mermaid` 把 Mermaid 内容写入白板。
+### 路径 B：docx-inline 自动创建（适合工作流批量补图，推荐）
 
-> 若用户未提供白板 URL，skill 无法执行 Deliver 步骤，需暂停等待用户提供。
+在一个已有 docx 文档里通过 `lark-cli docs +update` 写入飞书的 inline 占位标签，docx 后台会自动分配新画板并把 `<whiteboard token="..."/>` 嵌入正文：
+
+```bash
+# 1. 在 docx 末尾追加一个空白画板占位
+lark-cli docs +update --doc <doc_token> --mode append \
+  --markdown '<whiteboard type="blank"></whiteboard>' --as bot
+
+# 2. 重新 fetch docx，定位新增的 <whiteboard token="..."/>
+lark-cli docs +fetch --doc <doc_token> --as bot
+# 把新出现的 whiteboard token 提取出来
+
+# 3. 用新 token 填 mermaid
+lark-cli whiteboard +update --whiteboard-token <new_token> \
+  --input_format mermaid --source @./diagram.mmd --overwrite --as bot
+```
+
+这条路径已在 `shrimp/subagent/doc_output/chart_publisher.py` 中封装。 `ChartPublisher.publish_chart(doc_token, chart_code, mermaid_source, chart_type)` 完整覆盖"前后对比 fetch 抽 token → push mermaid → round-trip verify"四步。
+
+> 不论走哪条路径，都需要后续 `+update` 与 `+query` 步骤 — bot scope 见下节。
+
+### Bot scope 要求（实测最小集，cli_a955febfcaf89cb5 系列 app 已验证）
+
+| Scope | 用途 | 何时必需 |
+|---|---|---|
+| `docs:document` (write) | `docs +create` / `docs +update` | 路径 B 创建空白画板占位 |
+| `docs:document` (read) | `docs +fetch` 抽 whiteboard token | 路径 B 拿新 token |
+| `board:whiteboard:node:create` | `whiteboard +update`（向画板写节点） | 两条路径都必需 |
+| `board:whiteboard:node:read` | `whiteboard +query --output_as code|image` | Gate B round-trip + PNG 导出 |
+| `wiki:wiki:readonly` | 读 wiki 形态的文档 | 仅当目标文档是 wiki 而非 docx |
+
+> 缺 `node:create` 报 `99991672 board:whiteboard:node:create required`；缺 `node:read` 报 `99991672 board:whiteboard:node:read required`；这两条都跟 `field validation`（99992402）系列错误无关，不要混淆诊断方向。
 
 ## 管道
 
