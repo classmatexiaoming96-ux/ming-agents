@@ -120,12 +120,14 @@ class FakeChartPublisher:
         self.next_result = None  # Either a PublishResult, or an Exception to raise
         self.results_for_code = {}  # code -> PublishResult or Exception
 
-    def publish_chart(self, doc_token, chart_code, mermaid_source, chart_type):
+    def publish_chart(self, doc_token, chart_code, mermaid_source, chart_type,
+                      position="append"):
         self.calls.append({
             "doc_token": doc_token,
             "chart_code": chart_code,
             "chart_type": chart_type,
             "mermaid_source": mermaid_source,
+            "position": position,
         })
         if chart_code in self.results_for_code:
             r = self.results_for_code[chart_code]

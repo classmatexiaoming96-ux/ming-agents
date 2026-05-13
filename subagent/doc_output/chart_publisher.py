@@ -42,7 +42,8 @@ class PublishResult:
 
 
 class LarkCliClient(Protocol):
-    def docs_update(self, doc_token: str, markdown: str, mode: str) -> dict: ...
+    def docs_update(self, doc_token: str, markdown: str, mode: str,
+                    selection_with_ellipsis: Optional[str] = None) -> dict: ...
     def docs_fetch(self, doc_token: str) -> str: ...
     def whiteboard_update(self, whiteboard_token: str, source_relpath: str, cwd: Path) -> dict: ...
     def whiteboard_query_code(self, whiteboard_token: str) -> str: ...
@@ -69,14 +70,18 @@ class RealLarkCliClient:
             )
         return _parse_lark_json(proc.stdout)
 
-    def docs_update(self, doc_token: str, markdown: str, mode: str) -> dict:
-        return self._run([
+    def docs_update(self, doc_token: str, markdown: str, mode: str,
+                    selection_with_ellipsis: Optional[str] = None) -> dict:
+        args = [
             "lark-cli", "docs", "+update",
             "--doc", doc_token,
             "--mode", mode,
             "--markdown", markdown,
             "--as", self.identity,
-        ])
+        ]
+        if selection_with_ellipsis is not None:
+            args.extend(["--selection-with-ellipsis", selection_with_ellipsis])
+        return self._run(args)
 
     def docs_fetch(self, doc_token: str) -> str:
         result = self._run([
@@ -141,8 +146,17 @@ class ChartPublisher:
         chart_code: str,
         mermaid_source: str,
         chart_type: str,
+        position: str = "append",
     ) -> PublishResult:
-        """Append a new whiteboard to the docx and fill it with the mermaid source.
+        """Insert a new whiteboard into the docx and fill it with the mermaid source.
+
+        Args:
+            position: "append" (default, v2.3 back-compat) → whiteboard appended at doc end
+                      under a new `### {chart_code}` heading.
+                      "inline" (v2.5+) → whiteboard inserted **right after** its
+                      `<!-- chart: D-XXX -->` annotation (next to the original mermaid block),
+                      addressing the "图集 dumped at doc-end" anti-pattern. The annotation
+                      must already exist in the doc (placed there by template_engine.annotate_mermaid_blocks).
 
         Returns a PublishResult including roundtrip verification status.
         """
@@ -150,9 +164,23 @@ class ChartPublisher:
             raise ChartPublishError(
                 f"unsupported chart_type {chart_type!r}; supported: {sorted(self.SUPPORTED_TYPES)}"
             )
+        if position not in {"append", "inline"}:
+            raise ChartPublishError(
+                f"unsupported position {position!r}; supported: 'append', 'inline'"
+            )
 
-        anchor = f"\n\n### {chart_code}\n\n<whiteboard type=\"blank\"></whiteboard>\n"
-        update_response = self.client.docs_update(doc_token, anchor, mode="append")
+        if position == "inline":
+            # Insert immediately after the annotation comment line that names this chart.
+            # Annotation is unique per chart_code by convention (1 D-ARCH per doc, etc.).
+            update_response = self.client.docs_update(
+                doc_token,
+                '<whiteboard type="blank"></whiteboard>',
+                mode="insert_after",
+                selection_with_ellipsis=f"<!-- chart: {chart_code} -->",
+            )
+        else:
+            anchor = f"\n\n### {chart_code}\n\n<whiteboard type=\"blank\"></whiteboard>\n"
+            update_response = self.client.docs_update(doc_token, anchor, mode="append")
 
         whiteboard_token = self._extract_new_token(update_response)
         if whiteboard_token is None:
@@ -193,12 +221,84 @@ class ChartPublisher:
             diff=roundtrip.get("diff"),
         )
 
-    def verify_chart(self, whiteboard_token: str, expected_mermaid: str) -> dict:
+    def fill_existing_whiteboard(
+        self,
+        whiteboard_token: str,
+        chart_code: str,
+        chart_type: str,
+        mermaid_source: str,
+    ) -> PublishResult:
+        """Fill an already-existing (auto-created) Feishu whiteboard with mermaid content.
+
+        Used by `feishu_publisher.publish_with_charts(position="auto")` when Feishu's
+        ``docs +create`` has already turned each ```mermaid``` source block into an
+        inline ``<whiteboard token=.../>`` blank placeholder at the right document
+        position. We just push mermaid + round-trip; the create step is skipped.
+        """
+        if chart_type not in self.SUPPORTED_TYPES:
+            raise ChartPublishError(
+                f"unsupported chart_type {chart_type!r}; supported: {sorted(self.SUPPORTED_TYPES)}"
+            )
+
+        mmd_relpath = f"_chart_{uuid.uuid4().hex[:8]}.mmd"
+        mmd_path = self.workspace_dir / mmd_relpath
+        try:
+            mmd_path.write_text(mermaid_source, encoding="utf-8")
+            push_result = self.client.whiteboard_update(
+                whiteboard_token=whiteboard_token,
+                source_relpath=f"./{mmd_relpath}",
+                cwd=self.workspace_dir,
+            )
+        finally:
+            mmd_path.unlink(missing_ok=True)
+
+        push_data = push_result.get("data") if "data" in push_result else push_result
+        node_id = push_data.get("created_node_id")
+
+        roundtrip = self.verify_chart(whiteboard_token, mermaid_source)
+        return PublishResult(
+            chart_code=chart_code,
+            chart_type=chart_type,
+            whiteboard_token=whiteboard_token,
+            node_id=node_id,
+            roundtrip_ok=roundtrip["ok"],
+            diff=roundtrip.get("diff"),
+        )
+
+    def verify_chart(self, whiteboard_token: str, expected_mermaid: str,
+                     retry_delays: tuple = (0, 2, 5)) -> dict:
         """Round-trip read the whiteboard and compare to expected source.
 
-        Returns {"ok": bool, "diff": Optional[str], "remote": str}.
+        Feishu sometimes returns "data is not ready" / "doc is applying" right
+        after a write — we retry the query with delays before giving up
+        (per design-lark-chart skill 06-quality-gates.md).
+
+        Args:
+            retry_delays: list of seconds to sleep before each query attempt.
+                          Default (0, 2, 5) = try immediately, then 2s, then 5s.
+
+        Returns: {"ok": bool, "diff": Optional[str], "remote": str}
         """
-        remote = self.client.whiteboard_query_code(whiteboard_token)
+        import time
+        remote = None
+        last_err = None
+        for i, delay in enumerate(retry_delays):
+            if delay:
+                time.sleep(delay)
+            try:
+                remote = self.client.whiteboard_query_code(whiteboard_token)
+                break
+            except ChartPublishError as e:
+                msg = str(e)
+                # Only retry on the "data not ready" transient errors
+                if "data is not ready" in msg or "doc is applying" in msg:
+                    last_err = e
+                    continue
+                raise
+        if remote is None:
+            raise last_err or ChartPublishError(
+                f"verify_chart exhausted {len(retry_delays)} retries for {whiteboard_token}"
+            )
         if remote == expected_mermaid:
             return {"ok": True, "diff": None, "remote": remote}
         diff = _line_diff(expected_mermaid, remote)

@@ -518,6 +518,7 @@ class DocOutput:
 
         result = publisher.publish_with_charts(
             title=title, content=content, chart_publisher=charter,
+            position=self.options.get("chart_position", "append"),
         )
         n_ok = len(result["chart_results"])
         n_skip = len(result["skipped"])

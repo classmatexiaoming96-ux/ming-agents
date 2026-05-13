@@ -59,9 +59,100 @@ def extract_upgradable_charts(markdown: str) -> list:
     return out
 
 
+def extract_all_annotated_charts(markdown: str) -> list:
+    """Like extract_upgradable_charts but returns ALL annotated mermaid blocks
+    regardless of chart code. Used by position="auto" path because Feishu's
+    docs +create auto-converts every mermaid fence into an inline whiteboard
+    blank — we have to pair ALL blanks to ALL annotated sources by document
+    order, otherwise the count-mismatch makes pairing skew the mapping.
+    """
+    return [
+        (m.group(1), m.group(2) + "\n")
+        for m in _CHART_BLOCK_RE.finditer(markdown)
+    ]
+
+
 def _extract_doc_token(url: str) -> Optional[str]:
     match = _DOC_TOKEN_RE.search(url)
     return match.group(1) if match else None
+
+
+# Match the full annotated mermaid block:
+#   group(1): the chart code (D-ARCH / D-SEQ / D-DAG / ...)
+#   group(2): mermaid body (without fences)
+# Plus we capture the line index by walking the markdown.
+_ANNOTATED_BLOCK_RE = re.compile(
+    r"<!--\s*chart:\s*(D-[A-Z]+)\s*-->\s*\n```mermaid\n(.*?)\n```",
+    re.DOTALL,
+)
+
+# A caption line right after the closing ``` fence:
+#   > 图说明：xxx
+_CAPTION_RE = re.compile(r"^\s*>\s*图说明[:：]")
+
+
+def validate_chart_prose_interleaving(markdown: str) -> list:
+    """Check each annotated mermaid block has prose-before + caption-after.
+
+    Enforces the "图文交织" convention (pm_agent G1.5.10):
+    - The line immediately before `<!-- chart: D-XXX -->` should NOT be a
+      section heading (#/##/###) or blank — i.e., at least one prose/table
+      line should sit just above the annotation to give context.
+    - The line immediately after the closing ``` fence should start with
+      `> 图说明:` (full-width or half-width colon), per TEMPLATES.md §0.6.
+
+    Returns a list of warning records:
+      [{"chart_code": "D-ARCH", "line": <1-based>, "reason": "<short msg>"}, ...]
+    Empty list ⇒ clean.
+    """
+    warnings = []
+    lines = markdown.splitlines()
+    for m in _ANNOTATED_BLOCK_RE.finditer(markdown):
+        chart_code = m.group(1)
+        annotation_pos = m.start()
+        # Find which line the annotation sits on (1-based)
+        annotation_line_idx = markdown.count("\n", 0, annotation_pos)
+        # Prose-before check: scan upward past blank lines for the first non-blank
+        prev = annotation_line_idx - 1
+        while prev >= 0 and not lines[prev].strip():
+            prev -= 1
+        if prev < 0:
+            warnings.append({
+                "chart_code": chart_code,
+                "line": annotation_line_idx + 1,
+                "reason": "no prose line before annotation (block at top of doc)",
+            })
+        elif lines[prev].lstrip().startswith("#"):
+            warnings.append({
+                "chart_code": chart_code,
+                "line": annotation_line_idx + 1,
+                "reason": f"annotation directly follows a heading "
+                          f"({lines[prev].strip()[:30]!r}); add ≥1 prose line in between",
+            })
+        # Caption-after check
+        # The closing ``` fence is at m.end()-3 (...```). Find what's on the next line.
+        end_pos = m.end()
+        # Skip the newline after ```, then take the next non-blank line
+        if end_pos >= len(markdown):
+            warnings.append({
+                "chart_code": chart_code,
+                "line": annotation_line_idx + 1,
+                "reason": "no `> 图说明:` caption after block (block at end of doc)",
+            })
+            continue
+        caption_line_idx = markdown.count("\n", 0, end_pos) + 1  # 0-based
+        # Walk forward skipping blank lines
+        while caption_line_idx < len(lines) and not lines[caption_line_idx].strip():
+            caption_line_idx += 1
+        if caption_line_idx >= len(lines) or not _CAPTION_RE.match(lines[caption_line_idx]):
+            actual = lines[caption_line_idx][:30] if caption_line_idx < len(lines) else "<EOF>"
+            warnings.append({
+                "chart_code": chart_code,
+                "line": annotation_line_idx + 1,
+                "reason": f"missing `> 图说明:` caption right after block "
+                          f"(got {actual!r})",
+            })
+    return warnings
 
 
 class FeishuPublisher:
@@ -150,14 +241,15 @@ class FeishuPublisher:
     
     def publish_with_charts(self, title: str, content: str,
                             chart_publisher,
-                            folder_token: Optional[str] = None) -> dict:
+                            folder_token: Optional[str] = None,
+                            position: str = "append") -> dict:
         """发布到飞书 + 自动把 D-ARCH/D-SEQ/D-DAG mermaid 块升级为可交互画板。
 
         步骤:
           1. 走原 publish() 拿到 URL
           2. 从 URL 提取 doc_token (默认飞书 docx URL 格式)
           3. 调 extract_upgradable_charts() 扫出需升级的 (chart_code, mermaid) 列表
-          4. 对每个 chart 调 chart_publisher.publish_chart()
+          4. 对每个 chart 调 chart_publisher.publish_chart(position=position)
           5. 单个 chart 失败不中断其它 chart 的发布 (best-effort)
 
         Args:
@@ -165,6 +257,9 @@ class FeishuPublisher:
             content: Markdown 内容(应包含 ``<!-- chart: D-XXX -->`` 标注的 mermaid 块)
             chart_publisher: ChartPublisher 实例
             folder_token: 飞书文件夹 token (可选)
+            position: "append" (v2.3 默认,向后兼容) → 画板追加到文档末尾;
+                      "inline" (v2.5+) → 画板插入到对应 ``<!-- chart: D-XXX -->`` 注释
+                      之后(紧邻原 mermaid 块),解决"图集 dump 在文末"问题。
 
         Returns:
             dict with:
@@ -189,13 +284,63 @@ class FeishuPublisher:
             )
             return result
 
-        for code, mermaid_body in extract_upgradable_charts(content):
+        # position="auto" pairs ALL annotated blocks to Feishu's auto-created whiteboards
+        # (Feishu converts every mermaid block, regardless of D-XXX code, into an
+        # inline blank). Filtering to D-ARCH/D-SEQ/D-DAG only causes count mismatch
+        # and skewed pairing. Other positions still respect the upgrade filter.
+        if position == "auto":
+            upgradables = extract_all_annotated_charts(content)
+        else:
+            upgradables = extract_upgradable_charts(content)
+
+        if position == "auto":
+            # v2.5+: Feishu's `docs +create` 自动把每个 ```mermaid``` 块转成
+            # 一个内联 `<whiteboard token=.../>` 空白占位 — 已经"图文并茂"地放在
+            # 原 mermaid 块的位置上。所以我们不再"另建空白板+ append",
+            # 而是 fetch 已发布 docx, 抽 inline tokens (按文档先后顺序), 配对
+            # upgradables 列表逐个 fill。
+            try:
+                published_md = chart_publisher.client.docs_fetch(doc_token)
+            except Exception as e:
+                # Without fetch we can't enumerate the auto-created blanks; abort upgrade
+                result["skipped"].append(("*", f"docs +fetch failed: {e}"))
+                return result
+            existing_tokens = [
+                m.group(1) for m in re.finditer(
+                    r'<whiteboard\b[^>]*\btoken="([^"]+)"', published_md
+                )
+            ]
+            if len(existing_tokens) < len(upgradables):
+                result["skipped"].append((
+                    "*",
+                    f"Feishu auto-created only {len(existing_tokens)} whiteboards "
+                    f"but {len(upgradables)} upgradable mermaid blocks "
+                    f"were found in source — pairing skipped to avoid mismatch",
+                ))
+                return result
+            for (code, mermaid_body), wb_token in zip(upgradables, existing_tokens):
+                try:
+                    publish_result = chart_publisher.fill_existing_whiteboard(
+                        whiteboard_token=wb_token,
+                        chart_code=code,
+                        chart_type=_CHART_CODE_TYPE[code],
+                        mermaid_source=mermaid_body,
+                    )
+                    result["chart_results"].append(publish_result)
+                except Exception as e:
+                    print(f"[FeishuPublisher] chart {code} 填充失败: {e}", file=sys.stderr)
+                    result["skipped"].append((code, f"fill_existing_whiteboard failed: {e}"))
+            return result
+
+        # Legacy position="append" / "inline" path — kept for back-compat
+        for code, mermaid_body in upgradables:
             try:
                 publish_result = chart_publisher.publish_chart(
                     doc_token=doc_token,
                     chart_code=code,
                     mermaid_source=mermaid_body,
                     chart_type=_CHART_CODE_TYPE[code],
+                    position=position,
                 )
                 result["chart_results"].append(publish_result)
             except Exception as e:

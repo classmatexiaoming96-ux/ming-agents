@@ -61,6 +61,8 @@ dependencies:
 5. **遵循 SUBAGENT_RECORD_PROTOCOL** — 返回格式必须包含 tag/line/node/goal_status/next_role
 6. **SPEC.md 是 pm-n2 的强制输出** — 所有模块必须有 CONTRACT/EDGE/ERROR/TEST 条款
 7. **task_breakdown.md 是 plan-n1 的强制输出** — 所有 sub-task 必须有 rollback_plan + failure_hypothesis
+8. **图表强制 Mermaid，禁止 ASCII art** — 所有架构图 / 时序图 / 流程图 / 状态机 / 类图 / 模块依赖 DAG **必须**用 ` ```mermaid ``` ` 围栏。禁止用 `┌─┐│└─┘▼` 字符画图（这类图在飞书 docx 渲染为等宽文字块，无法交互、无法被 chart_publisher 升级为可交互画板）。骨架与图代号映射见 `subagent/doc_output/references/TEMPLATES.md §0`；评审参考标准模板：`wikcnSeuhhO00BBpYwl22cL5zoh`（"多画图，少写字"原则）
+9. **图与文交织，禁止图集 dump** — 每个章节内部按"叙述 → 图 → 说明 → 表"顺序铺陈；禁止把全部图集中在文末一个"图表"节。每张 mermaid 块前必须有 ≥1 段叙述上下文，后面紧跟 1 行 `> 图说明：...` caption。在 tech_review §2 整体架构 / module_plan §依赖图 / SPEC §数据模型 等关键节，**图与文必须穿插**
 
 ---
 
@@ -163,11 +165,17 @@ PM-Agent
 | G1.5.4 | SPEC.md 存在且 7 个强制字段齐全 | 7 个字段全部存在 | 严重 |
 | G1.5.5 | task_breakdown.md 存在且 rollback_plan 覆盖率 ≥ 80% | ≥ 80% | 严重 |
 | G1.5.6 | 每个 sub-task 有 failure_hypothesis | 100% | 严重 |
-| G1.5.7 | tech_review.md 含 ≥ 2 个 mermaid 块（建议 D-ARCH + D-SEQ） | grep ` ```mermaid` ≥ 2 | **轻微（warning，不阻塞）** |
-| G1.5.8 | module_plan.md 含 ≥ 1 个 mermaid `flowchart`/`graph` 块（D-DAG） | grep ` ```mermaid\n(flowchart\|graph)` ≥ 1 | **轻微（warning）** |
+| G1.5.7 | tech_review.md 含 ≥ 2 个 mermaid 块（建议 D-ARCH + D-SEQ） | grep ` ```mermaid` ≥ 2 | **中等（fail-with-hint，单次重试）** |
+| G1.5.8 | module_plan.md 含 ≥ 1 个 mermaid `flowchart`/`graph` 块（D-DAG） | grep ` ```mermaid\n(flowchart\|graph)` ≥ 1 | **中等（fail-with-hint，单次重试）** |
 | G1.5.9 | SPEC.md 含 ≥ 1 个 mermaid `classDiagram`/`erDiagram`/`stateDiagram` 块（D-CLASS 或 D-STATE） | grep 命中 ≥ 1 | **轻微（warning）** |
+| G1.5.10 | 关键章节图与文交织（非"末尾图集"） | tech_review §2 / module_plan §依赖 / SPEC §数据模型 内部检测 mermaid 块前必有 ≥1 行 prose + 后必有 `> 图说明:` caption | **轻微（warning）** |
+| G1.5.11 | 全文禁止 ASCII art 流程图 | grep 不含 `┌\|└\|│\|─\|▼\|►` 在 ` ``` ` 围栏内 | **中等（fail-with-hint，单次重试）** |
 
-> **G1.5.7~9 的语义**：mermaid 图表完整性为**建议级别**。不达标 → orchestrator 在 `state.warnings` 追加 `mermaid-coverage-missing:<file>` 一行，**不阻塞 Gate 通过**。mermaid 骨架与图代号定义详见 `doc_output/references/TEMPLATES.md §0`（图表使用指引）。
+> **G1.5.7~9 的语义（v2.4 起升级）**：
+> - **G1.5.7 / G1.5.8 / G1.5.11 从 warning 升级为 fail-with-hint**：不达标时 orchestrator 一次性带 hint 重试 dispatch pm-n2，让 pm_agent 重写一版补 mermaid / 把 ASCII 改 mermaid。重试仍失败才落 warning。这把 v2.2 时"轻微 warning 几乎被忽略 → 真实产出 0 mermaid"的回归路径堵死。
+> - **G1.5.9 / G1.5.10 保持 warning**：SPEC.md 类图与"图文交织"是质量增强项，不阻塞主路径。
+> - mermaid 骨架与图代号定义详见 `doc_output/references/TEMPLATES.md §0`（图表使用指引）。
+> - **强制 mermaid 的源头依据**：飞书技术评审标准模板 `wikcnSeuhhO00BBpYwl22cL5zoh` 评审准则 "多画图，少写字" + "对着图讲不要对着文字讲"。ASCII art 等宽块在飞书 docx 渲染为不可交互、不能批注的代码块，与该准则相悖。
 >
 > **画板自动升级（v2.4 起）**：当 `doc_output` 把 `tech_review.md` 等产物发布到飞书 docx 时，会按 `TEMPLATES.md §0` v2.4.0 升级规则**自动**把 D-ARCH/D-SEQ/D-DAG 三类 mermaid 块升级为可交互的飞书画板（D-CLASS/D-STATE/其它保留 mermaid 原样）。pm_agent 不需要额外做任何事 —— 只要继续按 G1.5.7~9 在 `tech_review.md` 含 ≥2 个 mermaid 块（推荐 D-ARCH + D-SEQ）+ `module_plan.md` 含 ≥1 个 flowchart（D-DAG），doc_output 模块的 `chart_publisher` 链路会接管后续。
 >

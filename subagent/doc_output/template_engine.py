@@ -151,32 +151,98 @@ class TemplateEngine:
         return self._extract_template_section(content, self.doc_type)
     
     def _extract_template_section(self, content: str, doc_type: str) -> str:
-        """从模板文件中提取指定类型的模板"""
-        # 查找模板开始标记
+        """从模板文件中提取指定类型的模板。
+
+        TEMPLATES.md 的节标题既可能是 ``## tech_review（...``(无编号),
+        也可能是 ``## 1. tech_review（...``(带数字编号 + 半角点 + 空格 +
+        中文 doc_type 全角括号开头, e.g. `## 1. tech_review（技术评审文档）`)。
+        旧实现只识别第一种, 导致带数字编号的节(目前 TEMPLATES.md 全部如此)
+        永远 fallback 到默认模板, 富模板里的 `{{include_diagram:D-XXX}}`
+        占位符从未生效。
+        """
+        # 先试无编号形式
         start_marker = f"## {doc_type}（"
-        end_marker = "## "
-        
         start_idx = content.find(start_marker)
+
+        # 再试带编号形式 `## N. doc_type（`
+        if start_idx == -1:
+            numbered_re = re.compile(
+                rf'^##\s+\d+\.\s+{re.escape(doc_type)}（',
+                re.MULTILINE,
+            )
+            match = numbered_re.search(content)
+            if match:
+                start_idx = match.start()
+
         if start_idx == -1:
             return self._get_default_template()
-        
-        # 找到下一个章节的开始
-        next_section = content.find('\n## ', start_idx + 1)
-        if next_section == -1:
+
+        # 找到下一个同级章节的开始 (## 开头, 不含 ###)
+        # 注意: TEMPLATES.md 的每节里都嵌着 ```markdown ... ``` 代码块,
+        # 块内出现的 `## xxx` 是模板示例不是真章节标题, 必须跳过。
+        end_idx = self._find_next_section_outside_fence(content, start_idx + 1)
+        if end_idx == -1:
             template = content[start_idx:]
         else:
-            template = content[start_idx:next_section]
-        
+            template = content[start_idx:end_idx]
+
         return template
+
+    @staticmethod
+    def _find_next_section_outside_fence(content: str, search_start: int) -> int:
+        """Return index of the next `\\n## ` that is *outside* any ``` fence.
+
+        Walks lines from the line *after* search_start, tracking fence state.
+        Returns -1 if no such boundary exists (caller treats as EOF).
+        """
+        # Advance to the start of the next line after search_start
+        first_newline = content.find('\n', search_start)
+        if first_newline == -1:
+            return -1
+        in_fence = False
+        offset = first_newline + 1
+        remaining = content[offset:]
+        for line in remaining.splitlines(keepends=True):
+            line_offset = offset
+            offset += len(line)
+            stripped = line.lstrip()
+            if stripped.startswith('```'):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            if line.startswith('## '):
+                # Return position of \n just before this header
+                return line_offset - 1
+        return -1
     
+    # v2.4 起, 已知 rich doc_type 在 TEMPLATES.md 加载失败时也使用图文交织 skeleton。
+    # 参考飞书技术评审标准模板 (wikcnSeuhhO00BBpYwl22cL5zoh) 的 "多画图,少写字"
+    # 原则,以及 TEMPLATES.md §0.4 的 D-XXX mermaid 骨架。
+    _RICH_FALLBACK_TYPES = {
+        'tech_review', 'design_doc', 'module_plan', 'research_report',
+    }
+
     def _get_default_template(self) -> str:
         """获取默认模板。
+
+        Routing:
+          - doc_type ∈ _RICH_FALLBACK_TYPES → 返回含 mermaid 占位的图文交织骨架
+            (`_get_rich_skeleton_template`), TEMPLATES.md 加载失败时也保证产
+            "图文并茂" 而非 4 节空壳。
+          - 其它 doc_type → 旧的扁平 4 节模板。
 
         注意 {{{{name}}}} 在 f-string 里会被处理为 {{name}}, 留给后续
         _replace_variables 匹配 {{name}} 占位符。早期版本写的是 {{name}}
         (在 f-string 里会塌缩成 {name}, _replace_variables 永远匹配不到),
         导致 overview/details/references 从未被替换。
         """
+        if self.doc_type in self._RICH_FALLBACK_TYPES:
+            return self._get_rich_skeleton_template()
+        return self._get_minimal_default_template()
+
+    def _get_minimal_default_template(self) -> str:
+        """扁平 4 节最小模板, 给未识别 doc_type 用。"""
         title = self._get_doc_title()
         date_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         date_today = datetime.now().strftime('%Y-%m-%d')
@@ -211,7 +277,95 @@ class TemplateEngine:
 |------|------|----------|
 | v1.0 | {date_today} | 初始版本 |
 """
-    
+
+    def _get_rich_skeleton_template(self) -> str:
+        """图文交织 skeleton, 给已知 rich doc_type 用。
+
+        节内顺序: 来源标注 → prose 段 → mermaid 占位 + 图说明 → 表 → mermaid 占位 + 图说明。
+        遵循 wiki 标准模板的 "多画图,少写字" 原则 (wikcnSeuhhO00BBpYwl22cL5zoh)
+        与 TEMPLATES.md §0.6 的 "每图配 1 行说明"。
+
+        `{{{{include_diagram:D-XXX}}}}` 占位由后续 mermaid generator (PM-Agent prompt
+        或人工填写) 替换为实际 ```mermaid 代码块, 然后 template_engine.annotate_mermaid_blocks
+        会按语法挂 `<!-- chart: D-XXX -->`, chart_publisher 升级到飞书画板。
+        """
+        title = self._get_doc_title()
+        date_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        date_today = datetime.now().strftime('%Y-%m-%d')
+        return f"""# {title}
+
+> 生成时间：{date_now}
+> 数据来源：自动融合多个输入源（图文并茂 skeleton, v2.4+）
+
+---
+
+## 1. 需求概述
+
+{{{{overview}}}}
+
+---
+
+## 2. 整体架构
+
+> 章节原则：先 1-2 段叙述上下文，再上架构图，最后用表对齐到组件名。
+
+{{{{details}}}}
+
+### 2.1 架构图
+
+{{{{include_diagram:D-ARCH}}}}
+
+> 图说明：节点 ID 必须与下方"核心组件"表的组件名一致；禁止 ASCII art，禁止重复"核心组件"表已有的字段。
+
+### 2.2 核心组件
+
+| 组件名称 | 职责 | 技术选型 |
+|----------|------|----------|
+| | | |
+
+### 2.3 关键接口时序
+
+{{{{include_diagram:D-SEQ}}}}
+
+> 图说明：挑 1-2 个最关键的接口（主链路写入、跨模块查询等）画时序图；participant 必须复用 2.2 表中组件名。
+
+---
+
+## 3. 模块依赖
+
+{{{{include_diagram:D-DAG}}}}
+
+> 图说明：用 `subgraph Phase*` 区分阶段；节点 = 模块；边 = 输入依赖。失败回退见 TEMPLATES.md §0.4。
+
+---
+
+## 4. 数据模型
+
+> 章节原则：先 1-2 段实体关系叙述，再上类图，最后字段表对齐到实体名。
+
+| 实体名称 | 字段 | 说明 |
+|----------|------|------|
+| | | |
+
+{{{{include_diagram:D-CLASS}}}}
+
+> 图说明：类名与上表实体一致；字段类型用原生类型；关系边标 `1`/`N` 基数。
+
+---
+
+## 5. 参考资料
+
+{{{{references}}}}
+
+---
+
+## 更新记录
+
+| 版本 | 日期 | 更新内容 |
+|------|------|----------|
+| v1.0 | {date_today} | 初始版本 |
+"""
+
     def _replace_variables(self, template: str) -> str:
         """替换模板变量"""
         # 生成文档标题
