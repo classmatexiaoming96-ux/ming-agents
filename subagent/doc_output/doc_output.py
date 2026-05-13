@@ -85,12 +85,14 @@ class IdeaRefiner:
             return False
 
         if word_count < 200:
-            # 条件3: 无明确输入源（以是否含 URL/文件路径 判断）
+            # 条件3: 无明确输入源 — 同时检查 raw_content 内含 URL/文件路径
+            # 与外部结构化 input_sources。spec (doc-output-idearefin.md:13) 把
+            # 这两者都算"明确输入源",任一存在就不应进 idea-refine。
             has_clear_source = bool(
                 re.search(r'https?://', content) or
                 re.search(r'/[\w\-./]+', content)
             )
-            if not has_clear_source:
+            if not has_clear_source and not self.input_sources:
                 return True
 
             # 条件4: 含模糊词汇
@@ -734,6 +736,11 @@ def build_config_from_args(args) -> dict:
                 config["input_sources"].append({
                     "type": "feishu_doc",
                     "docs": [{"url": url} for url in args.feishu_docs]
+                })
+            elif source_type == "direct" and args.raw_content:
+                config["input_sources"].append({
+                    "type": "direct",
+                    "content": args.raw_content,
                 })
 
     return config

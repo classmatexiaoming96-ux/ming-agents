@@ -117,5 +117,95 @@ class TestParallelFetcherTypePreservation(unittest.TestCase):
         self.assertIn("MERGER_PROOF", merged["overview"])
 
 
+class TestM2IdeaRefineUnder200WordsBranch(unittest.TestCase):
+    """M2: the <200 word branch must honor structured input_sources, not just URL/path heuristic.
+
+    Spec (references/doc-output-idearefin.md:13): "无明确输入源" includes both
+    raw_content URL/path AND structured input_sources. Earlier P1-1 fix only
+    covered the word_count==0 branch.
+    """
+
+    def test_short_raw_with_input_sources_skips_idea_refine(self):
+        """Short non-fuzzy raw (<200 chars, no URL) + structured input_sources → skip refine.
+
+        Phrase deliberately avoids fuzzy-word list (想做 / 大概 / 试试 / etc.) so the only
+        idea-refine trigger candidate is condition 3 (无明确输入源 AND <200);
+        condition 3 must now honor input_sources after the M2 fix.
+        """
+        refiner = IdeaRefiner(
+            raw_content="审计日志聚合分析",  # <200 chars, no URL/path, no fuzzy words
+            doc_type="tech_review",
+            input_sources=[{"type": "code_repository", "repos": [{"path": "."}]}],
+        )
+        self.assertFalse(refiner.is_idea_refine_needed())
+
+    def test_short_raw_no_input_sources_still_triggers_via_condition_3(self):
+        """Same short non-fuzzy content + no input_sources → trigger via condition 3."""
+        refiner = IdeaRefiner(
+            raw_content="审计日志聚合分析",
+            doc_type="tech_review",
+            input_sources=[],
+        )
+        self.assertTrue(refiner.is_idea_refine_needed())
+
+    def test_fuzzy_words_still_trigger_even_with_input_sources(self):
+        """Condition 4 (fuzzy words + <200) stands alone per spec — does NOT honor input_sources.
+
+        Spirit check: even if user provides input_sources, content like "想做个 XXX 试试"
+        signals genuine ambiguity in scope, and idea-refine should still run. This is
+        spec compliance (doc-output-idearefin.md:14), not over-fixing.
+        """
+        refiner = IdeaRefiner(
+            raw_content="想做个 XXX 系统试试",
+            doc_type="tech_review",
+            input_sources=[{"type": "code_repository", "repos": [{"path": "."}]}],
+        )
+        self.assertTrue(refiner.is_idea_refine_needed())
+
+
+class TestM3DirectSourceAndZeroTaskGuard(unittest.TestCase):
+    """M3: --input-sources direct must wire raw_content into a direct source;
+       ParallelFetcher must not crash on 0 tasks.
+    """
+
+    def test_build_config_maps_direct_input_source(self):
+        from doc_output import build_config_from_args
+        import argparse
+        args = argparse.Namespace(
+            doc_type="research_report",
+            raw_content="DIRECT_CLI_CONTENT",
+            input_sources=["direct"],
+            repos=None, feishu_docs=None,
+            output=None, workspace="/tmp",
+            no_feishu=True,
+        )
+        config = build_config_from_args(args)
+        self.assertEqual(len(config["input_sources"]), 1)
+        self.assertEqual(config["input_sources"][0]["type"], "direct")
+        self.assertEqual(config["input_sources"][0]["content"], "DIRECT_CLI_CONTENT")
+
+    def test_build_config_skips_direct_when_raw_content_missing(self):
+        """--input-sources direct without --raw-content → don't append empty source."""
+        from doc_output import build_config_from_args
+        import argparse
+        args = argparse.Namespace(
+            doc_type="research_report",
+            raw_content=None,
+            input_sources=["direct"],
+            repos=None, feishu_docs=None,
+            output=None, workspace="/tmp",
+            no_feishu=True,
+        )
+        config = build_config_from_args(args)
+        # No direct source appended because raw_content is None
+        self.assertEqual(config["input_sources"], [])
+
+    def test_parallel_fetcher_zero_tasks_returns_empty_dict(self):
+        """ParallelFetcher with no input sources should not crash on max_workers=0."""
+        fetcher = ParallelFetcher(input_sources=[], workspace="/tmp")
+        results = fetcher.fetch_all()  # Pre-fix: ValueError; post-fix: {}
+        self.assertEqual(results, {})
+
+
 if __name__ == "__main__":
     unittest.main()

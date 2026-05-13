@@ -66,7 +66,13 @@ class ParallelFetcher:
         
         # 并行执行
         print(f"[ParallelFetcher] 开始并行获取，共 {len(tasks)} 个任务")
-        
+
+        if not tasks:
+            # 防御性短路: ThreadPoolExecutor(max_workers=0) 会抛 ValueError,
+            # 上游 build_config_from_args 可能给出空 input_sources(如未识别的
+            # CLI source_type 全被滤掉),此处保持向上返回空 results dict 而非崩溃。
+            return self.results
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = {}
             for task_id, func, args in tasks:
