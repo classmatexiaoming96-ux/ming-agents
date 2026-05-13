@@ -170,29 +170,38 @@ class TemplateEngine:
         return template
     
     def _get_default_template(self) -> str:
-        """获取默认模板"""
-        return f"""# {self._get_doc_title()}
+        """获取默认模板。
 
-> 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        注意 {{{{name}}}} 在 f-string 里会被处理为 {{name}}, 留给后续
+        _replace_variables 匹配 {{name}} 占位符。早期版本写的是 {{name}}
+        (在 f-string 里会塌缩成 {name}, _replace_variables 永远匹配不到),
+        导致 overview/details/references 从未被替换。
+        """
+        title = self._get_doc_title()
+        date_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        date_today = datetime.now().strftime('%Y-%m-%d')
+        return f"""# {title}
+
+> 生成时间：{date_now}
 > 数据来源：自动融合多个输入源
 
 ---
 
 ## 概述
 
-{{overview}}
+{{{{overview}}}}
 
 ---
 
 ## 详细信息
 
-{{details}}
+{{{{details}}}}
 
 ---
 
 ## 参考资料
 
-{{references}}
+{{{{references}}}}
 
 ---
 
@@ -200,7 +209,7 @@ class TemplateEngine:
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
-| v1.0 | {datetime.now().strftime('%Y-%m-%d')} | 初始版本 |
+| v1.0 | {date_today} | 初始版本 |
 """
     
     def _replace_variables(self, template: str) -> str:

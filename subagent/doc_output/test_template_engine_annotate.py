@@ -123,13 +123,7 @@ class TestAnnotateMermaidBlocks(unittest.TestCase):
 
 
 class TestTemplateEngineRender(unittest.TestCase):
-    """Verify the engine's render() hook calls annotate_mermaid_blocks when enabled.
-
-    Pre-existing bug note: TemplateEngine._get_default_template() uses ``{{name}}``
-    inside an f-string which collapses to ``{name}``, so ``_replace_variables`` then
-    fails to substitute (it matches ``{{name}}``). Fixing that bug is out of scope
-    for this commit; the tests patch ``_load_template`` to inject content directly.
-    """
+    """Verify render() hook calls annotate_mermaid_blocks when enabled."""
 
     _SAMPLE_TEMPLATE_WITH_ARCH = (
         "# Doc\n\n"
@@ -159,6 +153,71 @@ class TestTemplateEngineRender(unittest.TestCase):
         out = self._make_engine(options={"annotate_mermaid": False}).render()
         self.assertNotIn("<!-- chart:", out)
         self.assertIn("flowchart TB", out)
+
+
+class TestDefaultTemplateVariableSubstitution(unittest.TestCase):
+    """Regression test for the f-string bug.
+
+    Pre-fix, ``_get_default_template`` wrote ``{{name}}`` inside an f-string
+    which collapses to ``{name}``, so the subsequent ``_replace_variables``
+    pass (which matches ``{{name}}``) never substituted overview / details /
+    references. These tests pin the fix.
+    """
+
+    def test_overview_is_substituted_through_default_template(self):
+        engine = TemplateEngine(
+            doc_type="design_doc",
+            merged_content={
+                "overview": "OVERVIEW_MARKER_42",
+                "details": {},
+                "references": [],
+            },
+            options={},
+        )
+        # Force default-template path by giving an unknown doc_type — but the engine
+        # still falls back to the default template if extraction fails. Easier: patch
+        # _load_template to return the default template directly.
+        engine._load_template = engine._get_default_template
+        out = engine.render()
+        self.assertIn("OVERVIEW_MARKER_42", out)
+        # No unexpanded placeholders left over
+        self.assertNotIn("{{overview}}", out)
+        self.assertNotIn("{overview}", out)
+
+    def test_details_dict_is_formatted_and_substituted(self):
+        engine = TemplateEngine(
+            doc_type="design_doc",
+            merged_content={
+                "overview": "",
+                "details": {
+                    "模块A": {"type": "code_repository", "content": "DETAILS_MARKER_99"},
+                },
+                "references": [],
+            },
+            options={},
+        )
+        engine._load_template = engine._get_default_template
+        out = engine.render()
+        self.assertIn("DETAILS_MARKER_99", out)
+        # Source-type icon comes through
+        self.assertIn("📦", out)
+
+    def test_references_list_is_substituted(self):
+        engine = TemplateEngine(
+            doc_type="design_doc",
+            merged_content={
+                "overview": "",
+                "details": {},
+                "references": [
+                    {"type": "feishu_doc", "title": "REF_MARKER_7", "url": "https://example/x"},
+                ],
+            },
+            options={},
+        )
+        engine._load_template = engine._get_default_template
+        out = engine.render()
+        self.assertIn("REF_MARKER_7", out)
+        self.assertIn("https://example/x", out)
 
 
 if __name__ == "__main__":
