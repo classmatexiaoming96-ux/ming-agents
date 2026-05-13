@@ -1,0 +1,23 @@
+{
+  "code": 0,
+  "data": {
+    "to": "check",
+    "metadata": {
+      "width": 0,
+      "height": 0,
+      "nodeCount": 42,
+      "connectorCount": 29
+    },
+    "check": {
+      "errors": 0,
+      "warnings": 0,
+      "summary": {
+        "textOverflow": 0,
+        "nodeOverlap": 0,
+        "textOcclusion": 0
+      },
+      "issues": []
+    }
+  },
+  "error": ""
+}

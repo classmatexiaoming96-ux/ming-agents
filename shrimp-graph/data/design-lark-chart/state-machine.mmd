@@ -1,0 +1,30 @@
+stateDiagram-v2
+  [*] --> INIT
+  INIT --> PM_PHASE
+  PM_PHASE --> GATE_1: dispatch pm_agent done
+  PM_PHASE --> BLOCKED: guard severe x2
+  GATE_1 --> PLANNING_PHASE: approve
+  GATE_1 --> PM_PHASE: rollback_to_pm
+  GATE_1 --> BLOCKED: reject / invalid
+  PLANNING_PHASE --> GATE_1_5: done OR exhausted consult
+  PLANNING_PHASE --> PLANNING_PHASE: needs_input + consult
+  PLANNING_PHASE --> BLOCKED: status=blocked / guard severe x2
+  GATE_1_5 --> DEV_PHASE: approve
+  GATE_1_5 --> PM_PHASE: rollback_to_pm
+  GATE_1_5 --> PLANNING_PHASE: continue_planning
+  GATE_1_5 --> BLOCKED: reject / hint violation
+  DEV_PHASE --> GATE_2: 队列耗尽
+  DEV_PHASE --> BLOCKED: guard severe x2
+  GATE_2 --> REV_PHASE: approve
+  GATE_2 --> PLANNING_PHASE: rollback_to_planning
+  GATE_2 --> PM_PHASE: rollback_to_pm
+  GATE_2 --> BLOCKED: reject
+  REV_PHASE --> GATE_3: codex_final done
+  REV_PHASE --> BLOCKED: guard severe x2
+  GATE_3 --> DONE: approve
+  GATE_3 --> DEV_PHASE: rollback_to_dev (清空 subtask_results)
+  GATE_3 --> PLANNING_PHASE: rollback_to_planning
+  GATE_3 --> PM_PHASE: rollback_to_pm
+  GATE_3 --> BLOCKED: reject
+  DONE --> [*]
+  BLOCKED --> [*]
