@@ -29,12 +29,23 @@ _CHART_BLOCK_RE = re.compile(
 # Auto-upgrade scope — keep in sync with TEMPLATES.md §0 v2.4.0
 _UPGRADE_CHART_CODES = frozenset({"D-ARCH", "D-SEQ", "D-DAG"})
 
-# chart_code → chart_type passed to ChartPublisher.publish_chart()
+# chart_code → chart_type passed to ChartPublisher.publish_chart() / fill_existing_whiteboard.
+# position="auto" path iterates all annotated codes, so this map must cover every
+# code annotate_mermaid_blocks() can emit (see template_engine._classify_mermaid_body).
+# Unknown codes fall back to "flowchart" — safe for whiteboard-cli mermaid path.
 _CHART_CODE_TYPE = {
-    "D-ARCH": "flowchart",
-    "D-SEQ": "sequence",
-    "D-DAG": "flowchart",
+    "D-ARCH":     "flowchart",
+    "D-SEQ":      "sequence",
+    "D-DAG":      "flowchart",
+    "D-CLASS":    "er-diagram",
+    "D-STATE":    "state-machine",
+    "D-DECISION": "flowchart",
+    "D-MIND":     "mindmap",
+    "D-GANTT":    "flowchart",  # whiteboard-cli mermaid gantt not in SUPPORTED_TYPES; fall back
+    "D-ERR":      "flowchart",
 }
+# Defensive fallback used when an annotation appears with an unknown D-XXX code
+_DEFAULT_CHART_TYPE = "flowchart"
 
 # Feishu docx URL pattern: https://<host>.larkoffice.com/docx/<token>
 _DOC_TOKEN_RE = re.compile(r"/docx/([A-Za-z0-9]+)")
@@ -323,7 +334,7 @@ class FeishuPublisher:
                     publish_result = chart_publisher.fill_existing_whiteboard(
                         whiteboard_token=wb_token,
                         chart_code=code,
-                        chart_type=_CHART_CODE_TYPE[code],
+                        chart_type=_CHART_CODE_TYPE.get(code, _DEFAULT_CHART_TYPE),
                         mermaid_source=mermaid_body,
                     )
                     result["chart_results"].append(publish_result)
@@ -339,7 +350,7 @@ class FeishuPublisher:
                     doc_token=doc_token,
                     chart_code=code,
                     mermaid_source=mermaid_body,
-                    chart_type=_CHART_CODE_TYPE[code],
+                    chart_type=_CHART_CODE_TYPE.get(code, _DEFAULT_CHART_TYPE),
                     position=position,
                 )
                 result["chart_results"].append(publish_result)
