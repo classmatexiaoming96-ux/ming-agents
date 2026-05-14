@@ -367,30 +367,90 @@ class TemplateEngine:
 """
 
     def _replace_variables(self, template: str) -> str:
-        """替换模板变量"""
-        # 生成文档标题
+        """替换模板变量。
+
+        Variable resolution order (v2.5+, codex round-5 P1 fix):
+          1. {{title}} / {{date}} / {{author}} — metadata, always filled
+          2. {{overview}} / {{details}} / {{references}} — merged content
+          3. {{content_source_N}} — short label of which source the section's
+             content came from; replaced with `（来源：<type>）` rather than
+             stripped to nothing, so authors / PM-Agent see the slot
+          4. {{include_diagram:D-XXX}} — placeholder mermaid stub the next-stage
+             PM-Agent can fill (per TEMPLATES.md §0.4); annotated with `<!-- TODO -->`
+             so it survives Feishu rendering as a visible cue
+          5. {{module_name}} / {{section_xxx}} / 其它 — strip (no-op for unknown)
+
+        Pre-fix behavior: step 5 used `re.sub(r'\\{\\{[^}]+\\}\\}', '', template)` which
+        deleted *every* remaining placeholder — including the structured
+        content_source / include_diagram slots that TEMPLATES.md §1-§7 rely on.
+        Result was empty-skeleton output for any doc_type that successfully loaded
+        TEMPLATES.md. Now those two slot families are explicitly preserved/transformed.
+        """
+        import re
+
+        # 1. Metadata
         title = self._get_doc_title()
         template = template.replace('{{title}}', title)
         template = template.replace('{{date}}', datetime.now().strftime('%Y-%m-%d'))
         template = template.replace('{{author}}', 'Shrimp Team')
-        
-        # 替换概览
+
+        # 2. Merged content slots
         overview = self._format_overview()
         template = template.replace('{{overview}}', overview)
-        
-        # 替换详细信息
         details = self._format_details()
         template = template.replace('{{details}}', details)
-        
-        # 替换参考资料
         references = self._format_references()
         template = template.replace('{{references}}', references)
-        
-        # 移除未替换的变量
-        import re
+
+        # 3. {{content_source}} / {{content_source_N}} — replace with short source label.
+        # TEMPLATES.md §1 (tech_review) uses numbered slots {{content_source_1}}..{{content_source_N}};
+        # §3 (research_report) uses the un-numbered form {{content_source}} repeated.
+        # Both flavors → primary_source label.
+        primary_source = self._primary_source_label()
+        template = re.sub(
+            r'\{\{content_source(?:_\d+)?\}\}',
+            primary_source,
+            template,
+        )
+
+        # 4. {{include_diagram:D-XXX}} — replace with placeholder mermaid stub that
+        #    annotate_mermaid_blocks downstream can ignore (un-annotated) but
+        #    reviewers can see + PM-Agent can fill.
+        def _diagram_stub(match: re.Match) -> str:
+            code = match.group(1)
+            return (
+                f"<!-- TODO: 补 {code} mermaid 图; 骨架见 TEMPLATES.md §0.4 -->\n"
+                f"```mermaid\n%% PLACEHOLDER {code} — PM-Agent 按 §0.4 {code} 骨架替换\n```"
+            )
+        template = re.sub(
+            r'\{\{include_diagram:(D-[A-Z]+)\}\}',
+            _diagram_stub,
+            template,
+        )
+
+        # 5. Strip any other unrecognized placeholders (catch-all)
         template = re.sub(r'\{\{[^}]+\}\}', '', template)
-        
+
         return template
+
+    def _primary_source_label(self) -> str:
+        """Short label of the primary content source, used for {{content_source_N}}."""
+        details = self.merged_content.get('details', {})
+        if not details:
+            return '（来源：待标注）'
+        # Pick first-seen source type as primary
+        type_labels = {
+            'code_repository': '代码仓库分析',
+            'feishu_doc': '飞书文档',
+            'web': 'Web 抓取',
+            'internal': '内部工具（AIME/Argos/Metrics）',
+            'direct': '直接输入',
+        }
+        for item in details.values():
+            t = item.get('type') if isinstance(item, dict) else None
+            if t in type_labels:
+                return type_labels[t]
+        return '（来源：未识别类型）'
     
     def _get_doc_title(self) -> str:
         """获取文档标题"""
