@@ -15,6 +15,7 @@
 | AIME Session 管理（flock 实现） | `references/doc-output-aime-session.md` |
 | 各输入源调用示例 + 输出路径规范 | `references/doc-output-examples.md` |
 | 飞书发布 + D-ARCH/D-SEQ/D-DAG 画板自动升级（v2.4+） | `references/doc-output-chart-upgrade.md` |
+| 调用方产图契约：图位 stub 由调用方 LLM 填充（v2.6+） | `references/doc-output-mermaid-prompt.md` |
 
 ---
 
@@ -43,6 +44,19 @@ Step 7: 返回结果契约
 - **用户裁决**：冲突项（topic 相同但 content 差 > 10%）提交用户裁决
 - **Orchestrator 路由**：doc-output 不直接调 `askUserQuestion`，返回 `confirmation_context` 由 Orchestrator 处理
 - **IdeaRefiner 先收敛**：模糊想法先结构化为三元组，用户确认后再并行获取
+
+---
+
+## 调用方契约：图内容由调用方 LLM 负责填充
+
+doc_output 是**纯 Python 脚本，自身不调用 LLM**。`template_engine` 只把模板里的 `{{include_diagram:D-XXX}}` 占位替换成 **placeholder stub**（` ```mermaid ` 块内首行 `%% PLACEHOLDER D-XXX`）—— 它**不是真图**。
+
+把 stub 填成真 mermaid 是"下一棒"的职责：
+
+- **pm_agent 路径**：由 pm_agent LLM 完成，受 Gate G1.5.7~G1.5.11 强制约束，**无需额外动作**。
+- **直接调用路径（CC / Orchestrator 等非 pm_agent 上游）**：**调用方 LLM 必须**在返回文档前填充所有图位 —— 详细契约（填充规则、禁 ASCII art、每图配 prose+图说明、各 doc_type 默认图表要求、可直接嵌入 system prompt 的指令片段）见 `references/doc-output-mermaid-prompt.md`。
+
+**自检信号**：doc_output 返回契约新增 `unfilled_diagram_count` 字段（见"输出格式"），统计产物中剩余的 `%% PLACEHOLDER` 图位数。直接调用方应确保该值为 `0`；`gate_conditions.diagrams_filled` 同步反映此状态。
 
 ---
 

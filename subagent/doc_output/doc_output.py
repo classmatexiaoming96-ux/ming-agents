@@ -609,8 +609,23 @@ class DocOutput:
 
         return "---\n" + json.dumps(metadata, indent=2, ensure_ascii=False) + "\n---"
 
+    def _count_unfilled_diagrams(self) -> int:
+        """统计产物中未填充的图位数量 (v2.6 Phase 2)。
+
+        template_engine._replace_variables 把每个 {{include_diagram:D-XXX}}
+        占位替换成一段带 `<!-- TODO ... -->` + ```mermaid 内含 `%% PLACEHOLDER D-XXX`
+        的 stub。每个未填图位恰好对应一个 `%% PLACEHOLDER`，调用方 LLM /
+        chart_synthesizer 填入真 mermaid 后该标记消失。
+
+        调用方可据此自检：>0 表示文档还有图位待填，未达到"图文并茂"。
+        """
+        if not self.rendered_doc:
+            return 0
+        return self.rendered_doc.count("%% PLACEHOLDER")
+
     def _generate_output(self) -> dict:
         """生成输出结果"""
+        unfilled = self._count_unfilled_diagrams()
         return {
             "skill": "shrimp-doc-output",
             "version": "2.2.0",
@@ -627,11 +642,13 @@ class DocOutput:
                 f"{self._generate_title()}已完成，"
                 f"包含{len(self.merged_content)}个主要章节"
             ),
+            "unfilled_diagram_count": unfilled,
             "gate_conditions": {
                 "content_collected": len(self.fetch_results) > 0,
                 "template_rendered": bool(self.rendered_doc),
                 "document_saved": bool(self.local_path),
-                "user_confirmed": True
+                "user_confirmed": True,
+                "diagrams_filled": unfilled == 0
             }
         }
 

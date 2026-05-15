@@ -219,9 +219,19 @@ class TemplateEngine:
     # v2.4 起, 已知 rich doc_type 在 TEMPLATES.md 加载失败时也使用图文交织 skeleton。
     # 参考飞书技术评审标准模板 (wikcnSeuhhO00BBpYwl22cL5zoh) 的 "多画图,少写字"
     # 原则,以及 TEMPLATES.md §0.4 的 D-XXX mermaid 骨架。
+    #
+    # v2.6 Phase 1: 把 task_plan / test_plan 也纳入 rich fallback —— 这两类
+    # 之前 TEMPLATES.md 缺节时退回 _get_minimal_default_template 的 4 节空壳,
+    # 现在改走 _get_planning_skeleton_template (以 D-DAG 为核心的 per-type 骨架)。
     _RICH_FALLBACK_TYPES = {
         'tech_review', 'design_doc', 'module_plan', 'research_report',
+        'task_plan', 'test_plan',
     }
+
+    # v2.6 Phase 1: 规划类 doc_type —— 走 _get_planning_skeleton_template
+    # (而非通用 _get_rich_skeleton_template)。规划类没有"架构/数据模型",
+    # 核心图是 D-DAG (执行顺序 / 测试阶段依赖)。
+    _PLANNING_SKELETON_TYPES = {'task_plan', 'test_plan'}
 
     def _get_default_template(self) -> str:
         """获取默认模板。
@@ -288,7 +298,14 @@ class TemplateEngine:
         `{{{{include_diagram:D-XXX}}}}` 占位由后续 mermaid generator (PM-Agent prompt
         或人工填写) 替换为实际 ```mermaid 代码块, 然后 template_engine.annotate_mermaid_blocks
         会按语法挂 `<!-- chart: D-XXX -->`, chart_publisher 升级到飞书画板。
+
+        v2.6 Phase 1: 规划类 doc_type (task_plan / test_plan) 分派到
+        _get_planning_skeleton_template —— 它们没有"架构/数据模型"节,
+        核心图是 D-DAG。其余 rich type 仍用下面这套通用 (tech_review 形态) 骨架。
         """
+        if self.doc_type in self._PLANNING_SKELETON_TYPES:
+            return self._get_planning_skeleton_template()
+
         title = self._get_doc_title()
         date_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         date_today = datetime.now().strftime('%Y-%m-%d')
@@ -354,6 +371,82 @@ class TemplateEngine:
 ---
 
 ## 5. 参考资料
+
+{{{{references}}}}
+
+---
+
+## 更新记录
+
+| 版本 | 日期 | 更新内容 |
+|------|------|----------|
+| v1.0 | {date_today} | 初始版本 |
+"""
+
+    # v2.6 Phase 1: 规划类 doc_type 的 D-DAG 图章节配置 (标题, 图说明)。
+    # 单点维护 —— _get_planning_skeleton_template 按 doc_type 取用。
+    _PLANNING_DAG_SPEC = {
+        'task_plan': (
+            '执行顺序与关键路径',
+            '节点 ID 用上方"Task总览"的 Task ID；可并行 Task 放同一 '
+            '`subgraph Phase-N`；边 = 依赖关系，须与关键路径一致。',
+        ),
+        'test_plan': (
+            '测试阶段与依赖',
+            '节点 = 测试阶段（单元/集成/端到端…）；用 `subgraph Phase-N` '
+            '表达可并行阶段；边 = 阶段间前置依赖。',
+        ),
+    }
+
+    def _get_planning_skeleton_template(self) -> str:
+        """规划类文档 (task_plan / test_plan) 的 per-type 图文交织 skeleton。
+
+        与通用 _get_rich_skeleton_template 的区别: 规划类没有"架构/数据模型"节,
+        核心图是 D-DAG (执行顺序 / 测试阶段依赖)。结构仍遵循
+        "叙述 → mermaid 占位 → 图说明 → 对齐表" (TEMPLATES.md §0.6)。
+
+        仅在 TEMPLATES.md 加载失败 / 缺对应节时作为 fallback 使用。
+        """
+        title = self._get_doc_title()
+        date_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        date_today = datetime.now().strftime('%Y-%m-%d')
+        sec_title, caption = self._PLANNING_DAG_SPEC.get(
+            self.doc_type, ('阶段依赖', '节点 = 阶段；边 = 前置依赖。')
+        )
+        return f"""# {title}
+
+> 生成时间：{date_now}
+> 数据来源：自动融合多个输入源（图文并茂 skeleton, v2.6 per-type）
+
+---
+
+## 1. 总览
+
+{{{{overview}}}}
+
+---
+
+## 2. {sec_title}
+
+> 章节原则：先 1-2 段叙述阶段划分逻辑，再上依赖图，最后用表对齐到图中节点名。
+
+{{{{details}}}}
+
+### 2.1 依赖图
+
+{{{{include_diagram:D-DAG}}}}
+
+> 图说明：{caption}
+
+### 2.2 阶段对齐表
+
+| 阶段 | 内容 | 依赖 |
+|------|------|------|
+| | | |
+
+---
+
+## 3. 参考资料
 
 {{{{references}}}}
 
