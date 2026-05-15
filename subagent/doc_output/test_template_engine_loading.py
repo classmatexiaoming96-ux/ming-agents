@@ -68,15 +68,20 @@ class TestNumberedAnchorExtraction(unittest.TestCase):
 
     def test_numbered_anchor_matches_tech_review(self):
         loaded = self._make_engine_with_templates_md(SAMPLE_TEMPLATES_MD, 'tech_review')
-        # Should pull §1 content, not default fallback
-        self.assertIn('tech_review（技术评审文档', loaded)
+        # P0-1 (v2.6 Phase 3): the loader unwraps the inner ```markdown fence,
+        # so the §heading + 适用场景 prose are stripped — only the template body
+        # inside the fence is returned. Placeholder must remain intact.
         self.assertIn('{{include_diagram:D-ARCH}}', loaded)
+        self.assertIn('# 技术评审文档', loaded)  # inner body present
+        # The §heading is the wrapper, not the template — should be gone now.
+        self.assertNotIn('tech_review（技术评审文档', loaded)
         # Should NOT bleed into §2 design_doc
         self.assertNotIn('设计文档结构', loaded)
 
     def test_numbered_anchor_matches_design_doc(self):
+        # SAMPLE_TEMPLATES_MD's §2 design_doc section has NO ```markdown fence
+        # (legacy un-fenced form). Loader returns the whole section in that case.
         loaded = self._make_engine_with_templates_md(SAMPLE_TEMPLATES_MD, 'design_doc')
-        self.assertIn('design_doc（设计文档', loaded)
         self.assertIn('{{include_diagram:D-CLASS}}', loaded)
 
     def test_unnumbered_anchor_still_works_for_backwards_compat(self):

@@ -163,9 +163,11 @@ stateDiagram-v2
 
 ### 0.5 占位语义（runner 替换规则）
 
-- `{{include_diagram}}`：单图占位，应替换为**符合上下文的 1 个** mermaid 代码块。
+- `{{include_diagram}}`：单图占位，应替换为**符合上下文的 1 个** mermaid 代码块。template_engine 会替换为 `GENERIC` 代号的 stub，调用方按上下文挑选 D-XXX 代号填入。
 - `{{include_diagram:D-ARCH}}` / `{{include_diagram:D-SEQ}}` / 等：显式指定图代号，runner **必须**按 §0.4 骨架生成对应类型。
-- `{{include_diagram:multi}}`：多图位，runner 按场景选 ≥ 2 个 mermaid 块（如 tech_review §2 同时含 D-ARCH + D-SEQ）。
+- `{{include_diagram:multi}}`：多图位，template_engine 会展开为 D-ARCH + D-SEQ 两个 stub（典型 tech_review §2 用法），调用方分别填入。
+
+> v2.6 Phase 3 起以上三种形式**都**会被 template_engine 替换为带 sentinel 的 mermaid stub（不再静默丢弃）；sentinel 内首行格式：` ```mermaid` 块开头 `%% DOC_OUTPUT_DIAGRAM_PLACEHOLDER <code>` —— 调用方可用 `DocOutput.count_unfilled_diagrams()` 在填图后 re-check 是否归 0。旧 sentinel `%% PLACEHOLDER` 仍兼容计数。
 
 ### 0.6 生成原则
 

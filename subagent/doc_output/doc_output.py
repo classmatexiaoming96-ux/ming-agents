@@ -604,31 +604,66 @@ class DocOutput:
             "status": "LOCKED",
             "generated_at": datetime.now().isoformat(),
             "input_sources": input_sources_summary,
-            "generator": "shrimp-doc-output v2.2.0"
+            "generator": "shrimp-doc-output v2.6.0"
         }
 
         return "---\n" + json.dumps(metadata, indent=2, ensure_ascii=False) + "\n---"
 
-    def _count_unfilled_diagrams(self) -> int:
-        """统计产物中未填充的图位数量 (v2.6 Phase 2)。
+    # P2: 使用更专属的 sentinel,避免文档真正内容里出现 "%% PLACEHOLDER"
+    # 造成误计数。新 sentinel 含 doc_output 命名空间前缀,几乎不可能与
+    # 用户填写的 mermaid 源码或 prose 撞车。旧值仍兼容(回看产物时的过渡)。
+    DIAGRAM_PLACEHOLDER_SENTINEL = "%% DOC_OUTPUT_DIAGRAM_PLACEHOLDER"
+    _LEGACY_DIAGRAM_SENTINEL = "%% PLACEHOLDER"
 
-        template_engine._replace_variables 把每个 {{include_diagram:D-XXX}}
-        占位替换成一段带 `<!-- TODO ... -->` + ```mermaid 内含 `%% PLACEHOLDER D-XXX`
-        的 stub。每个未填图位恰好对应一个 `%% PLACEHOLDER`，调用方 LLM /
-        chart_synthesizer 填入真 mermaid 后该标记消失。
+    @classmethod
+    def count_unfilled_diagrams(cls, content: str) -> int:
+        """统计任意 markdown 文本里未填充的图位数量。
 
-        调用方可据此自检：>0 表示文档还有图位待填，未达到"图文并茂"。
+        Public re-check entry (v2.6 Phase 3, P1-1): 直接调用方在填完 stub 之后
+        可以调用 `DocOutput.count_unfilled_diagrams(filled_doc)` 拿到真实的
+        unfilled count, 从而让 `gate_conditions.diagrams_filled == True` 这个
+        状态在直接调用路径上真正可达。
+
+        计数策略:
+          - 优先按新 sentinel `%% DOC_OUTPUT_DIAGRAM_PLACEHOLDER` 数
+          - 同时回数旧 sentinel `%% PLACEHOLDER`(每个 mermaid 块内首行),仅在
+            没有新 sentinel 时启用,以兼容 v2.6 Phase 2 已落地的产物
         """
-        if not self.rendered_doc:
+        if not content:
             return 0
-        return self.rendered_doc.count("%% PLACEHOLDER")
+        new_count = content.count(cls.DIAGRAM_PLACEHOLDER_SENTINEL)
+        if new_count > 0:
+            return new_count
+        return content.count(cls._LEGACY_DIAGRAM_SENTINEL)
+
+    @classmethod
+    def recheck_unfilled_diagrams(cls, path: str) -> int:
+        """Re-read a saved document and count unfilled placeholders.
+
+        Convenience for direct callers (CC / Orchestrator) that have already
+        written their filled-in mermaid back to disk and want to verify
+        `unfilled_diagram_count == 0` before declaring the document done.
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.count_unfilled_diagrams(f.read())
+
+    def _count_unfilled_diagrams(self) -> int:
+        """统计当前 in-memory 产物中未填充的图位数量。
+
+        Note: 这是 _generate_output 里返回 `unfilled_diagram_count` / 推导
+        `gate_conditions.diagrams_filled` 用的"初始计数",反映 doc_output
+        交付时的状态(几乎肯定 > 0 — stub 还没人填)。调用方填图后,应使用
+        `DocOutput.count_unfilled_diagrams()` 或 `recheck_unfilled_diagrams()`
+        重新核算。
+        """
+        return self.count_unfilled_diagrams(self.rendered_doc or "")
 
     def _generate_output(self) -> dict:
         """生成输出结果"""
         unfilled = self._count_unfilled_diagrams()
         return {
             "skill": "shrimp-doc-output",
-            "version": "2.2.0",
+            "version": "2.6.0",
             "status": "LOCKED",
             "doc_type": self.doc_type,
             "output_path": self.local_path,
@@ -794,4 +829,4 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 
-# shrimp-doc-output v2.2.0
+# shrimp-doc-output v2.6.0

@@ -159,6 +159,13 @@ class TemplateEngine:
         旧实现只识别第一种, 导致带数字编号的节(目前 TEMPLATES.md 全部如此)
         永远 fallback 到默认模板, 富模板里的 `{{include_diagram:D-XXX}}`
         占位符从未生效。
+
+        v2.6 Phase 3 (P0-1): TEMPLATES.md §1-§6 把真正的模板正文裹在
+        ``` ```markdown ... ``` ``` 围栏里, 外面是 `### 适用场景` 等元信息。
+        旧版本把整节(含元信息 + 包裹围栏)当成模板直接返回, 导致渲染产物的
+        前半段被裹进一个代码块 / 中段围栏状态紊乱 / 末尾留下未闭合围栏 ——
+        图位虽在却落在损坏的代码围栏里。这里需要把 ```markdown 围栏内部
+        剥离出来作为模板; 找不到围栏(向后兼容遗留无围栏写法)时退回整节。
         """
         # 先试无编号形式
         start_marker = f"## {doc_type}（"
@@ -182,11 +189,38 @@ class TemplateEngine:
         # 块内出现的 `## xxx` 是模板示例不是真章节标题, 必须跳过。
         end_idx = self._find_next_section_outside_fence(content, start_idx + 1)
         if end_idx == -1:
-            template = content[start_idx:]
+            section = content[start_idx:]
         else:
-            template = content[start_idx:end_idx]
+            section = content[start_idx:end_idx]
 
-        return template
+        # P0-1: unwrap inner ```markdown ... ``` fence — that's the real template body.
+        unwrapped = self._unwrap_markdown_fence(section)
+        return unwrapped if unwrapped is not None else section
+
+    @staticmethod
+    def _unwrap_markdown_fence(section: str) -> Optional[str]:
+        """Return the contents of the first ```markdown ... ``` block in `section`.
+
+        TEMPLATES.md §1-§6 each wrap the real template inside such a fence, with
+        `### 适用场景` / `### 模板结构` prose outside. We must return *only* the
+        fence body so `{{include_diagram:D-XXX}}` substitutions land in valid
+        markdown (not nested inside a literal code block whose ``` gets prematurely
+        closed by the first inner ```mermaid stub).
+
+        Returns None when no ```markdown fence is found — caller falls back to the
+        whole section (preserves behavior for legacy un-fenced templates and tests
+        that pass a raw template body in).
+        """
+        # Match ``` followed by language tag `markdown`, capturing inner body up to
+        # the next bare ``` on its own line (closing fence).
+        fence_re = re.compile(
+            r"^[ \t]*```markdown[ \t]*\n(.*?)\n[ \t]*```[ \t]*$",
+            re.DOTALL | re.MULTILINE,
+        )
+        m = fence_re.search(section)
+        if not m:
+            return None
+        return m.group(1)
 
     @staticmethod
     def _find_next_section_outside_fence(content: str, search_start: int) -> int:
@@ -231,7 +265,12 @@ class TemplateEngine:
     # v2.6 Phase 1: 规划类 doc_type —— 走 _get_planning_skeleton_template
     # (而非通用 _get_rich_skeleton_template)。规划类没有"架构/数据模型",
     # 核心图是 D-DAG (执行顺序 / 测试阶段依赖)。
-    _PLANNING_SKELETON_TYPES = {'task_plan', 'test_plan'}
+    # v2.6 Phase 3 (P1-2): module_plan / research_report 按
+    # doc-output-mermaid-prompt.md 契约表也是 D-DAG-only,加入这里使 fallback
+    # 不再越权给出 D-ARCH+D-SEQ+D-CLASS 这类与契约矛盾的图位。
+    _PLANNING_SKELETON_TYPES = {
+        'task_plan', 'test_plan', 'module_plan', 'research_report',
+    }
 
     def _get_default_template(self) -> str:
         """获取默认模板。
@@ -396,6 +435,16 @@ class TemplateEngine:
             '节点 = 测试阶段（单元/集成/端到端…）；用 `subgraph Phase-N` '
             '表达可并行阶段；边 = 阶段间前置依赖。',
         ),
+        'module_plan': (
+            '模块依赖关系',
+            '节点 ID 用上方"模块总览"的模块 ID（如 MOD-001）；可并行的模块放入同一 '
+            '`subgraph Phase-N`；fan-in / fan-out 关系完整体现。',
+        ),
+        'research_report': (
+            '推荐方案实施路径',
+            '节点 = 实施阶段；用 `subgraph Phase-N` 表达可并行阶段；'
+            '边 = 阶段间前置依赖。节点名复用下表"阶段"列。',
+        ),
     }
 
     def _get_planning_skeleton_template(self) -> str:
@@ -506,17 +555,53 @@ class TemplateEngine:
             template,
         )
 
-        # 4. {{include_diagram:D-XXX}} — replace with placeholder mermaid stub that
+        # 4. {{include_diagram:D-XXX}} / {{include_diagram:multi}} / bare
+        #    {{include_diagram}} — replace with placeholder mermaid stub that
         #    annotate_mermaid_blocks downstream can ignore (un-annotated) but
         #    reviewers can see + PM-Agent can fill.
+        #
+        # P2 (v2.6 Phase 3): use the namespaced sentinel
+        # `%% DOC_OUTPUT_DIAGRAM_PLACEHOLDER` so counting is robust against
+        # documents that legitimately contain the string "PLACEHOLDER".
+        # Also: support the bare `{{include_diagram}}` and `{{include_diagram:multi}}`
+        # forms that TEMPLATES.md §0.5 advertises — they used to be silently
+        # stripped by the step-5 catch-all.
+        sentinel = "%% DOC_OUTPUT_DIAGRAM_PLACEHOLDER"
+
         def _diagram_stub(match: re.Match) -> str:
-            code = match.group(1)
+            code = match.group(1) or "GENERIC"
             return (
                 f"<!-- TODO: 补 {code} mermaid 图; 骨架见 TEMPLATES.md §0.4 -->\n"
-                f"```mermaid\n%% PLACEHOLDER {code} — PM-Agent 按 §0.4 {code} 骨架替换\n```"
+                f"```mermaid\n{sentinel} {code} — 调用方按 §0.4 {code} 骨架替换\n```"
             )
+
+        def _multi_diagram_stub(_match: re.Match) -> str:
+            # `multi` 位需要 ≥ 2 张图 (典型: D-ARCH + D-SEQ)。我们写一个组合 stub,
+            # 每张图各自一个 mermaid 围栏 + 各自一个 sentinel,这样 unfilled 计数
+            # 能反映"还差 N 张图"而非笼统的"还差 1 个 multi 位"。
+            return (
+                "<!-- TODO: 补 multi-diagram (典型: D-ARCH + D-SEQ); "
+                "骨架见 TEMPLATES.md §0.4 -->\n"
+                f"```mermaid\n{sentinel} D-ARCH — 调用方按 §0.4 D-ARCH 骨架替换\n```\n\n"
+                f"```mermaid\n{sentinel} D-SEQ — 调用方按 §0.4 D-SEQ 骨架替换\n```"
+            )
+
+        # Typed form: {{include_diagram:D-XXX}}
         template = re.sub(
             r'\{\{include_diagram:(D-[A-Z]+)\}\}',
+            _diagram_stub,
+            template,
+        )
+        # `multi` form: {{include_diagram:multi}}
+        template = re.sub(
+            r'\{\{include_diagram:multi\}\}',
+            _multi_diagram_stub,
+            template,
+        )
+        # Bare form: {{include_diagram}} — generic single-figure stub.
+        # Pre-fill a sentinel match's group(1) by adding a dummy capturing group.
+        template = re.sub(
+            r'\{\{include_diagram()\}\}',  # empty capture group → group(1) == ''
             _diagram_stub,
             template,
         )
