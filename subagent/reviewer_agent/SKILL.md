@@ -3,22 +3,24 @@ name: shrimp-reviewer-agent
 description: |
   Reviewer-Agent Subagent：执行五轴审查（correctness / security / performance / maintainability / readability）。
   支持两种 scope：full（全量审查）和 increment（增量审查，来自 incremental-implementation）。
-  由 Orchestrator 在 REV_PHASE 阶段 sessions_spawn 并行调度，或由 Dev-Agent 在每个 INCR 完成后并行触发。
+  由 Orchestrator 在 REV_PHASE 阶段通过 subagent_dispatch 并行调度（graph 模型里为 codex_reviewer/codex_final），或由 Dev-Agent 在每个 INCR 完成后由 Orchestrator 并行 dispatch。
   v7.1：五轴全并发审查 —— 五轴（Correctness/Security/Performance/Readability/Maintainability）均通过
   acpx codex 并行执行，取消 v7.0 的 Phase-1/Phase-2 分阶段架构与 CC Lead 调用。
-version: 7.1.0
+version: 7.2.0
 role: reviewer-agent
 trigger: |
   - Orchestrator REV_PHASE 阶段并行调度（全量 scope）
   - Dev-Agent 每个 INCR 完成后并行触发（increment scope）
 dependencies:
   tools:
-    - sessions_spawn
-    - sessions_send
+    # 五轴审查走 acpx codex（external_tools），不 spawn CC Lead；
+    # 不依赖未实现的 sessions_spawn / sessions_send。
+    - Bash          # acpx codex exec / memory_*
+    - Read
+    - Grep
     - memory_search
     - memory_get
     - memory_put
-    - exec
     - argos-query
     - metrics
   skills:
@@ -31,18 +33,19 @@ dependencies:
     - ./references/reviewer_phases.md
 ---
 
-# Shrimp Reviewer-Agent Subagent v7.1
+# Shrimp Reviewer-Agent Subagent v7.2
 
 ## 元信息
 
 | 字段 | 值 |
 |------|-----|
-| 版本 | 7.1.0 |
+| 版本 | 7.2.0 |
 | 角色 | Reviewer-Agent（Subagent，并行审查） |
 | 上下文 | 隔离的 Subagent session，由 Orchestrator 或 Dev-Agent 调度 |
 | 产物 | review_report.md、findings_summary.md |
 | 审查范围 | full（全量）/ increment（增量） |
 | **新增特性** | **五轴全并发审查（5 路 Codex 并行，无 Phase-2）** |
+| 核心变化 | v7.2（借鉴 mattpocock）：Readability 轴新增"领域术语命名符合 `{worktree}/CONTEXT.md` 规范词"检查（命中别名→minor，CONTEXT.md 不存在则跳过） |
 
 ## 身份与职责
 
@@ -183,6 +186,7 @@ Orchestrator / Dev-Agent
 [ ] golangci-lint run 无 error
 [ ] 所有导出的函数/类型有 godoc 注释
 [ ] 变量命名有意义（无单字母变量名，例外：i/j/k）
+[ ] 领域术语命名符合 {worktree}/CONTEXT.md 规范词（不用 `_别名(避免)_` 列出的词；CONTEXT.md 不存在则跳过）
 [ ] 函数长度 ≤ 60 行
 [ ] 嵌套 if 层数 ≤ 5
 [ ] 无过长的单行（≤ 120 字符）

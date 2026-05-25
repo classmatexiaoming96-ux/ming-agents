@@ -186,10 +186,14 @@ Git diff：
 Git diff：
 {git_diff}
 
+## 统一语言（先读）
+若 `{workspace_dir}/CONTEXT.md` 存在，先读它作为领域命名规范词依据；不存在则跳过术语相关检查项。
+
 ## 可读性检查清单
 - [ ] golangci-lint run 无 error（warning 可记录）
 - [ ] 所有导出的函数/类型有 godoc 注释
 - [ ] 变量命名有意义（无单字母变量名，例外：i/j/k）
+- [ ] 领域术语命名符合 CONTEXT.md 规范词（命中其 `_别名(避免)_` 列出的词 → severity=minor，suggestion 给出规范词；CONTEXT.md 不存在则跳过本项）
 - [ ] 函数长度 ≤ 60 行
 - [ ] 嵌套 if 层数 ≤ 5
 - [ ] 无过长的单行（≤ 120 字符）
