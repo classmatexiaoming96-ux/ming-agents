@@ -26,6 +26,8 @@ Reviewer-Agent（调度器）
 
 ## rev-n0：审查初始化
 
+> **节点性质**：**AFK** —— 准备 diff / 上下文 / 知识库召回；见 `../../pm_agent/references/afk_hitl.md`
+
 **输入（来自调用方）**：
 - `requirement_id`：需求 ID
 - `reviewer_type`：correctness / security / performance / maintainability / readability
@@ -72,6 +74,8 @@ outputs:
 ---
 
 ## rev-n1：五轴并行 Codex 审查（v7.1）
+
+> **节点性质**：**AFK** —— 5 路 Codex 并发，无用户交互
 
 ### 执行策略
 
@@ -292,6 +296,8 @@ review_conclusion: passed | need_fix | blocked
 ---
 
 ## rev-n2：结果汇聚与报告生成
+
+> **节点性质**：**AFK** —— 汇聚 findings + 出报告；Blocker > 0 → 调用方（dev/Orchestrator）处转 Mixed/HITL
 
 **执行**：
 1. 读取五个 axis JSON

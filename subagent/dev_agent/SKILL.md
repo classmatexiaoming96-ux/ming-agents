@@ -29,6 +29,8 @@ dependencies:
     - ./references/reporting_formats.md
     - ./references/tdd_discipline.md
     - ./references/diagnose.md
+    - ../cc_lead_protocol.md
+    - ../pm_agent/references/afk_hitl.md
 ---
 
 # Shrimp Dev-Agent Subagent v5.5
@@ -77,60 +79,17 @@ dependencies:
 
 ---
 
-## CC Lead 调用规范（canonical — 每个 increment 的开发都经此通道）
+## CC Lead 调用规范
 
-> Dev-Agent 是桥接层，自己**绝不**写代码。每个 INCR 的「实现 → UT → 本地测试 → commit」
-> 都通过启动一个 CC Lead（Claude Code）session 完成。完整契约同 pm_agent，
-> 见 `../pm_agent/SKILL.md`《CC Lead 调用规范》。
+> Dev-Agent 是桥接层，自己**绝不**写代码。每个 INCR 的"实现 → UT → 本地测试 → commit"都通过本协议启动 CC Lead 完成。
 
-### 为什么不是别的方式
+**唯一正确方式**：`cc-start.py` + `cc-send.py`（tmux + `claude`，本机 Opus，可加载 test-driven-development / systematic-debugging 等 superpowers）。**不用** `sessions_spawn`（从未实现）或 `delegate_task`（模型不可控）。
 
-| 方式 | 状态 | 为什么不用 |
-|------|------|-----------|
-| `sessions_spawn(runtime="acp")` | ❌ 从未实现 | 仓库内 grep 0 命中；过去 dev_agent 因此每次直接返回 `status: done` 空跑 |
-| `delegate_task(acp_command="claude")` | ⚠️ 可用但禁用 | 走 MCP，模型由服务端决定，**无法保证本机 Opus**（见 memory `cc-lead-usage.md`） |
-| **`cc-start.py` + `cc-send.py`**（tmux + `claude`） | ✅ 唯一正确方式 | 读 `~/.claude/settings.json` 默认模型（本机 Opus）；可加载 superpowers（TDD 等） |
+**完成信号**：CC Lead 打印 `CC_LEAD_INCR_DONE: <commit_hash>`，dev_agent capture 到即视为本 INCR 完成。
 
-权限：DEV_PHASE 的 `permission_policy`（`orchestrator/scripts/graph.py` `_default_policies()`）
-`default_action="allow_silent"` 且 allow_silent 已显式放行 `Bash(cc-start.py*)` /
-`Bash(cc-send.py*)` / `Bash(cc-capture.py*)` / `Bash(jobs.py*)`，CC Lead session 自身可写
-`src/**` / `tests/**` 并跑 test/build/git commit。
+**五步驱动 + prompt 模板 + 权限策略 + 路径常量 + 角色差异速查**：见 `../cc_lead_protocol.md`（pm/dev 共用 canonical）。
 
-### 每个 INCR 的五步驱动
-
-```bash
-CC=/root/.hermes/skills/openclaw-imports/cc-lead/scripts
-WT="<worktree 路径，feature 分支已 checkout>"
-JOB="<repo>:<branch> DEV_PHASE"
-SESSION="<safe_id>-dev"
-
-# 1) 确保 job 存在（首个 INCR 时 create，后续复用同一 session）
-python3 "$CC/jobs.py" list 2>&1 | grep -F "$JOB" \
-  || python3 "$CC/jobs.py" create --repo "<repo>" --branch "<branch>" \
-       --title "<title>" --repo-local-path "$WT" --worktree "$WT"
-
-# 2) 写 increment prompt 文件（注入 SKILL.md 中的 increment JSON + constraints + spec_clauses）
-#    用 Write 工具写到 /tmp/<safe_id>_<incr_id>_prompt.md
-
-# 3) 首个 INCR：cc-start.py 启动 session；后续 INCR：cc-send.py 复用同一 session
-python3 "$CC/cc-start.py" --worktree-path "$WT" --job-id "$JOB" \
-  --prompt-file "/tmp/<safe_id>_<incr_id>_prompt.md" --tmux-session "$SESSION"
-#  后续 INCR 改用：
-#  python3 "$CC/cc-send.py" --tmux-session "$SESSION" --prompt-file "/tmp/<safe_id>_<incr_id>_prompt.md"
-
-# 4) 轮询监控直到 CC Lead 完成该 INCR（实现+UT+测试+commit），约定完成行 CC_LEAD_INCR_DONE:
-python3 "$CC/cc-capture.py" --tmux-session "$SESSION" 2>/dev/null | tail -30
-#    出现 "requires approval" → policy 已放行，极少见；如出现发 "1 Enter"
-
-# 5) 解析 CC Lead 返回 {status, files_changed, test_results, commit_hash}
-#    success → git commit 已由 CC Lead 完成；orch 随后 dispatch codex_reviewer（见下）
-#    error   → git revert，按错误类型重试（max 2）或汇报 blocked
-```
-
-> ⚠️ `cc-start.py` **非阻塞**（起 tmux + claude，发完 prompt 即返回）；CC Lead「真正开工」
-> 的判据是 capture 能看到 claude 正在执行，**不要**在 cc-start.py 返回后就当成完成。
-> per-INCR Reviewer **不由 dev_agent 自己 spawn**：在 graph 模型里由 Orchestrator 在每个
-> dev subTask 后 dispatch `codex_reviewer`（见 `shrimp-graph/SKILL.md` DEV_PHASE 段）。
+> 首个 INCR 用 `cc-start.py` 启动 session；后续 INCR 用 `cc-send.py` **复用同一 session**。per-INCR Reviewer **不由 dev_agent 自己 spawn** —— 在 graph 模型里由 Orchestrator 在每个 dev subTask 后 dispatch `codex_reviewer`（见 `shrimp-graph/SKILL.md` DEV_PHASE 段）。
 
 ---
 
@@ -275,5 +234,7 @@ Dev-Agent 内部 increment 执行循环：
 - **Context-Manager 规范**（三层记忆模型、RAG 检索）：`../../context-engineering/CONTEXT_MANAGER.md`
 - **TDD 规范**（Red-Green-Refactor + 垂直切片 + SPEC TDD-XXX 接线）：`./references/tdd_discipline.md`；CC Lead 同时加载内置 `test-driven-development` skill（`skills/cc-lead/scripts/cc-start.py`）
 - **调试规范 diagnose**（6 步：反馈环→复现→可证伪假设→单变量插桩→修+回归→清理）：`./references/diagnose.md`
+- **CC Lead 调用规范**（canonical，pm/dev 共用）：`../cc_lead_protocol.md`
+- **AFK / HITL 节点分类**：`../pm_agent/references/afk_hitl.md`
 - **增量实现集成**：`./INCREMENTAL_IMPLEMENTATION_INTEGRATION.md`
 - **SPEC 驱动开发集成**：`../pm_agent/SPEC_DRIVEN_DEVELOPMENT_INTEGRATION.md`

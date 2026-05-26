@@ -2,6 +2,8 @@
 
 ## dev-n0：Task 分解确认 + 生成 increment_plan
 
+> **节点性质**：**AFK** —— 读 task_breakdown → 拆 increments → 输出 increment_plan.md；见 `../../pm_agent/references/afk_hitl.md`
+
 **输入（来自 Orchestrator）**：
 - `requirement_id`：需求 ID
 - `task_list_path`：Task 列表文件路径
@@ -51,6 +53,8 @@
 ---
 
 ## dev-n1 ~ dev-nN：逐 Task 执行（increment 循环）
+
+> **节点性质**：**Mixed** —— 主体 AFK（CC Lead 红绿重构 + 自动触发 Reviewer + 自动 commit）；`status=error` 一次直改未中转 diagnose（仍 AFK），重试 2 次仍失败 → **HITL**（blocked，上报 Orchestrator）
 
 ```
 Dev-Agent dev-nK 接收 sub-task TASK-001-2（共 N 个 increments）
