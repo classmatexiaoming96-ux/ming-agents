@@ -1,0 +1,20 @@
+{
+  "claude_command": "claude",
+  "claude_args": ["-p", "--model", "{{model}}"],
+  "agents": [
+    {
+      "name": "builder",
+      "runtime_mode": "exec",
+      "max_concurrent_tasks": 2,
+      "model": "claude-opus-4-8",
+      "thinking_level": "high"
+    },
+    {
+      "name": "reviewer",
+      "runtime_mode": "exec",
+      "max_concurrent_tasks": 1,
+      "model": "claude-sonnet-4-6",
+      "thinking_level": "medium"
+    }
+  ]
+}
