@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -68,21 +69,32 @@ func (r *Registry) Sync(ctx context.Context, pool *pgxpool.Pool, configs []Confi
 	defer r.mu.Unlock()
 	for _, raw := range configs {
 		c := raw.withDefaults()
+		argsJSON, _ := json.Marshal(c.Args)
 		var id int64
 		err := pool.QueryRow(ctx, `
-			INSERT INTO agents (name, runtime_mode, max_concurrent_tasks, model, thinking_level)
-			VALUES ($1,$2,$3,$4,$5)
+			INSERT INTO agents (name, runtime_mode, max_concurrent_tasks, model, thinking_level, command, args)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
 			ON CONFLICT (name) DO UPDATE SET
 				runtime_mode         = EXCLUDED.runtime_mode,
 				max_concurrent_tasks = EXCLUDED.max_concurrent_tasks,
 				model                = EXCLUDED.model,
-				thinking_level       = EXCLUDED.thinking_level
+				thinking_level       = EXCLUDED.thinking_level,
+				command              = EXCLUDED.command,
+				args                 = EXCLUDED.args
 			RETURNING id`,
-			c.Name, c.RuntimeMode, c.MaxConcurrentTasks, c.Model, c.ThinkingLevel,
+			c.Name, c.RuntimeMode, c.MaxConcurrentTasks, c.Model, c.ThinkingLevel, c.Command, string(argsJSON),
 		).Scan(&id)
 		if err != nil {
 			return fmt.Errorf("upsert agent %q: %w", c.Name, err)
 		}
+		// Reload command and args from DB to get the persisted values (including defaults)
+		var dbCommand string
+		var dbArgsJSON string
+		if err := pool.QueryRow(ctx, `SELECT command, args FROM agents WHERE id = $1`, id).Scan(&dbCommand, &dbArgsJSON); err != nil {
+			return fmt.Errorf("reload agent %q: %w", c.Name, err)
+		}
+		c.Command = dbCommand
+		json.Unmarshal([]byte(dbArgsJSON), &c.Args)
 		a := &Agent{ID: id, Config: c}
 		r.byID[id] = a
 		r.byName[c.Name] = a
