@@ -19,9 +19,10 @@ type Config struct {
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
 	OrphanTimeout     time.Duration
+	TaskTimeout       time.Duration
 	ClaudeCommand     string
 	ClaudeArgs        []string
-	CodeGraphPath string
+	CodeGraphPath     string
 	Agents            []agent.Config
 }
 
@@ -42,6 +43,7 @@ func LoadConfig() (*Config, error) {
 		PollInterval:      envDuration("SHRIMP_POLL_INTERVAL", time.Second),
 		HeartbeatInterval: envDuration("SHRIMP_HEARTBEAT_INTERVAL", 5*time.Second),
 		OrphanTimeout:     envDuration("SHRIMP_ORPHAN_TIMEOUT", 30*time.Second),
+		TaskTimeout:       envDuration("SHRIMP_TASK_TIMEOUT", 30*time.Minute),
 		ClaudeCommand:     envOr("SHRIMP_CLAUDE_CMD", "claude"),
 		CodeGraphPath:     envOr("SHRIMP_CODEGRAPH_PATH", "codegraph"),
 	}

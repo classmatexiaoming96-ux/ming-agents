@@ -141,7 +141,11 @@ func (d *Daemon) execute(parent context.Context, t *task.Task, a *agent.Agent) {
 		},
 	}
 
-	result, err := d.runner.Run(ctx, spec, func(stream, line string) {
+	// Wrap with task timeout.
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, d.cfg.TaskTimeout)
+	defer timeoutCancel()
+
+	result, err := d.runner.Run(timeoutCtx, spec, func(stream, line string) {
 		d.publish(Event{Type: EventChunk, TaskID: t.ID, Stream: stream, Chunk: line})
 	})
 	stopHB()
@@ -156,6 +160,11 @@ func (d *Daemon) execute(parent context.Context, t *task.Task, a *agent.Agent) {
 		_ = d.queue.Complete(finCtx, t.ID, result)
 		t.Status = task.StatusCompleted
 		d.publish(Event{Type: EventCompleted, Task: refresh(finCtx, d.queue, t), TaskID: t.ID})
+	case context.DeadlineExceeded == err:
+		_ = d.queue.Fail(finCtx, t.ID, "timeout: task exceeded maximum duration", result)
+		t.Status = task.StatusFailed
+		d.publish(Event{Type: EventFailed, Task: refresh(finCtx, d.queue, t), TaskID: t.ID})
+		log.Printf("task %d timed out after %v", t.ID, d.cfg.TaskTimeout)
 	case ctx.Err() != nil:
 		_ = d.queue.Canceled(finCtx, t.ID, result)
 		t.Status = task.StatusCanceled
