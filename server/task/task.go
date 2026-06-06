@@ -33,6 +33,7 @@ type Task struct {
 	Error           *string    `json:"error,omitempty"`
 	WorkerID        *string    `json:"worker_id,omitempty"`
 	Attempts        int        `json:"attempts"`
+	MaxAttempts     int        `json:"max_attempts"`
 	CancelRequested bool       `json:"cancel_requested"`
 	CreatedAt       time.Time  `json:"created_at"`
 	ClaimedAt       *time.Time `json:"claimed_at,omitempty"`

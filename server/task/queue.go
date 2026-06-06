@@ -23,14 +23,14 @@ func NewQueue(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 
 // the column list shared by every SELECT so scans stay in sync.
 const taskColumns = `id, agent_id, status, priority, prompt, result, error,
-	worker_id, attempts, cancel_requested,
+	worker_id, attempts, max_attempts, cancel_requested,
 	created_at, claimed_at, started_at, heartbeat_at, completed_at`
 
 func scanTask(row pgx.Row) (*Task, error) {
 	var t Task
 	err := row.Scan(
 		&t.ID, &t.AgentID, &t.Status, &t.Priority, &t.Prompt, &t.Result, &t.Error,
-		&t.WorkerID, &t.Attempts, &t.CancelRequested,
+		&t.WorkerID, &t.Attempts, &t.MaxAttempts, &t.CancelRequested,
 		&t.CreatedAt, &t.ClaimedAt, &t.StartedAt, &t.HeartbeatAt, &t.CompletedAt,
 	)
 	if err != nil {
@@ -70,6 +70,7 @@ func (q *Queue) Claim(ctx context.Context, workerID string, agentIDs []int64) (*
 		WHERE id = (
 			SELECT id FROM agent_task_queue
 			WHERE status = 'pending' AND agent_id = ANY($2)
+			  AND (max_attempts IS NULL OR attempts < max_attempts)
 			ORDER BY priority ASC, created_at ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
