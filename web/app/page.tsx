@@ -6,6 +6,7 @@ import NewTaskForm from "@/components/NewTaskForm";
 import TaskTable from "@/components/TaskTable";
 
 const STATUSES = ["pending", "running", "completed", "failed", "canceled"] as const;
+const MAX_STREAM_LINES = 10000;
 
 export default function Page() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -61,10 +62,17 @@ export default function Page() {
         }
         if (msg.type === "task.chunk") {
           if (msg.chunk !== undefined) {
-            setStreams((prev) => ({
-              ...prev,
-              [msg.task_id]: (prev[msg.task_id] || "") + msg.chunk + "\n",
-            }));
+            setStreams((prev) => {
+              const existing = prev[msg.task_id] || "";
+              const newContent = existing + msg.chunk + "\n";
+              // Truncate if exceeds MAX_STREAM_LINES
+              const lines = newContent.split("\n");
+              if (lines.length > MAX_STREAM_LINES) {
+                const truncated = lines.slice(-MAX_STREAM_LINES).join("\n");
+                return { ...prev, [msg.task_id]: truncated };
+              }
+              return { ...prev, [msg.task_id]: newContent };
+            });
           }
           return;
         }
