@@ -24,6 +24,7 @@ const (
 // Task mirrors a row of agent_task_queue.
 type Task struct {
 	ID              int64      `json:"id"`
+	RepoPath        string     `json:"repo_path,omitempty"`
 	AgentID         int64      `json:"agent_id"`
 	Status          string     `json:"status"`
 	Priority        int        `json:"priority"`

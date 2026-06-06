@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
+	"os/exec"
 	"strconv"
 	"sync"
 	"time"
@@ -105,6 +109,15 @@ func (d *Daemon) execute(parent context.Context, t *task.Task, a *agent.Agent) {
 	}
 	t.Status = task.StatusRunning
 	d.publish(Event{Type: EventRunning, Task: t, TaskID: t.ID})
+
+	if t.RepoPath != "" {
+		stats, err := fetchCodeGraphStats(t.RepoPath)
+		if err != nil {
+			log.Printf("task %d codegraph stats: %v", t.ID, err)
+		} else {
+			log.Printf("task %d codegraph stats: %v", t.ID, stats)
+		}
+	}
 
 	// Heartbeat loop: refresh liveness and honor remote cancel requests.
 	hbCtx, stopHB := context.WithCancel(ctx)
@@ -226,6 +239,27 @@ func refresh(ctx context.Context, q *task.Queue, fallback *task.Task) *task.Task
 		return t
 	}
 	return fallback
+}
+
+func fetchCodeGraphStats(repoPath string) (map[string]int, error) {
+	if repoPath == "" {
+		return nil, nil
+	}
+
+	cmd := exec.Command("/usr/local/bin/codegraph", "stats", "--repo", repoPath)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("codegraph stats failed: %v %s", err, stderr.String())
+	}
+
+	var stats map[string]int
+	if err := json.Unmarshal(out.Bytes(), &stats); err != nil {
+		return nil, fmt.Errorf("parse codegraph stats: %w", err)
+	}
+	return stats, nil
 }
 
 func itoa(n int64) string {
