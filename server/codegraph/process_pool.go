@@ -34,12 +34,13 @@ type repoProcessPool struct {
 }
 
 type Process struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *jsonScanner
-	stderr io.Reader
-	inUse  atomic.Bool
-	usedAt atomic.Int64
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   *jsonScanner
+	stderr   io.Reader
+	drainDone chan struct{}
+	inUse    atomic.Bool
+	usedAt   atomic.Int64
 	repoPath string
 }
 
@@ -159,8 +160,17 @@ func (p *repoProcessPool) spawnProcess() (*Process, error) {
 		stdin:    stdin,
 		stdout:   &jsonScanner{sc: bufio.NewScanner(stdout)},
 		stderr:   stderr,
+		drainDone: make(chan struct{}),
 		repoPath: p.repoPath,
 	}
+	go func() {
+		select {
+		case <-proc.drainDone:
+			return
+		default:
+			io.Copy(io.Discard, stderr)
+		}
+	}()
 	proc.usedAt.Store(time.Now().Unix())
 
 	return proc, nil
@@ -230,6 +240,9 @@ func (proc *Process) Exec(ctx context.Context, method string, params map[string]
 
 // Close terminates the process.
 func (proc *Process) Close() error {
+	if proc.drainDone != nil {
+		close(proc.drainDone)
+	}
 	if proc.cmd.Process != nil {
 		proc.cmd.Process.Kill()
 	}
