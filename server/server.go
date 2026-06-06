@@ -24,10 +24,10 @@ type Server struct {
 	bus    *EventBus
 	up     websocket.Upgrader
 	codegraph *codegraph.CodeGraphCLI
-	registry  *codegraph.RepoRegistry
+	registry  *codegraph.RepoGraph
 }
 
-func NewServer(d *Daemon, q *task.Queue, reg *agent.Registry, bus *EventBus, cg *codegraph.CodeGraphCLI, reg2 *codegraph.RepoRegistry) *Server {
+func NewServer(d *Daemon, q *task.Queue, reg *agent.Registry, bus *EventBus, cg *codegraph.CodeGraphCLI, reg2 *codegraph.RepoGraph) *Server {
 	return &Server{
 		daemon: d,
 		queue:  q,
@@ -57,6 +57,10 @@ func (s *Server) Handler() http.Handler {
 	// Project API routes
 	projHandler := api.NewProjectHandler(s.daemon.pool, s.codegraph, s.registry)
 	projHandler.RegisterRoutes(mux)
+
+	// Graph API routes
+	graphHandler := api.NewGraphHandler(s.daemon.pool, s.registry)
+	graphHandler.RegisterRoutes(mux)
 
 	return cors(mux)
 }

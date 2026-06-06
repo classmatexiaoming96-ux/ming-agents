@@ -72,7 +72,7 @@ func run() error {
 
 	// Initialize CodeGraph CLI and registry
 	codegraphCLI := codegraph.NewCodeGraphCLI(cfg.CodeGraphPath)
-	registry := codegraph.NewRepoRegistry()
+	registry := codegraph.NewRepoGraph()
 
 	daemon := NewDaemon(cfg, pool, reg, bus, codegraphCLI, registry)
 	queue := task.NewQueue(pool)

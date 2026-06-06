@@ -16,11 +16,11 @@ import (
 type ProjectHandler struct {
 	pool *pgxpool.Pool
 	codegraph  *codegraph.CodeGraphCLI
-	registry   *codegraph.RepoRegistry
+	registry   *codegraph.RepoGraph
 }
 
 // NewProjectHandler creates a new ProjectHandler.
-func NewProjectHandler(pool *pgxpool.Pool, cg *codegraph.CodeGraphCLI, reg *codegraph.RepoRegistry) *ProjectHandler {
+func NewProjectHandler(pool *pgxpool.Pool, cg *codegraph.CodeGraphCLI, reg *codegraph.RepoGraph) *ProjectHandler {
 	return &ProjectHandler{
 		pool:      pool,
 		codegraph: cg,

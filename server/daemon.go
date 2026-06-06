@@ -28,7 +28,7 @@ type Daemon struct {
 	reg     *agent.Registry
 	bus     *EventBus
 	codegraph *codegraph.CodeGraphCLI
-	registry  *codegraph.RepoRegistry
+	registry  *codegraph.RepoGraph
 
 	// inflight counts running tasks per agent id (process-local guard atop the
 	// DB claim, so the scheduler claims exactly the free slots).
@@ -36,7 +36,7 @@ type Daemon struct {
 	inflight map[int64]int
 }
 
-func NewDaemon(cfg *Config, pool *pgxpool.Pool, reg *agent.Registry, bus *EventBus, cg *codegraph.CodeGraphCLI, reg2 *codegraph.RepoRegistry) *Daemon {
+func NewDaemon(cfg *Config, pool *pgxpool.Pool, reg *agent.Registry, bus *EventBus, cg *codegraph.CodeGraphCLI, reg2 *codegraph.RepoGraph) *Daemon {
 	return &Daemon{
 		cfg:      cfg,
 		pool:     pool,
