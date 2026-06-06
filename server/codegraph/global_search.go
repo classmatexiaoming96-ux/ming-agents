@@ -2,7 +2,9 @@ package codegraph
 
 import (
 	"context"
-	"sync"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // GlobalSearchResult aggregates search results from multiple repositories.
@@ -29,57 +31,44 @@ func (c *CodeGraphCLI) GlobalSearch(ctx context.Context, query string, repoIDs [
 		return &GlobalSearchResult{}, nil
 	}
 
-	type result struct {
-		repoID string
-		items  []SearchResult
-		err    error
-	}
-
-	resultCh := make(chan result, len(repoIDs))
-	var wg sync.WaitGroup
-
-	for _, repoID := range repoIDs {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-
-			repoPath, err := c.pool.resolveRepoPath(id)
-			if err != nil {
-				resultCh <- result{repoID: id, err: err}
-				return
-			}
-
-			items, err := c.Query(ctx, repoPath, query, nil)
-			resultCh <- result{repoID: id, items: items, err: err}
-		}(repoID)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
 	agg := &GlobalSearchResult{
 		Results: make([]RepoSearchResult, 0),
+		Errors:  make([]SearchError, 0),
 	}
 
-	for r := range resultCh {
-		if r.err != nil {
-			agg.Errors = append(agg.Errors, SearchError{
-				RepoID: r.repoID,
-				Err:    r.err.Error(),
-			})
-			continue
-		}
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(10) // limit concurrent repo searches
 
-		for _, item := range r.items {
-			agg.Results = append(agg.Results, RepoSearchResult{
-				RepoID: r.repoID,
-				Result: item,
-			})
-		}
+	for _, repoID := range repoIDs {
+		repoID := repoID // capture loop variable
+		g.Go(func() error {
+			// 30s timeout per repo
+			repoCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+
+			repoPath, err := c.pool.resolveRepoPath(repoID)
+			if err != nil {
+				agg.Errors = append(agg.Errors, SearchError{RepoID: repoID, Err: err.Error()})
+				return nil // don't propagate - we collect errors
+			}
+
+			items, err := c.Query(repoCtx, repoPath, query, nil)
+			if err != nil {
+				agg.Errors = append(agg.Errors, SearchError{RepoID: repoID, Err: err.Error()})
+				return nil
+			}
+
+			for _, item := range items {
+				agg.Results = append(agg.Results, RepoSearchResult{
+					RepoID: repoID,
+					Result: item,
+				})
+			}
+			return nil
+		})
 	}
 
+	_ = g.Wait() // errors collected in agg.Errors
 	return agg, nil
 }
 

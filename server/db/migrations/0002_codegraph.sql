@@ -1,3 +1,5 @@
+-- Legacy schema: kept for backward compatibility only.
+-- New code should use 0003_repo_graph.sql (repo_nodes / repo_edges).
 -- SHRIMP MVP Version A — CodeGraph multi-repo schema.
 
 CREATE TABLE IF NOT EXISTS projects (

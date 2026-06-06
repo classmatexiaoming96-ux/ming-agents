@@ -54,9 +54,9 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /ws", s.handleWS)
 
-	// Project API routes
-	projHandler := api.NewProjectHandler(s.daemon.pool, s.codegraph, s.registry)
-	projHandler.RegisterRoutes(mux)
+	// Project API routes (deprecated - using graphHandler instead)
+	// projHandler := api.NewProjectHandler(s.daemon.pool, s.codegraph, s.registry)
+	// projHandler.RegisterRoutes(mux)
 
 	// Graph API routes
 	graphHandler := api.NewGraphHandler(s.daemon.pool, s.registry)

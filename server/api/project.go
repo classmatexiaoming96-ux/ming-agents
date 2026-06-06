@@ -1,3 +1,4 @@
+// Package project is deprecated. Use ../codegraph/repo_graph.go and ../api/graph.go instead.
 // Package api provides HTTP handlers for the SHRIMP REST API.
 package api
 

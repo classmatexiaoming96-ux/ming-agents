@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+// safeNode returns an empty Node if n is nil (defensive for JSON unmarshal edge cases).
+func safeNode(n *Node) Node {
+	if n == nil {
+		return Node{}
+	}
+	return *n
+}
+
+// safeStringPtr returns empty string if s is nil.
+func safeStringPtr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // CodeGraphCLI is the main interface for interacting with CodeGraph repositories.
 type CodeGraphCLI struct {
 	binaryPath string
@@ -47,8 +63,8 @@ type PendingChanges struct {
 
 // SearchResult represents a single query result.
 type SearchResult struct {
-	Node      Node     `json:"node"`
-	Score     float64  `json:"score"`
+	Node       Node     `json:"node"`        // use value type for backward compat; callers should check for zero values
+	Score      float64  `json:"score"`
 	Highlights []string `json:"highlights,omitempty"`
 }
 
@@ -57,14 +73,14 @@ type Node struct {
 	ID            string `json:"id"`
 	Kind          string `json:"kind"`
 	Name          string `json:"name"`
-	QualifiedName string `json:"qualifiedName"`
-	FilePath      string `json:"filePath"`
+	QualifiedName string `json:"qualifiedName,omitempty"` // omitempty for backward compat
+	FilePath      string `json:"filePath,omitempty"`      // omitempty for backward compat
 	Language      string `json:"language"`
 	StartLine     int    `json:"startLine"`
 	EndLine       int    `json:"endLine"`
-	StartColumn int    `json:"startColumn,omitempty"`
-	EndColumn int    `json:"endColumn,omitempty"`
-	Signature     string `json:"signature,omitempty"`
+	StartColumn   int    `json:"startColumn,omitempty"`
+	EndColumn     int    `json:"endColumn,omitempty"`
+	Signature     string `json:"signature,omitempty"` // omitempty for backward compat
 	IsExported    bool   `json:"isExported,omitempty"`
 }
 
