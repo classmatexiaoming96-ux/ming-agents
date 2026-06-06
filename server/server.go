@@ -11,6 +11,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shrimp-mvp/server/agent"
+	"github.com/shrimp-mvp/server/api"
+	"github.com/shrimp-mvp/server/codegraph"
 	"github.com/shrimp-mvp/server/task"
 )
 
@@ -18,12 +20,14 @@ import (
 type Server struct {
 	daemon *Daemon
 	queue  *task.Queue
-	reg    *agent.Registry
+	reg *agent.Registry
 	bus    *EventBus
 	up     websocket.Upgrader
+	codegraph *codegraph.CodeGraphCLI
+	registry  *codegraph.RepoRegistry
 }
 
-func NewServer(d *Daemon, q *task.Queue, reg *agent.Registry, bus *EventBus) *Server {
+func NewServer(d *Daemon, q *task.Queue, reg *agent.Registry, bus *EventBus, cg *codegraph.CodeGraphCLI, reg2 *codegraph.RepoRegistry) *Server {
 	return &Server{
 		daemon: d,
 		queue:  q,
@@ -33,6 +37,8 @@ func NewServer(d *Daemon, q *task.Queue, reg *agent.Registry, bus *EventBus) *Se
 			// MVP: allow any origin (the console runs on a different port).
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
+		codegraph: cg,
+		registry:  reg2,
 	}
 }
 
@@ -47,6 +53,11 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /ws", s.handleWS)
+
+	// Project API routes
+	projHandler := api.NewProjectHandler(s.daemon.pool, s.codegraph, s.registry)
+	projHandler.RegisterRoutes(mux)
+
 	return cors(mux)
 }
 

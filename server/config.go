@@ -21,6 +21,7 @@ type Config struct {
 	OrphanTimeout     time.Duration
 	ClaudeCommand     string
 	ClaudeArgs        []string
+	CodeGraphPath string
 	Agents            []agent.Config
 }
 
@@ -29,7 +30,8 @@ type Config struct {
 type fileConfig struct {
 	ClaudeCommand string         `json:"claude_command,omitempty"`
 	ClaudeArgs    []string       `json:"claude_args,omitempty"`
-	Agents        []agent.Config `json:"agents"`
+	CodeGraphPath string         `json:"codegraph_path,omitempty"`
+	Agents []agent.Config `json:"agents"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -41,6 +43,7 @@ func LoadConfig() (*Config, error) {
 		HeartbeatInterval: envDuration("SHRIMP_HEARTBEAT_INTERVAL", 5*time.Second),
 		OrphanTimeout:     envDuration("SHRIMP_ORPHAN_TIMEOUT", 30*time.Second),
 		ClaudeCommand:     envOr("SHRIMP_CLAUDE_CMD", "claude"),
+		CodeGraphPath:     envOr("SHRIMP_CODEGRAPH_PATH", "codegraph"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
@@ -66,6 +69,9 @@ func LoadConfig() (*Config, error) {
 		}
 		if len(fc.ClaudeArgs) > 0 {
 			c.ClaudeArgs = fc.ClaudeArgs
+		}
+		if fc.CodeGraphPath != "" {
+			c.CodeGraphPath = fc.CodeGraphPath
 		}
 		c.Agents = fc.Agents
 	}

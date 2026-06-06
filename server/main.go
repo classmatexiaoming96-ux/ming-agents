@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/shrimp-mvp/server/agent"
+	"github.com/shrimp-mvp/server/codegraph"
 	"github.com/shrimp-mvp/server/db"
 	"github.com/shrimp-mvp/server/task"
 )
@@ -68,9 +69,14 @@ func run() error {
 	log.Printf("synced %d agent(s)", len(reg.All()))
 
 	bus := NewEventBus()
-	daemon := NewDaemon(cfg, pool, reg, bus)
+
+	// Initialize CodeGraph CLI and registry
+	codegraphCLI := codegraph.NewCodeGraphCLI(cfg.CodeGraphPath)
+	registry := codegraph.NewRepoRegistry()
+
+	daemon := NewDaemon(cfg, pool, reg, bus, codegraphCLI, registry)
 	queue := task.NewQueue(pool)
-	srv := NewServer(daemon, queue, reg, bus)
+	srv := NewServer(daemon, queue, reg, bus, codegraphCLI, registry)
 
 	// HTTP server.
 	httpErr := make(chan error, 1)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shrimp-mvp/server/agent"
+	"github.com/shrimp-mvp/server/codegraph"
 	"github.com/shrimp-mvp/server/task"
 )
 
@@ -26,6 +27,8 @@ type Daemon struct {
 	manager *task.Manager
 	reg     *agent.Registry
 	bus     *EventBus
+	codegraph *codegraph.CodeGraphCLI
+	registry  *codegraph.RepoRegistry
 
 	// inflight counts running tasks per agent id (process-local guard atop the
 	// DB claim, so the scheduler claims exactly the free slots).
@@ -33,7 +36,7 @@ type Daemon struct {
 	inflight map[int64]int
 }
 
-func NewDaemon(cfg *Config, pool *pgxpool.Pool, reg *agent.Registry, bus *EventBus) *Daemon {
+func NewDaemon(cfg *Config, pool *pgxpool.Pool, reg *agent.Registry, bus *EventBus, cg *codegraph.CodeGraphCLI, reg2 *codegraph.RepoRegistry) *Daemon {
 	return &Daemon{
 		cfg:      cfg,
 		pool:     pool,
@@ -42,6 +45,8 @@ func NewDaemon(cfg *Config, pool *pgxpool.Pool, reg *agent.Registry, bus *EventB
 		manager:  task.NewManager(),
 		reg:      reg,
 		bus:      bus,
+		codegraph: cg,
+		registry:  reg2,
 		inflight: map[int64]int{},
 	}
 }
