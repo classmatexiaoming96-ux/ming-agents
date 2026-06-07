@@ -104,7 +104,8 @@ Permanent memories use the sentinel `expires_at: 9999-12-31`.
 ## CLI
 
 ```bash
-go build -o memory-cli ./server/memory/cmd/memory-cli
+# run from server/ directory
+go build -o memory-cli ./memory/cmd/memory-cli
 
 memory-cli add "决定采用 connection pooling because 高并发" --type decision --project ming-agents --tags db,pool
 memory-cli search --query pooling
