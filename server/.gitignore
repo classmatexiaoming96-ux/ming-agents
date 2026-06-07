@@ -1,0 +1,7 @@
+# compiled binaries
+/server
+/daemon
+*.exe
+# local runtime artifacts
+*.log
+*.pid
