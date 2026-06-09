@@ -330,6 +330,62 @@ func TestBigramPrecomputeConsistency(t *testing.T) {
 	}
 }
 
+// TestCleanupDrivesResolutionPhase verifies the planted call chain
+// Cleanup() → resolutionPhase() → ResolveContradictions actually runs: a
+// same-project polarity-flip pair is picked up by the at-rest detector, funneled
+// through the resolver, flagged (AutoEvict is off, so flag-only), and recorded in
+// the audit log — all without panicking and without evicting anything.
+func TestCleanupDrivesResolutionPhase(t *testing.T) {
+	vault := useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	// Two contradictory, never-expiring memories in the same project (empty
+	// ExpiresAt → Cleanup's archival pass leaves them active). Equal scores keep
+	// the composite margin under evictMargin, so the decision is flagged either
+	// way — the point is that resolution runs, not which tier fires.
+	a := placeMemory(t, Memory{ID: "mem_pool_yes", Project: "p", Score: 3.0, Body: "use connection pooling for the database"})
+	b := placeMemory(t, Memory{ID: "mem_pool_no0", Project: "p", Score: 3.0, Body: "do not use connection pooling for the database"})
+
+	res, err := Cleanup()
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+
+	// Flag-only: nothing superseded, nothing left active circulation.
+	if res.Resolved != 0 {
+		t.Errorf("Resolved = %d, want 0 (AutoEvict off → flag-only)", res.Resolved)
+	}
+	if sup, _ := readAllMemories("superseded"); len(sup) != 0 {
+		t.Errorf("Cleanup superseded %d memories, want 0", len(sup))
+	}
+	active, _ := readAllMemories("active")
+	if len(active) != 2 {
+		t.Fatalf("active count = %d, want 2 (both survive flag-only resolution)", len(active))
+	}
+
+	// Resolution ran: the audit log exists and recorded a flagged decision for the
+	// pair, and both memories now carry the durable conflicts_with marker.
+	if !auditLogExists(t) {
+		t.Fatal("Cleanup did not write the contradiction audit log → resolutionPhase never reached ResolveContradictions")
+	}
+	logRaw, err := os.ReadFile(filepath.Join(vault, contradictionsLog))
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	logStr := string(logRaw)
+	if !strings.Contains(logStr, `"action":"flagged"`) {
+		t.Errorf("audit log missing flagged record:\n%s", logStr)
+	}
+	if !strings.Contains(logStr, a.ID) || !strings.Contains(logStr, b.ID) {
+		t.Errorf("audit log missing the pair (%s,%s):\n%s", a.ID, b.ID, logStr)
+	}
+	for _, m := range active {
+		if len(m.ConflictsWith) == 0 {
+			t.Errorf("memory %s missing conflicts_with marker after Cleanup flagged it", m.ID)
+		}
+	}
+}
+
 func TestPairKeyCanonical(t *testing.T) {
 	c1 := Contradiction{A: "mem_b", B: "mem_a"}
 	c2 := Contradiction{A: "mem_a", B: "mem_b"}
