@@ -76,9 +76,27 @@ type Memory struct {
 	HitCount    int      `yaml:"hit_count"`
 	CreatedAt   string   `yaml:"created_at"`
 	ExpiresAt   string   `yaml:"expires_at"`
-	Status      string   `yaml:"status"` // active/archived
+	Status      string   `yaml:"status"` // active/archived/superseded
 	Source      string   `yaml:"source"`
 	Links       []string `yaml:"links"`
+
+	// §13 explicit 证据（Phase 1）— 与 implicit 解耦，explicit-trumps tier 读取。
+	// 旧文件无此字段 → 零值；历史上被 explicit feedback 过的老 memory 也算 0
+	// （无法回填），explicit-trumps 对它们不生效，按 composite tier 裁决。
+	ExplicitHits int    `yaml:"explicit_hits,omitempty"`
+	LastExplicit string `yaml:"last_explicit,omitempty"`
+
+	// §7 implicit（Phase 3 依赖，提前加字段，本期不加逻辑）。
+	ImplicitHits int     `yaml:"implicit_hits,omitempty"`
+	PendingScore float64 `yaml:"pending_score,omitempty"`
+	LastImplicit string  `yaml:"last_implicit,omitempty"`
+
+	// §13 矛盾淘汰（Phase 0）。全部 omitempty：旧文件缺失 → 零值，向后兼容。
+	ConflictsWith    []string `yaml:"conflicts_with,omitempty"`    // 待裁决冲突伙伴 id（§7 在线标记写入）
+	SupersededBy     string   `yaml:"superseded_by,omitempty"`     // winner id（写在 loser 上）
+	Supersedes       []string `yaml:"supersedes,omitempty"`        // loser ids（写在 winner 上）
+	SupersededAt     string   `yaml:"superseded_at,omitempty"`     // 日期（dateLayout）
+	SupersededReason string   `yaml:"superseded_reason,omitempty"` // 裁决理由
 
 	Body string `yaml:"-"` // 正文（不含 frontmatter）
 	Path string `yaml:"-"` // on-disk location, populated on read
@@ -103,11 +121,11 @@ type FeedbackResult struct {
 // CleanupResult is returned by Cleanup.
 type CleanupResult struct {
 	Archived int `json:"archived"`
+	Resolved int `json:"resolved"` // §13 contradictions superseded this pass
 }
 
 var (
 	frontmatterRE = regexp.MustCompile(`(?s)^---\n(.*?)\n---\n(.*)`)
-	wordRE        = regexp.MustCompile(`\w+`)
 	tagRE         = regexp.MustCompile(`\b[a-z]{3,}(?:\.[a-z]{2,})?\b`)
 	bigNumberRE   = regexp.MustCompile(`\d{4,}`)
 	codeRE        = regexp.MustCompile("```|`")
@@ -195,16 +213,48 @@ func readAllMemories(status string) ([]Memory, error) {
 	return results, nil
 }
 
-// jaccardSimilarity is the word-set Jaccard index of two strings.
-func jaccardSimilarity(a, b string) float64 {
-	setA := wordSet(a)
-	setB := wordSet(b)
+// §6 共享词法原语：char-bigram Jaccard。CJK 友好（rune 级 2-gram），由 Ingest
+// novelty 与 §13 lexicalContradictionScan 共用。取代旧的 word-set Jaccard——后者
+// 用 `\w+`，对纯中文匹配空集，导致中文 memory novelty 恒为 1.0、去重失效。
+
+// normalizeForBigram lowercases and collapses runs of whitespace to a single
+// space, so layout differences don't perturb the bigram set.
+func normalizeForBigram(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// charBigrams returns the set of rune-level 2-grams of s (after normalisation).
+// A single-rune string contributes that one rune as a degenerate 1-gram so very
+// short strings still compare meaningfully.
+func charBigrams(s string) map[string]bool {
+	runes := []rune(normalizeForBigram(s))
+	set := map[string]bool{}
+	if len(runes) == 0 {
+		return set
+	}
+	if len(runes) == 1 {
+		set[string(runes)] = true
+		return set
+	}
+	for i := 0; i+1 < len(runes); i++ {
+		set[string(runes[i:i+2])] = true
+	}
+	return set
+}
+
+// jaccardOfSets is |A∩B| / |A∪B| over two precomputed char-bigram sets. An empty
+// set on either side (including both empty) yields 0 — a bodiless memory overlaps
+// nothing — matching the prior bigramJaccard semantics so novelty scoring and the
+// contradiction scan are unchanged by the precompute refactor. Callers that have
+// already tokenised their inputs use this directly to avoid rebuilding the sets;
+// see scanGroup, which shares one set per memory across all O(n²) comparisons.
+func jaccardOfSets(setA, setB map[string]bool) float64 {
 	if len(setA) == 0 || len(setB) == 0 {
 		return 0
 	}
 	inter := 0
-	for w := range setA {
-		if setB[w] {
+	for g := range setA {
+		if setB[g] {
 			inter++
 		}
 	}
@@ -212,12 +262,11 @@ func jaccardSimilarity(a, b string) float64 {
 	return float64(inter) / float64(union)
 }
 
-func wordSet(s string) map[string]bool {
-	set := map[string]bool{}
-	for _, w := range wordRE.FindAllString(strings.ToLower(s), -1) {
-		set[w] = true
-	}
-	return set
+// bigramJaccard is |A∩B| / |A∪B| over the two char-bigram sets. Retained for
+// callers working from raw strings (Ingest's novelty); it tokenises both sides on
+// every call, so hot pairwise loops should precompute and use jaccardOfSets.
+func bigramJaccard(a, b string) float64 {
+	return jaccardOfSets(charBigrams(a), charBigrams(b))
 }
 
 var stopwords = map[string]bool{
@@ -331,7 +380,7 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 	if len(existing) > 0 {
 		maxSim := 0.0
 		for _, m := range existing {
-			if s := jaccardSimilarity(content, m.Body); s > maxSim {
+			if s := bigramJaccard(content, m.Body); s > maxSim {
 				maxSim = s
 			}
 		}
@@ -497,6 +546,11 @@ func Feedback(id string, used, helpful bool) (FeedbackResult, error) {
 		}
 		mem.Body = body
 		mem.HitCount++
+		// §13: Feedback is the explicit-evidence channel. Record a distinct
+		// explicit_hits count + recency so survivorScore's explicit-trumps tier
+		// has a judgement basis separate from implicit/usage signals.
+		mem.ExplicitHits++
+		mem.LastExplicit = now().Format(dateLayout)
 		if used {
 			mem.Score = round1(mem.Score + 0.05)
 		}
@@ -512,7 +566,15 @@ func Feedback(id string, used, helpful bool) (FeedbackResult, error) {
 }
 
 // Cleanup moves expired active memories from notes/inbox into
-// archive/{project}, flipping their status to "archived".
+// archive/{project}, flipping their status to "archived". It then runs the §13
+// resolution phase (existing archival/scoring math is untouched): contradiction
+// candidates are gathered from online conflicts_with markers and the at-rest
+// ContradictionDetector, then funneled through ResolveContradictions.
+//
+// The automatic pass is deliberately conservative — AutoEvict is OFF, so Cleanup
+// only flags conflicts and writes the audit log; it never auto-supersedes. Actual
+// eviction is an explicit operator action (memory-cli resolve). First rollout
+// should still verify with ResolveOptions.DryRun before enabling eviction.
 func Cleanup() (CleanupResult, error) {
 	today := now().Format(dateLayout)
 	count := 0
@@ -567,15 +629,68 @@ func Cleanup() (CleanupResult, error) {
 			count++
 		}
 	}
-	return CleanupResult{Archived: count}, nil
+
+	resolved, err := resolutionPhase()
+	if err != nil {
+		return CleanupResult{}, err
+	}
+	return CleanupResult{Archived: count, Resolved: resolved}, nil
 }
 
-// Stats summarises the vault: total/active/archived counts and a by-type
-// breakdown of active memories.
-func Stats() (total, active, archived int, byType map[string]int, err error) {
+// resolutionPhase gathers contradiction candidates from online conflicts_with
+// markers (implicit source) and the at-rest ContradictionDetector (lexical /
+// holographic source), funnels them through ResolveContradictions, and returns
+// the number of pairs actually superseded. AutoEvict is OFF here (flag-only).
+func resolutionPhase() (int, error) {
+	active, err := readAllMemories("active")
+	if err != nil {
+		return 0, err
+	}
+
+	var cands []Contradiction
+	// Implicit candidates from durable conflicts_with markers. These carry only a
+	// low confidence on their own — the at-rest detector must independently
+	// corroborate the pair to lift it above the eviction floor.
+	seen := map[string]bool{}
+	for _, m := range active {
+		for _, partner := range m.ConflictsWith {
+			c := Contradiction{A: m.ID, B: partner, Source: "implicit", Confidence: implicitMarkerConfidence, Detail: "online conflicts_with marker"}
+			k := c.PairKey()
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			cands = append(cands, c)
+		}
+	}
+	// At-rest candidates from the injectable detector.
+	if ContradictionDetector != nil {
+		cands = append(cands, ContradictionDetector(active)...)
+	}
+
+	if len(cands) == 0 {
+		return 0, nil
+	}
+
+	results, err := ResolveContradictions(cands, ResolveOptions{AutoEvict: false})
+	if err != nil {
+		return 0, err
+	}
+	resolved := 0
+	for _, r := range results {
+		if r.Action == "superseded" {
+			resolved++
+		}
+	}
+	return resolved, nil
+}
+
+// Stats summarises the vault: total/active/archived/superseded counts and a
+// by-type breakdown of active memories.
+func Stats() (total, active, archived, superseded int, byType map[string]int, err error) {
 	all, err := readAllMemories("")
 	if err != nil {
-		return 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, err
 	}
 	byType = map[string]int{}
 	for _, m := range all {
@@ -585,7 +700,9 @@ func Stats() (total, active, archived int, byType map[string]int, err error) {
 			byType[m.Type]++
 		case "archived":
 			archived++
+		case "superseded":
+			superseded++
 		}
 	}
-	return len(all), active, archived, byType, nil
+	return len(all), active, archived, superseded, byType, nil
 }

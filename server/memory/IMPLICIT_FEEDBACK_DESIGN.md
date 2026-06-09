@@ -292,12 +292,12 @@ trigger a contradiction while the retained explicit ones still do.
 
 | File | Change |
 | --- | --- |
-| `memory.go` | + `ImplicitFeedback`, helpers, 3 frontmatter fields, consts/hooks |
-| `memory_api.py` | + `implicit_feedback` parity |
-| `cmd/memory-cli/main.go` | + `implicit` subcommand |
-| `memory_cli.py` | + `implicit` subcommand (parity) |
-| `memory_test.go` | + tests above |
-| `MEMORY.md` | document the mechanism, new fields, CLI, limitations |
+| `memory.go` | + `ImplicitFeedback`, helpers, 3 frontmatter fields, consts/hooks; + §13 `ResolveContradictions`/`survivorScore`/`Unsupersede`, 5 conflict fields, `superseded` status, `Cleanup` resolution phase |
+| `memory_api.py` | + `implicit_feedback` parity; + §13 `resolve_contradictions`/`survivor_score`/`unsupersede` parity |
+| `cmd/memory-cli/main.go` | + `implicit` subcommand; + `conflicts`/`resolve`/`unsupersede` subcommands |
+| `memory_cli.py` | + `implicit` subcommand (parity); + conflict subcommands (parity) |
+| `memory_test.go` | + tests above; + resolution tier/supersede/undo/audit-log tests |
+| `MEMORY.md` | document the mechanism, new fields, CLI, limitations; + §13 resolution + audit log |
 
 No changes outside `server/memory/`. No commits/pushes until reviewed and approved.
 
@@ -315,4 +315,229 @@ No changes outside `server/memory/`. No commits/pushes until reviewed and approv
    be too strict for a short memory quoted inside a long reply. Calibrate against
    real logs, or switch the long-reply case to containment (∩/memBigrams) like the
    short-memory fallback already does?
+
+## 13. Contradiction resolution (矛盾淘汰机制)
+
+### 13.0 What this section adds
+
+Two detectors find contradictions but **neither acts on them**:
+
+- **Approach B (existing)** — `holographic/retrieval.py :: contradict()` uses HRR
+  vectors + entity-Jaccard to surface contradictory *pairs* at rest. Detect-only.
+- **Approach A (this design)** — `ImplicitFeedback`'s per-turn / same-recall-set
+  contradiction marking. Detect-only (it sets `contradicted` / a `conflicts_with`
+  marker, never evicts).
+
+§13 is the **single resolution layer both funnel into**: given contradiction
+candidates, decide *which memory survives*, *what happens to the loser*, *when*,
+and *how it stays auditable & reversible*. It is deliberately **separate from
+detection** so the two detectors (and a future LLM judge) share one eviction
+policy and one audit trail, and so eviction never runs on the hot path.
+
+> **Scope note vs §2.** This intentionally extends beyond §2's "not touching
+> Cleanup": it adds a *new resolution phase* alongside `Cleanup`, but does **not**
+> modify `Cleanup`'s existing archival/scoring math. The §5 probation machinery
+> is **read** as an evidence input and is never mutated by resolution.
+
+### 13.1 Normalised input — `Contradiction`
+
+Both detectors are adapted into one struct so the resolver is detector-agnostic.
+`contradict()`'s `(id_a, id_b, hrr_cosine, entity_jaccard)` output maps directly;
+Approach A emits the same struct with `Source="implicit"`.
+
+```go
+// Contradiction is one candidate conflicting pair, detector-agnostic.
+type Contradiction struct {
+    A          string  `json:"a"`          // canonicalised so A < B by id (stable pair key)
+    B          string  `json:"b"`
+    Similarity float64 `json:"similarity"` // same-subject overlap (HRR cosine / entity Jaccard), 0..1
+    Confidence float64 `json:"confidence"` // detector's belief the pair is *contradictory* (not just similar), 0..1
+    Source     string  `json:"source"`     // "holographic" | "implicit" | "manual"
+    Detail     string  `json:"detail"`     // which entities/slots differ (for the audit log)
+}
+
+// PairKey returns the order-independent identity of the pair.
+func (c Contradiction) PairKey() string // = c.A + "|" + c.B, A<B already enforced
 ```
+
+### 13.2 Eviction strategy — who survives (combination, evidence-first)
+
+A **composite survivor score** decides the winner; higher survives. Pure recency
+or pure score alone each misfire (recency lets an unproven new note kill a
+long-confirmed one; score alone ignores preference *change*), so we combine, with
+evidence weighted highest and recency tempered by a half-life:
+
+```
+survivorScore(m) =
+      wScore    * m.Score
+    + wEvidence * evidence(m)        // explicit Feedback + promoted implicit_hits
+    + wRecency  * recencyFactor(m)   // 2^(-ageDays/recencyHalfLife)  ∈ (0,1]
+    + wHits     * log1p(m.HitCount)  // usage, low weight (already correlated w/ score)
+```
+
+`evidence(m)` counts higher-trust signals: explicit `Feedback` (used/helpful)
+dominates, then `implicit_hits` that have **passed probation** (a still-`pending`
+boost contributes little — an unproven memory cannot supersede a confirmed one).
+
+The decision is **tiered** for determinism and to refuse low-confidence evictions:
+
+1. **Abstain tier** — if `Confidence < resolveConfidence` → **do not evict**; mark
+   both `conflicts_with` and log a `flagged` decision. (Honours "never lower the
+   bar for false positives" — a weak contradiction signal must not delete data.)
+2. **Explicit-trumps tier** — if exactly one side has explicit `Feedback` evidence
+   and the other has none → that side wins outright (explicit > implicit, per §2).
+3. **Composite tier** — else winner = higher `survivorScore`, but **only if the
+   margin ≥ evictMargin**. If the two are within `evictMargin` (too close to call)
+   → abstain & flag, same as tier 1.
+
+This answers "score vs time vs frequency vs evidence": it's a weighted blend
+(evidence-first, recency-tempered, frequency-light) gated by a confidence floor
+and a margin guard, with an explicit-feedback override on top.
+
+### 13.3 Eviction action — supersede (soft), never hard-delete
+
+Reuse the existing archive machinery (`Cleanup` already moves files to
+`archive/{project}` and flips `status`). The loser is **superseded**, not deleted:
+
+- **Loser** → `status: "superseded"` (new value alongside `active`/`archived`),
+  moved to `archive/{project}`, with `superseded_by`, `superseded_at`,
+  `superseded_reason` set. File + all fields preserved → fully auditable & reversible.
+- **Winner** → gains `supersedes: [loserID]`; **its score/probation fields are not
+  touched** (no reward for winning — avoids gaming detection into a boost path).
+- **Recall is unchanged**: it already filters `status=="active"`, so a superseded
+  memory drops out of recall automatically — no new Recall logic, no §2 violation.
+
+`superseded` is kept distinct from `archived` (TTL expiry) so the audit trail
+records *why* a memory left active circulation.
+
+Hard delete is never the default; an operator-only `--purge` on the CLI can later
+remove superseded files, but the design ships with soft-delete only.
+
+### 13.4 Trigger timing — detect anytime, resolve in batch
+
+Hybrid, mapping each detector to where it naturally lives:
+
+| stage | who | what it does |
+| --- | --- | --- |
+| online (per turn) | Approach A in `ImplicitFeedback` | **mark only**: set `conflicts_with`, emit a `Contradiction{Source:"implicit"}` into a pending store. Never evicts (respects probation; avoids single-turn thrash). |
+| at rest (batch) | `ContradictionDetector` over the vault | produce `[]Contradiction` for the resolver. |
+| resolution (batch) | `ResolveContradictions`, run inside `Cleanup()` | the **only** place eviction happens: dedup pairs by `PairKey`, apply §13.2 tiers, supersede losers, write audit log. |
+
+Lazy resolution (resolve on next recall) is **rejected** as primary — a wrong
+memory could be recalled before the sweep. As an interim mitigation, Recall *may*
+optionally down-rank memories carrying an unresolved `conflicts_with` marker
+(documented option, off by default).
+
+### 13.5 Auditability & reversibility
+
+- **Self-describing frontmatter** on both files (`superseded_by` / `supersedes` /
+  `superseded_at` / `superseded_reason`).
+- **Append-only resolution log**: `vault/_contradictions.jsonl`, one record per
+  decision — `pair`, `action` (`superseded|flagged|skipped`), `winner`, `loser`,
+  both `survivorScore`s, the deciding factors, `source`, `confidence`, `margin`,
+  `auto|manual`, timestamp. **Abstentions are logged too**, so missed evictions
+  are auditable, not silent.
+- **User controls**: `memory-cli conflicts` lists open conflicts + recent
+  decisions; `memory-cli unsupersede <id>` restores a loser (`status`→`active`,
+  clears `superseded_*`, removes the winner's `supersedes` entry, appends a
+  reversal record).
+- **Dry-run**: `ResolveOptions.DryRun` reports decisions without writing — required
+  for first rollout.
+
+### 13.6 Data-structure changes (frontmatter, backward compatible)
+
+All new fields are `omitempty`; absent in old files → zero, so existing memories
+parse unchanged.
+
+```go
+// added to Memory
+ConflictsWith    []string `yaml:"conflicts_with,omitempty"`   // unresolved conflict partners
+SupersededBy     string   `yaml:"superseded_by,omitempty"`    // winner id (set on loser)
+Supersedes       []string `yaml:"supersedes,omitempty"`       // loser ids (set on winner)
+SupersededAt     string   `yaml:"superseded_at,omitempty"`    // date (dateLayout)
+SupersededReason string   `yaml:"superseded_reason,omitempty"`
+```
+
+`Status` gains a third value `"superseded"` (alongside `active`/`archived`).
+`Stats()` counts it separately. `Recall`'s default `status=="active"` filter
+already excludes it.
+
+### 13.7 Function signatures
+
+```go
+// Tunables (package consts)
+const (
+    resolveConfidence = 0.6  // min detector Confidence to even consider eviction
+    evictMargin       = 1.0  // min survivorScore gap (score units) to name a winner
+    recencyHalfLife   = 90   // days; recency weight halves every 90 days
+)
+const ( wScore = 1.0; wEvidence = 0.5; wRecency = 1.0; wHits = 0.1 )
+
+// Injectable at-rest detector (default lexical/HRR scan; LLM/holographic override),
+// mirroring the var ReferenceDetector indirection in §6.
+var ContradictionDetector func(memories []Memory) []Contradiction = lexicalContradictionScan
+
+type ResolveOptions struct {
+    DryRun    bool // compute + log decisions, write nothing
+    AutoEvict bool // false = only flag conflicts_with, never supersede
+}
+
+type ResolutionResult struct {
+    Pair   [2]string `json:"pair"`
+    Action string    `json:"action"` // superseded | flagged | skipped
+    Winner string    `json:"winner,omitempty"`
+    Loser  string    `json:"loser,omitempty"`
+    Margin float64   `json:"margin"`
+    Reason string    `json:"reason"`
+}
+
+// ResolveContradictions is the single chokepoint both detectors funnel into.
+// It dedups candidates by PairKey, applies the §13.2 tiers, performs the §13.3
+// supersede action (unless DryRun/!AutoEvict), and appends to _contradictions.jsonl.
+func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]ResolutionResult, error)
+
+// survivorScore is the §13.2 composite keep-score; higher survives.
+func survivorScore(m Memory) float64
+
+// Unsupersede restores a superseded loser to active and logs the reversal.
+func Unsupersede(id string) (Memory, error)
+
+// Cleanup gains a resolution phase (existing archival math untouched).
+type CleanupResult struct {
+    Archived int `json:"archived"`
+    Resolved int `json:"resolved"` // contradictions superseded this pass
+}
+```
+
+Python parity (`memory_api.py`): `resolve_contradictions(cands, dry_run=False,
+auto_evict=True) -> list[dict]`, `survivor_score(mem) -> float`,
+`unsupersede(id) -> dict`, module-level `contradiction_detector` callable — same
+constants and tiers so behaviour matches across ports.
+
+CLI (`cmd/memory-cli/main.go` + `memory_cli.py`):
+
+```bash
+memory-cli conflicts                      # list open conflicts + recent resolutions
+memory-cli resolve [--dry-run] [--no-evict]
+memory-cli unsupersede <id>
+```
+
+### 13.8 Probation safety (does not break §5)
+
+- Online `ImplicitFeedback` **only marks** — it never calls the resolver, so the
+  §5 promote/discard logic is untouched.
+- Resolution **reads** `implicit_hits`/`pending_score` as evidence but never
+  writes them; a still-`pending` (unproven) boost counts for little, so a memory
+  in probation cannot supersede a confirmed one on evidence alone.
+- The loser's fields are frozen in archive, so `Unsupersede` restores its exact
+  pre-eviction probation state.
+
+### 13.9 Open questions
+
+1. **Weights / `evictMargin`** — `wEvidence=0.5`, `evictMargin=1.0` are first
+   guesses; calibrate against real conflict pairs.
+2. **3+ way conflicts** — current model resolves pairs; a conflict *cluster*
+   (A↔B↔C) is handled as pairwise rounds. Need a cluster-winner pass instead?
+3. **Auto-supersede on strong recency** — should a much-newer, explicitly-confirmed
+   memory supersede regardless of the older one's score (preference change), or
+   always go through the margin guard?

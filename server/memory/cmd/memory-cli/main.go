@@ -183,16 +183,16 @@ func cmdCleanup(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Archived %d memories\n", res.Archived)
+	fmt.Printf("Archived %d memories | Resolved %d contradictions\n", res.Archived, res.Resolved)
 	return nil
 }
 
 func cmdStats(args []string) error {
-	total, active, archived, byType, err := memory.Stats()
+	total, active, archived, superseded, byType, err := memory.Stats()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Total: %d | Active: %d | Archived: %d\n", total, active, archived)
+	fmt.Printf("Total: %d | Active: %d | Archived: %d | Superseded: %d\n", total, active, archived, superseded)
 	fmt.Printf("By type: %v\n", byType)
 	return nil
 }
