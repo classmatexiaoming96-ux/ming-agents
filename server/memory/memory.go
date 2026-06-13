@@ -80,6 +80,13 @@ type Memory struct {
 	Source      string   `yaml:"source"`
 	Links       []string `yaml:"links"`
 
+	// §SHRIMP inject controls whether this memory is auto-injected into context.
+	// "always" = inject on every recall regardless of query (token-capped by budget).
+	// "query"  = inject only when matched by query (default, backwards-compatible).
+	// "never"  = never auto-inject (manual recall only).
+	// Orthogonal to Type; does not affect scoring or contradiction logic.
+	Inject string `yaml:"inject,omitempty"`
+
 	// §13 explicit 证据（Phase 1）— 与 implicit 解耦，explicit-trumps tier 读取。
 	// 旧文件无此字段 → 零值；历史上被 explicit feedback 过的老 memory 也算 0
 	// （无法回填），explicit-trumps 对它们不生效，按 composite tier 裁决。
@@ -87,9 +94,10 @@ type Memory struct {
 	LastExplicit string `yaml:"last_explicit,omitempty"`
 
 	// §7 implicit（Phase 3 依赖，提前加字段，本期不加逻辑）。
-	ImplicitHits int     `yaml:"implicit_hits,omitempty"`
-	PendingScore float64 `yaml:"pending_score,omitempty"`
-	LastImplicit string  `yaml:"last_implicit,omitempty"`
+	ImplicitHits  int     `yaml:"implicit_hits,omitempty"`
+	PendingScore  float64 `yaml:"pending_score,omitempty"`
+	LastImplicit  string  `yaml:"last_implicit,omitempty"`
+	PromotedHits  int     `yaml:"promoted_hits,omitempty"` // §13: implicit hits that survived probation → score
 
 	// §13 矛盾淘汰（Phase 0）。全部 omitempty：旧文件缺失 → 零值，向后兼容。
 	ConflictsWith    []string `yaml:"conflicts_with,omitempty"`    // 待裁决冲突伙伴 id（§7 在线标记写入）
@@ -134,14 +142,28 @@ var (
 // now is indirected so tests can pin the clock.
 var now = time.Now
 
-// computeID derives a short, content-addressed id (parity with Python md5[:8]).
+// computeID derives a content-addressed id from the FULL content (A4).
+//
+// The previous version hashed only the first 200 bytes, so two memories sharing
+// a templated prefix collided and silently overwrote each other (and their
+// accumulated evidence counters). Hashing the whole body removes that class of
+// collision; the id is widened to 16 hex (64 bits) to push random collisions far
+// beyond any realistic vault size. Hashing bytes of the whole string is also
+// rune-safe — there is no truncation point to split a multi-byte character.
 func computeID(content string) string {
-	head := content
-	if len(head) > 200 {
-		head = head[:200]
+	sum := md5.Sum([]byte(content))
+	return "mem_" + hex.EncodeToString(sum[:])[:16]
+}
+
+// truncateRunes returns the first n runes of s (A7). Plain byte slicing splits
+// multi-byte UTF-8 characters (every CJK char is 3 bytes), producing invalid
+// runes in titles/snippets; rune slicing never does.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	sum := md5.Sum([]byte(head))
-	return "mem_" + hex.EncodeToString(sum[:])[:8]
+	return string(r[:n])
 }
 
 // parseFrontmatter splits a yaml frontmatter block from the body.
@@ -168,26 +190,68 @@ func writeMemory(mem Memory, targetDir string) (string, error) {
 	}
 	path := filepath.Join(targetDir, mem.ID+".md")
 	content := fmt.Sprintf("---\n%s---\n%s", fm, mem.Body)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	// C1: write to a temp file then atomically rename into place. A reader (the
+	// Next.js vault viewer, a concurrent Recall) therefore never observes a
+	// half-written file, and a crash mid-write leaves the previous version intact
+	// rather than a truncated one. Rename within the same directory is atomic on
+	// POSIX filesystems.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("rename %s: %w", path, err)
 	}
 	return path, nil
 }
 
-// readAllMemories scans notes/inbox/archive. If status is non-empty, only
-// memories with that status are returned.
-func readAllMemories(status string) ([]Memory, error) {
+// readAllMemories scans notes/inbox/archive, optionally filtered by project and status.
+//
+// Partitioning (P0-2 + A5): when project != "", the notes/ scan descends only
+// into notes/{project}/ (the large subtree), but inbox/ is ALWAYS scanned and
+// filtered by the frontmatter project field — inbox holds active, below-threshold
+// memories that a project-scoped Recall/Brief must still see. The project filter
+// is applied on the frontmatter for every subdir, so a misfiled note can't leak.
+//
+// status = "active" skips archive/ entirely; status = "" reads all subdirs.
+//
+// Nested folders are descended into (Obsidian users routinely nest notes); the
+// old code's SkipDir-on-name pruning silently dropped those (A5).
+//
+// C3: if a crash between "write archive copy" and "remove notes copy" left the
+// same id in two places, the in-memory dedup at the end keeps the later-scanned
+// copy (archive wins over notes/inbox) so callers and Stats don't double-count.
+func readAllMemories(status, project string) ([]Memory, error) {
 	var results []Memory
-	for _, sub := range []string{"notes", "inbox", "archive"} {
+	subdirs := []string{"notes", "inbox", "archive"}
+
+	for _, sub := range subdirs {
 		root := filepath.Join(VaultDir, sub)
+
+		if sub == "archive" && status == "active" {
+			continue
+		}
 		if _, err := os.Stat(root); os.IsNotExist(err) {
 			continue
 		}
-		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+
+		scanRoot := root
+		if sub == "notes" && project != "" {
+			scanRoot = filepath.Join(root, project)
+			if _, err := os.Stat(scanRoot); os.IsNotExist(err) {
+				continue
+			}
+		}
+
+		err := filepath.WalkDir(scanRoot, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if d.IsDir() || !strings.HasSuffix(path, ".md") {
+			if d.IsDir() {
+				return nil // descend into nested folders
+			}
+			if !strings.HasSuffix(path, ".md") {
 				return nil
 			}
 			raw, err := os.ReadFile(path)
@@ -201,6 +265,9 @@ func readAllMemories(status string) ([]Memory, error) {
 			if status != "" && mem.Status != status {
 				return nil
 			}
+			if project != "" && mem.Project != project {
+				return nil
+			}
 			mem.Body = body
 			mem.Path = path
 			results = append(results, mem)
@@ -210,7 +277,97 @@ func readAllMemories(status string) ([]Memory, error) {
 			return nil, err
 		}
 	}
-	return results, nil
+	return dedupeByID(results), nil
+}
+
+// dedupeByID collapses duplicate ids that a crash window may have left on disk
+// (C3), keeping the last occurrence. readAllMemories scans notes→inbox→archive,
+// so the archived/superseded copy (the intended final location) wins over an
+// orphaned active copy. In the normal no-duplicate case the input is returned
+// in the same order, so determinism is preserved.
+func dedupeByID(in []Memory) []Memory {
+	idx := map[string]int{}
+	out := make([]Memory, 0, len(in))
+	for _, m := range in {
+		if m.ID == "" {
+			out = append(out, m)
+			continue
+		}
+		if i, ok := idx[m.ID]; ok {
+			out[i] = m // later copy wins
+			continue
+		}
+		idx[m.ID] = len(out)
+		out = append(out, m)
+	}
+	return out
+}
+
+// readMemoriesByIDs loads only the named memories instead of walking the whole
+// vault (B1). It probes the likely on-disk locations directly — notes/{project}
+// and the flat inbox/ — and resolves any remainder (other projects, nested
+// folders, archive) with a single fallback walk. In the common project-scoped,
+// FTS-candidate recall this performs zero walks; it is never worse than one full
+// scan. Results are returned in the input id order (i.e. BM25 rank order), so a
+// later stable sort preserves relevance among equal-Score memories.
+func readMemoriesByIDs(ids []string, status, project string) ([]Memory, error) {
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	found := map[string]Memory{}
+
+	probe := func(path string) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		mem, body, err := parseFrontmatter(string(raw))
+		if err != nil || mem.ID == "" || !want[mem.ID] {
+			return
+		}
+		mem.Body = body
+		mem.Path = path
+		found[mem.ID] = mem
+	}
+
+	for id := range want {
+		if project != "" {
+			probe(filepath.Join(VaultDir, "notes", project, id+".md"))
+		}
+		probe(filepath.Join(VaultDir, "inbox", id+".md"))
+	}
+
+	// Fallback single walk only if a direct probe missed something.
+	for id := range want {
+		if _, ok := found[id]; !ok {
+			all, err := readAllMemories(status, "")
+			if err != nil {
+				return nil, err
+			}
+			for _, m := range all {
+				if want[m.ID] {
+					found[m.ID] = m
+				}
+			}
+			break
+		}
+	}
+
+	var out []Memory
+	seen := map[string]bool{}
+	for _, id := range ids {
+		m, ok := found[id]
+		if !ok || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if status != "" && m.Status != status {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 // §6 共享词法原语：char-bigram Jaccard。CJK 友好（rune 级 2-gram），由 Ingest
@@ -272,6 +429,163 @@ func bigramJaccard(a, b string) float64 {
 var stopwords = map[string]bool{
 	"the": true, "and": true, "for": true, "with": true,
 	"from": true, "this": true, "that": true,
+}
+
+// Budget caps the token budget for Brief injection.
+// Rough estimate: 1 token ≈ 4 chars for English, 2 for CJK.
+// A SafetyMargin is applied to leave room for framing and the caller.
+type Budget struct {
+	MaxTokens int // hard cap; Brief respects it or fails loudly
+}
+
+// DefaultBudget is the standard budget when none is specified.
+// Currently 32k tokens — caller can override via Brief(project, query, Budget{MaxTokens: N}).
+const DefaultBudgetTokens = 32000
+
+// BriefAudit records what Brief did for observability.
+type BriefAudit struct {
+	AlwaysCount   int      // how many inject=always memories were injected
+	QueryCount     int      // how many query-matched memories were injected
+	TotalTokens    int      // rough token estimate of injected content
+	Truncated      bool     // true if budget forced an early stop
+	TruncatedAt    string   // id of the memory where truncation occurred
+	ConflictsDownrank int   // how many memories were down-ranked due to conflicts_with
+	InjectedIDs    []string // ids actually injected, in order (for the implicit-feedback loop)
+}
+
+// Brief assembles a memory block for injection, subject to a token budget.
+// Layer 0: inject=always memories first (token-capped).
+// Layer 1: query-based recall, sorted by score, down-ranking conflicts_with entries.
+// Truncation is always auditable via BriefAudit.
+// Fails loudly on inject failures (does not silently skip).
+func Brief(project, query string, budget Budget) (string, BriefAudit, error) {
+	if budget.MaxTokens <= 0 {
+		budget.MaxTokens = DefaultBudgetTokens
+	}
+
+	// Layer 0: collect all inject=always memories in the project.
+	always, err := readAllMemories("active", project)
+	if err != nil {
+		return "", BriefAudit{}, fmt.Errorf("readAllMemories for always: %w", err)
+	}
+	var alwaysList []Memory
+	for _, m := range always {
+		if m.Inject == "always" {
+			alwaysList = append(alwaysList, m)
+		}
+	}
+	// A6: inject the highest-Score always-memories first, so that when the budget
+	// is tight which ones survive is deterministic (the old code used filesystem
+	// walk order, making "why wasn't this injected?" unanswerable).
+	sort.SliceStable(alwaysList, func(i, j int) bool {
+		return alwaysList[i].Score > alwaysList[j].Score
+	})
+
+	// Layer 1: query-based recall. downrankConflicts=true makes Recall apply the
+	// Score×0.5 penalty to conflicts_with-marked memories and re-sort, so the
+	// down-ranking the doc promises actually changes the injection order (A6).
+	queryMemories, _, err := Recall(query, project, "", nil, 0, "active", 0, true)
+	if err != nil {
+		return "", BriefAudit{}, fmt.Errorf("Recall for brief: %w", err)
+	}
+
+	// Build conflict set for down-ranking.
+	conflictSet := map[string]bool{}
+	for _, m := range alwaysList {
+		for _, cw := range m.ConflictsWith {
+			conflictSet[cw] = true
+		}
+	}
+	for _, m := range queryMemories {
+		for _, cw := range m.ConflictsWith {
+			conflictSet[cw] = true
+		}
+	}
+
+	var injected []Memory
+	injectedSet := map[string]bool{}
+	audit := BriefAudit{}
+
+	// Rough token estimate: count runes, divide by ~3.5 (mixed CJK/English).
+	estimateTokens := func(s string) int {
+		return len([]rune(s)) / 3
+	}
+
+	usedTokens := 0
+
+	// Layer 0: inject always memories, respect budget.
+	for _, m := range alwaysList {
+		toks := estimateTokens(m.Title) + estimateTokens(m.Body)
+		if usedTokens+toks > budget.MaxTokens {
+			// budget exhausted — stop injecting always memories
+			break
+		}
+		injected = append(injected, m)
+		injectedSet[m.ID] = true
+		usedTokens += toks
+		audit.AlwaysCount++
+	}
+	audit.TotalTokens = usedTokens
+
+	// Layer 1: query memories, sorted by score.
+	// Down-rank those in conflictSet (they get injected at lower priority).
+	// But still include them if budget allows.
+	remainingBudget := budget.MaxTokens - usedTokens
+
+	// Inject query memories until budget runs out. queryMemories already arrives
+	// conflict-down-ranked and re-sorted from Recall, so iteration order reflects
+	// the penalty.
+	for _, m := range queryMemories {
+		if injectedSet[m.ID] { // dedup against Layer 0
+			continue
+		}
+
+		toks := estimateTokens(m.Title) + estimateTokens(m.Body)
+		if toks > remainingBudget && remainingBudget > 0 {
+			// We could still fit smaller memories but this one is too big.
+			// Only truncate if this is the first memory that doesn't fit.
+			audit.Truncated = true
+			audit.TruncatedAt = m.ID
+			break
+		}
+
+		// Down-rank: if this memory is in conflictSet, note it but still inject
+		// if budget allows (conflict marker means "treat carefully", not "skip").
+		if conflictSet[m.ID] {
+			audit.ConflictsDownrank++
+		}
+
+		if toks <= remainingBudget {
+			injected = append(injected, m)
+			injectedSet[m.ID] = true
+			usedTokens += toks
+			remainingBudget -= toks
+			audit.QueryCount++
+		} else {
+			// Budget exhausted
+			audit.Truncated = true
+			audit.TruncatedAt = m.ID
+			break
+		}
+	}
+
+	audit.TotalTokens = usedTokens
+
+	// Assemble the block.
+	var sb strings.Builder
+	for _, m := range injected {
+		// Include inject=always marker in the block for transparency.
+		prefix := ""
+		if m.Inject == "always" {
+			prefix = "[always] "
+		}
+		fmt.Fprintf(&sb, "%s%s\n---\n", prefix, m.Title)
+		sb.WriteString(m.Body)
+		sb.WriteString("\n\n")
+		audit.InjectedIDs = append(audit.InjectedIDs, m.ID)
+	}
+
+	return sb.String(), audit, nil
 }
 
 // classification holds the auto-inferred type/project/tags for content.
@@ -358,11 +672,7 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 		tags = auto.Tags
 	}
 	if title == "" {
-		title = content
-		if len(title) > 60 {
-			title = title[:60]
-		}
-		title = strings.ReplaceAll(title, "\n", " ")
+		title = strings.ReplaceAll(truncateRunes(content, 60), "\n", " ")
 	}
 	if source == "" {
 		source = "manual"
@@ -372,7 +682,7 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 	today := now().Format(dateLayout)
 
 	// novelty: 1 - highest similarity to any existing active memory.
-	existing, err := readAllMemories("active")
+	existing, err := readAllMemories("active", "")
 	if err != nil {
 		return Result{}, err
 	}
@@ -430,7 +740,32 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 		Status:      "active",
 		Source:      source,
 		Links:       []string{},
+		Inject:      "query", // P1-3: default inject mode; omitempty keeps old files compatible
 		Body:        content,
+	}
+
+	// A4: re-ingesting identical content yields the same id. Instead of resetting
+	// the row (and destroying the usage/evidence counters that survivorScore and
+	// §13 depend on), carry the prior counters forward and keep the original
+	// creation date. existing is the active set we just read for novelty, so this
+	// costs no extra I/O. (Novelty itself is intentionally still computed against
+	// the full set including the prior copy, so a duplicate's score still drops.)
+	for i := range existing {
+		if existing[i].ID == id {
+			p := existing[i]
+			mem.HitCount = p.HitCount
+			mem.ExplicitHits = p.ExplicitHits
+			mem.LastExplicit = p.LastExplicit
+			mem.ImplicitHits = p.ImplicitHits
+			mem.PromotedHits = p.PromotedHits
+			mem.PendingScore = p.PendingScore
+			mem.LastImplicit = p.LastImplicit
+			mem.CreatedAt = p.CreatedAt
+			if p.Inject != "" {
+				mem.Inject = p.Inject
+			}
+			break
+		}
 	}
 
 	accepted := score >= scoreThreshold
@@ -446,6 +781,11 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 		return Result{}, err
 	}
 
+	// Phase 1: update FTS5 index. Log errors so index drift is observable.
+	if err := IndexMemory(id, title, content, project, memType, tags); err != nil {
+		fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", id, err)
+	}
+
 	reason := fmt.Sprintf("score=%g (accepted)", score)
 	if !accepted {
 		reason = fmt.Sprintf("score=%g (below threshold %g)", score, scoreThreshold)
@@ -455,20 +795,56 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 
 // Recall returns active memories matching the filters, highest score first.
 // Empty string / nil / zero filters are ignored. status defaults to "active".
-func Recall(query, project, memType string, tags []string, minScore float64, status string, limit int) ([]Memory, error) {
+// Returns results, total (all matched before limit), error.
+// The returned total lets callers know if the result was truncated.
+//
+// Phase 1: when query is non-empty, FTS5 BM25 is used to pre-filter candidates
+// before Go-side filtering. When query is empty, all memories matching
+// status/project are considered (full scan, same as before).
+//
+// Optional DownrankConflicts parameter (default false): when true, memories
+// that appear in any other memory's conflicts_with list are penalized (score × 0.5)
+// before ranking, so contradicted memories surface lower in normal recall too.
+// (Brief always applies this penalty regardless of this flag.)
+func Recall(query, project, memType string, tags []string, minScore float64, status string, limit int, downrankConflicts ...bool) ([]Memory, int, error) {
 	if status == "" {
 		status = "active"
 	}
-	memories, err := readAllMemories(status)
-	if err != nil {
-		return nil, err
+
+	// Phase 1: use FTS5 to get candidate IDs when query is present.
+	//
+	// A1: fall back to the full-scan + substring path whenever FTS does not give
+	// us a usable candidate set — that means BOTH on error AND on an empty result.
+	// The old code only fell back on error, so a query that FTS simply failed to
+	// MATCH (very common for CJK, since unicode61 does not segment Han runs)
+	// produced a non-nil empty candidate set and filtered out every memory.
+	// B1: when we DO have candidates, read just those files instead of walking
+	// the whole vault.
+	var candidateIDs map[string]bool
+	var memories []Memory
+	if query != "" {
+		ids, err := SearchIDs(query, project, memType, ftsCandidateLimit(limit))
+		if err == nil && len(ids) > 0 {
+			candidateIDs = map[string]bool{}
+			for _, id := range ids {
+				candidateIDs[id] = true
+			}
+			memories, err = readMemoriesByIDs(ids, status, project)
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+	}
+	if candidateIDs == nil { // no query, FTS error, or zero FTS hits → full scan
+		var err error
+		memories, err = readAllMemories(status, project)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	var results []Memory
 	for _, m := range memories {
-		if project != "" && m.Project != project {
-			continue
-		}
 		if memType != "" && m.Type != memType {
 			continue
 		}
@@ -479,23 +855,55 @@ func Recall(query, project, memType string, tags []string, minScore float64, sta
 			continue
 		}
 		if query != "" {
-			q := strings.ToLower(query)
-			if !strings.Contains(strings.ToLower(m.Body), q) &&
-				!strings.Contains(strings.ToLower(m.Title), q) {
-				continue
+			// FTS5 already filtered; candidateIDs == nil means FTS5 unavailable.
+			// Only apply substring filter when we have NO FTS5 pre-filter.
+			if candidateIDs == nil {
+				q := strings.ToLower(query)
+				if !strings.Contains(strings.ToLower(m.Body), q) &&
+					!strings.Contains(strings.ToLower(m.Title), q) {
+					continue
+				}
 			}
 		}
 		results = append(results, m)
+	}
+
+	// Optional conflict down-ranking: build the conflict set and penalize.
+	if len(downrankConflicts) > 0 && downrankConflicts[0] {
+		conflictSet := map[string]bool{}
+		for _, m := range results {
+			for _, cw := range m.ConflictsWith {
+				conflictSet[cw] = true
+			}
+		}
+		for i := range results {
+			if conflictSet[results[i].ID] {
+				results[i].Score *= 0.5
+			}
+		}
 	}
 
 	sort.SliceStable(results, func(i, j int) bool {
 		return results[i].Score > results[j].Score
 	})
 
+	total := len(results)
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
-	return results, nil
+	return results, total, nil
+}
+
+// ftsCandidateLimit sizes the BM25 candidate window (B2). It must exceed the
+// caller's final limit so that Go-side filters (status/type/tags) and any stale
+// rows still left in the index don't starve the result set. We over-fetch by 3×
+// with a floor of 50.
+func ftsCandidateLimit(limit int) int {
+	n := 50
+	if limit*3 > n {
+		n = limit * 3
+	}
+	return n
 }
 
 func anyTagMatch(want, have []string) bool {
@@ -626,6 +1034,12 @@ func Cleanup() (CleanupResult, error) {
 			if err := os.Remove(mem.Path); err != nil {
 				return CleanupResult{}, fmt.Errorf("remove %s: %w", mem.Path, err)
 			}
+			// B2: an archived memory leaves the active set, so drop it from the FTS
+			// index — otherwise stale ids keep crowding the BM25 candidate window.
+			// Non-fatal: index drift is observable and self-heals on RebuildIndex.
+			if err := DeleteFromIndex(mem.ID); err != nil {
+				fmt.Fprintf(os.Stderr, "[memory] FTS5 delete error for %s: %v\n", mem.ID, err)
+			}
 			count++
 		}
 	}
@@ -642,7 +1056,7 @@ func Cleanup() (CleanupResult, error) {
 // holographic source), funnels them through ResolveContradictions, and returns
 // the number of pairs actually superseded. AutoEvict is OFF here (flag-only).
 func resolutionPhase() (int, error) {
-	active, err := readAllMemories("active")
+	active, err := readAllMemories("active", "")
 	if err != nil {
 		return 0, err
 	}
@@ -688,7 +1102,7 @@ func resolutionPhase() (int, error) {
 // Stats summarises the vault: total/active/archived/superseded counts and a
 // by-type breakdown of active memories.
 func Stats() (total, active, archived, superseded int, byType map[string]int, err error) {
-	all, err := readAllMemories("")
+	all, err := readAllMemories("", "")
 	if err != nil {
 		return 0, 0, 0, 0, nil, err
 	}

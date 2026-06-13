@@ -62,6 +62,9 @@ func (s *Server) Handler() http.Handler {
 	graphHandler := api.NewGraphHandler(s.daemon.pool, s.registry)
 	graphHandler.RegisterRoutes(mux)
 
+	// Memory API routes (D1: expose the self-evolving memory to agents/console).
+	s.registerMemoryRoutes(mux)
+
 	return cors(mux)
 }
 

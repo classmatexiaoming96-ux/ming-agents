@@ -101,10 +101,11 @@ func recencyFactor(m Memory) float64 {
 	return math.Pow(2, -ageDays/recencyHalfLife)
 }
 
-// evidence counts higher-trust signals. Phase 1 degraded form: explicit Feedback
-// only (ExplicitHits). §7's promoted implicit_hits join here in Phase 3.
+// evidence counts higher-trust signals. §13.2 specifies explicit + promoted
+// implicit hits (ImplicitHits that survived the probation window and were
+// promoted to score carry trust comparable to explicit feedback).
 func evidence(m Memory) float64 {
-	return float64(m.ExplicitHits)
+	return float64(m.ExplicitHits) + float64(m.PromotedHits)
 }
 
 // survivorScore is the §13.2 composite keep-score; higher survives.
@@ -127,6 +128,27 @@ type decision struct {
 
 // decide applies the three §13.2 tiers to an active pair (a, b) under candidate c.
 func decide(a, b Memory, c Contradiction) decision {
+	// P0-3 §13 identity guard: inject=always memories are never auto-superseded.
+	// They can be flagged but survive any survivorScore comparison.
+	// This is a pre-tier guard, not a replacement for the confidence floor.
+	if a.Inject == "always" || b.Inject == "always" {
+		loser := "unknown"
+		if a.Inject == "always" {
+			loser = a.ID
+		}
+		if b.Inject == "always" {
+			loser = b.ID
+		}
+		return decision{
+			action:    "flagged",
+			winnerID:  "", // no winner — always memories are immortal for eviction
+			loserID:   loser,
+			margin:    0,
+			reason:    fmt.Sprintf("inject=always guard: %s has inject=always, never auto-superseded", loser),
+			hasWinner: false,
+		}
+	}
+
 	// Layer 1: confidence floor — a weak signal must never delete data.
 	if c.Confidence < resolveConfidence {
 		return decision{
@@ -219,7 +241,7 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 		order = append(order, k)
 	}
 
-	active, err := readAllMemories("active")
+	active, err := readAllMemories("active", "")
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +293,13 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 			res.Loser = d.loserID
 		}
 
+		// C4: a flagged pair that already carries mutual conflicts_with markers is
+		// a no-op repeat (every Cleanup re-derives the same pending conflicts). Skip
+		// re-appending it to the audit log so the log records state TRANSITIONS, not
+		// one line per pending pair per run. Supersede/skip always log.
+		alreadyFlagged := finalAction == "flagged" &&
+			containsString(a.ConflictsWith, b.ID) && containsString(b.ConflictsWith, a.ID)
+
 		if !opts.DryRun {
 			switch finalAction {
 			case "superseded":
@@ -293,6 +322,10 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 				if err := flagConflict(c.A, c.B, idx); err != nil {
 					return nil, err
 				}
+			}
+			if alreadyFlagged {
+				results = append(results, res)
+				continue
 			}
 			if err := appendContradictionLog(auditRecord{
 				Time:       now().Format(time.RFC3339),
@@ -338,6 +371,11 @@ func persistSupersede(winner, loser Memory) error {
 	if _, err := writeMemory(winner, filepath.Dir(winner.Path)); err != nil {
 		return err
 	}
+	// B2: the loser is now superseded (out of the active set) — drop it from the
+	// FTS index so it stops occupying BM25 candidate slots. Non-fatal.
+	if err := DeleteFromIndex(loser.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "[memory] FTS5 delete error for %s: %v\n", loser.ID, err)
+	}
 	return nil
 }
 
@@ -360,7 +398,7 @@ func flagConflict(idA, idB string, idx map[string]Memory) error {
 // Unsupersede restores a superseded loser to active, clears its supersede fields,
 // removes the winner's supersedes entry, and appends a reversal record.
 func Unsupersede(id string) (Memory, error) {
-	all, err := readAllMemories("superseded")
+	all, err := readAllMemories("superseded", "")
 	if err != nil {
 		return Memory{}, err
 	}
@@ -400,10 +438,14 @@ func Unsupersede(id string) (Memory, error) {
 			return Memory{}, fmt.Errorf("remove %s: %w", oldPath, err)
 		}
 	}
+	// B2: the loser is active again — re-add it to the FTS index. Non-fatal.
+	if err := IndexMemory(loser.ID, loser.Title, loser.Body, loser.Project, loser.Type, loser.Tags); err != nil {
+		fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", loser.ID, err)
+	}
 
 	// Remove the loser from the winner's supersedes list, if the winner is around.
 	if winnerID != "" {
-		actives, err := readAllMemories("active")
+		actives, err := readAllMemories("active", "")
 		if err != nil {
 			return Memory{}, err
 		}
@@ -547,6 +589,15 @@ func modeOf(opts ResolveOptions) string {
 		return "auto"
 	}
 	return "manual"
+}
+
+func containsString(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUnique(s []string, v string) []string {

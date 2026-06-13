@@ -88,7 +88,7 @@ func TestResolveContradictionsDryRun(t *testing.T) {
 		t.Errorf("DryRun winner/loser = %s/%s, want %s/%s", res[0].Winner, res[0].Loser, winner.ID, loser.ID)
 	}
 	// No side effects: both still active, no audit log.
-	active, _ := readAllMemories("active")
+	active, _ := readAllMemories("active", "")
 	if len(active) != 2 {
 		t.Errorf("DryRun mutated vault: %d active memories, want 2", len(active))
 	}
@@ -107,7 +107,7 @@ func TestResolveContradictionsDryRun(t *testing.T) {
 	if _, err := os.Stat(loser.Path); !os.IsNotExist(err) {
 		t.Errorf("loser file still at original path %s", loser.Path)
 	}
-	sup, _ := readAllMemories("superseded")
+	sup, _ := readAllMemories("superseded", "")
 	if len(sup) != 1 || sup[0].ID != loser.ID {
 		t.Fatalf("expected loser superseded, got %+v", sup)
 	}
@@ -117,7 +117,7 @@ func TestResolveContradictionsDryRun(t *testing.T) {
 	if filepath.Dir(sup[0].Path) != filepath.Join(VaultDir, "archive", "p") {
 		t.Errorf("loser not in archive/p: %s", sup[0].Path)
 	}
-	act, _ := readAllMemories("active")
+	act, _ := readAllMemories("active", "")
 	if len(act) != 1 || act[0].ID != winner.ID {
 		t.Fatalf("expected only winner active, got %+v", act)
 	}
@@ -136,7 +136,7 @@ func TestResolveContradictionsDryRun(t *testing.T) {
 	if restored.Status != "active" || restored.SupersededBy != "" {
 		t.Errorf("restored memory not clean: %+v", restored)
 	}
-	act, _ = readAllMemories("active")
+	act, _ = readAllMemories("active", "")
 	if len(act) != 2 {
 		t.Errorf("after unsupersede: %d active, want 2", len(act))
 	}
@@ -164,11 +164,11 @@ func TestResolveAbstainsOnLowConfidence(t *testing.T) {
 	if res[0].Action != "flagged" {
 		t.Errorf("low-confidence action = %q, want flagged", res[0].Action)
 	}
-	if sup, _ := readAllMemories("superseded"); len(sup) != 0 {
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 0 {
 		t.Errorf("low-confidence pass superseded %d memories, want 0", len(sup))
 	}
 	// Both sides carry the durable conflicts_with marker.
-	act, _ := readAllMemories("active")
+	act, _ := readAllMemories("active", "")
 	for _, m := range act {
 		if len(m.ConflictsWith) == 0 {
 			t.Errorf("memory %s missing conflicts_with marker after flag", m.ID)
@@ -224,7 +224,7 @@ func TestResolveExplicitTrumpsAbstainsOnBlowout(t *testing.T) {
 	if !strings.Contains(res[0].Reason, "explicit-trumps abstained") {
 		t.Errorf("reason = %q, want explicit-trumps abstained", res[0].Reason)
 	}
-	if sup, _ := readAllMemories("superseded"); len(sup) != 0 {
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 0 {
 		t.Errorf("blowout superseded %d memories, want 0 (the superior memory must survive)", len(sup))
 	}
 }
@@ -264,7 +264,7 @@ func TestResolveDedupAndAutoEvictOff(t *testing.T) {
 	if res[0].Action != "flagged" {
 		t.Errorf("AutoEvict=false action = %q, want flagged", res[0].Action)
 	}
-	if sup, _ := readAllMemories("superseded"); len(sup) != 0 {
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 0 {
 		t.Errorf("AutoEvict=false superseded %d, want 0", len(sup))
 	}
 }
@@ -355,10 +355,10 @@ func TestCleanupDrivesResolutionPhase(t *testing.T) {
 	if res.Resolved != 0 {
 		t.Errorf("Resolved = %d, want 0 (AutoEvict off → flag-only)", res.Resolved)
 	}
-	if sup, _ := readAllMemories("superseded"); len(sup) != 0 {
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 0 {
 		t.Errorf("Cleanup superseded %d memories, want 0", len(sup))
 	}
-	active, _ := readAllMemories("active")
+	active, _ := readAllMemories("active", "")
 	if len(active) != 2 {
 		t.Fatalf("active count = %d, want 2 (both survive flag-only resolution)", len(active))
 	}

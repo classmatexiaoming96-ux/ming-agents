@@ -19,6 +19,7 @@ import (
 	"github.com/ming-agents/server/agent"
 	"github.com/ming-agents/server/codegraph"
 	"github.com/ming-agents/server/db"
+	"github.com/ming-agents/server/memory"
 	"github.com/ming-agents/server/task"
 )
 
@@ -69,6 +70,12 @@ func run() error {
 	log.Printf("synced %d agent(s)", len(reg.All()))
 
 	bus := NewEventBus()
+
+	// Initialize the memory FTS5 index (idempotent). Non-fatal: a broken index
+	// degrades Recall to substring matching rather than taking the daemon down.
+	if err := memory.InitFTS(); err != nil {
+		log.Printf("memory: FTS init failed (recall will fall back to substring): %v", err)
+	}
 
 	// Initialize CodeGraph CLI and registry
 	codegraphCLI := codegraph.NewCodeGraphCLI(cfg.CodeGraphPath)

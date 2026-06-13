@@ -34,6 +34,10 @@ func main() {
 		err = cmdCleanup(args)
 	case "stats":
 		err = cmdStats(args)
+	case "implicit":
+		err = cmdImplicit(args)
+	case "fts":
+		err = cmdFTS(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -56,6 +60,8 @@ usage:
   memory-cli search [--query Q] [--project P] [--type T] [--tags a,b] [--min-score N] [--limit N]
   memory-cli list [--type T] [--project P] [--status S] [--limit N]
   memory-cli feedback <id> [--helpful]
+  memory-cli implicit <id[,id2,...]> --log "<conversation text>"
+  memory-cli fts rebuild
   memory-cli cleanup
   memory-cli stats`)
 }
@@ -127,7 +133,7 @@ func cmdSearch(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	results, err := memory.Recall(*query, *project, *typ, splitTags(*tags), *minScore, "active", *limit)
+	results, _, err := memory.Recall(*query, *project, *typ, splitTags(*tags), *minScore, "active", *limit)
 	if err != nil {
 		return err
 	}
@@ -151,7 +157,7 @@ func cmdList(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	results, err := memory.Recall("", *project, *typ, nil, 0, *status, *limit)
+	results, _, err := memory.Recall("", *project, *typ, nil, 0, *status, *limit)
 	if err != nil {
 		return err
 	}
@@ -197,9 +203,53 @@ func cmdStats(args []string) error {
 	return nil
 }
 
+func cmdImplicit(args []string) error {
+	fs := flag.NewFlagSet("implicit", flag.ExitOnError)
+	log := fs.String("log", "", "conversation log (reply text for this turn)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{})); err != nil {
+		return err
+	}
+	if *log == "" {
+		return fmt.Errorf("implicit requires --log")
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("implicit requires <id[,id2,...]>")
+	}
+	ids := strings.Split(fs.Arg(0), ",")
+	results, err := memory.ImplicitFeedback(ids, *log)
+	if err != nil {
+		return err
+	}
+	for _, r := range results {
+		fmt.Printf("id=%s found=%v outcome=%s ref=%.2f hit_count=%d score=%.1f pending=%.2f\n",
+			r.ID, r.Found, r.Outcome, r.Reference, r.HitCount, r.Score, r.Pending)
+	}
+	return nil
+}
+
+func cmdFTS(args []string) error {
+	fs := flag.NewFlagSet("fts", flag.ExitOnError)
+	rebuild := fs.Bool("rebuild", false, "rebuild the FTS5 index from vault")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *rebuild {
+		count, err := memory.RebuildIndex()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("FTS5 index rebuilt: %d memories indexed\n", count)
+		return nil
+	}
+	fs.Usage()
+	return fmt.Errorf("fts: specify --rebuild")
+}
+
 func snippet(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	// A7: rune-aware truncation so CJK snippets don't end in a mojibake byte.
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n])
 	}
 	return s
 }
