@@ -3,8 +3,9 @@
 // vault (notes / inbox / archive), retrieves them with simple filters, records
 // usage feedback, and archives expired entries.
 //
-// The vault lives outside the repository (defaults to $HOME/.hermes/vault) so
-// it can be shared with the legacy Python CLI. Override VaultDir for tests.
+// The vault defaults to <repo>/.memory/vault so the data lives alongside the
+// code base; set MEMORY_VAULT_DIR to override, or fall back to the legacy
+// $HOME/.hermes/vault when no repo root is found. Override VaultDir for tests.
 package memory
 
 import (
@@ -23,13 +24,52 @@ import (
 )
 
 // VaultDir is the root of the Obsidian vault. It defaults to
-// $HOME/.hermes/vault and may be reassigned (e.g. in tests).
+// <repo>/.memory/vault so the memory data lives alongside the code, and may be
+// reassigned (e.g. in tests) or overridden via MEMORY_VAULT_DIR.
 var VaultDir = defaultVaultDir()
 
+// defaultVaultDir resolves the vault root. Precedence:
+//  1. $MEMORY_VAULT_DIR if set (explicit override).
+//  2. <repo>/.memory/vault — keeps memory data next to the code base.
+//  3. $HOME/.hermes/vault — backward-compatible fallback when no repo root is
+//     found (preserves the legacy location for existing deployments).
 func defaultVaultDir() string {
-	// os.ExpandEnv keeps parity with the Python version's path handling and
-	// works for any user/home directory.
-	return os.ExpandEnv("$HOME/.hermes/vault")
+	if v := os.Getenv("MEMORY_VAULT_DIR"); v != "" {
+		return v
+	}
+	return filepath.Join(storageBase(), "vault")
+}
+
+// storageBase is the directory that holds the vault and the FTS index. It is
+// <repo>/.memory when a repository root can be located by walking up from the
+// working directory for a .git marker; otherwise it falls back to $HOME/.hermes
+// so the legacy paths ($HOME/.hermes/vault and $HOME/.hermes/memory.fts.db)
+// keep working unchanged.
+func storageBase() string {
+	if root := findRepoRoot(); root != "" {
+		return filepath.Join(root, ".memory")
+	}
+	return os.ExpandEnv("$HOME/.hermes")
+}
+
+// findRepoRoot walks up from the current working directory looking for a .git
+// entry (a directory in a normal clone, a file in a worktree/submodule). It
+// returns "" if none is found before the filesystem root.
+func findRepoRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // TypeTTL maps a memory type to its lifetime in days. A value of 0 means the

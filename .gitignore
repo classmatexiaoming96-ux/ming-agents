@@ -1,0 +1,2 @@
+# Memory subsystem data root (vault + FTS index) — data, never code.
+.memory/
