@@ -2,9 +2,9 @@
 package memory
 
 // This file implements FTS5 (Full-Text Search) integration using SQLite.
-// The FTS5 index lives at $HOME/.hermes/memory.fts.db and is shared with the
-// legacy Python CLI (memory_api.py). Go writes to it on Ingest; Recall uses it
-// to pre-filter candidates before applying Go-side filters.
+// The FTS5 index lives at <repo>/.memory/memory.fts.db by default (override via
+// MEMORY_FTS_DB; legacy fallback $HOME/.hermes/memory.fts.db). Go writes to it on
+// Ingest; Recall uses it to pre-filter candidates before applying Go-side filters.
 //
 // FTS5 schema (parity with memory_api.py):
 //   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -33,8 +33,17 @@ import (
 )
 
 // ftsDB is the path to the shared SQLite FTS5 database. It is a var (like
-// VaultDir) so tests can point it at a temp file.
-var ftsDB = filepath.Join(os.ExpandEnv("$HOME/.hermes"), "memory.fts.db")
+// VaultDir) so tests can point it at a temp file. Precedence mirrors
+// defaultVaultDir: $MEMORY_FTS_DB override, else <repo>/.memory/memory.fts.db,
+// else the legacy $HOME/.hermes/memory.fts.db (via storageBase).
+var ftsDB = defaultFTSDB()
+
+func defaultFTSDB() string {
+	if v := os.Getenv("MEMORY_FTS_DB"); v != "" {
+		return v
+	}
+	return filepath.Join(storageBase(), "memory.fts.db")
+}
 
 // ftsDB_ holds the cached *sql.DB for FTS operations, lazily initialized on
 // first use. ftsMu guards initialization and reset (sql.DB itself is
