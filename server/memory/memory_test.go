@@ -3,18 +3,27 @@ package memory
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 // useTempVault points VaultDir at a fresh temp directory for the test and
-// restores it afterwards.
+// restores it afterwards. It also isolates the FTS5 index in the same temp dir
+// so tests never read or mutate the developer's real ~/.hermes/memory.fts.db.
 func useTempVault(t *testing.T) string {
 	t.Helper()
-	prev := VaultDir
+	prevVault := VaultDir
+	prevFTS := ftsDB
 	dir := t.TempDir()
 	VaultDir = dir
-	t.Cleanup(func() { VaultDir = prev })
+	_ = CloseFTS() // drop any cached handle to the previous db
+	ftsDB = filepath.Join(dir, "memory.fts.db")
+	t.Cleanup(func() {
+		_ = CloseFTS()
+		VaultDir = prevVault
+		ftsDB = prevFTS
+	})
 	return dir
 }
 
@@ -54,7 +63,7 @@ func TestIngestAcceptedHighScore(t *testing.T) {
 	}
 
 	// decision type never expires.
-	mems, _ := readAllMemories("active")
+	mems, _ := readAllMemories("active", "")
 	if len(mems) != 1 {
 		t.Fatalf("expected 1 memory, got %d", len(mems))
 	}
@@ -116,7 +125,7 @@ func TestRecallFiltersAndSorts(t *testing.T) {
 	mustIngest(t, "gamma snippet ```code```", "snippet", "proj-a", []string{"go"}, "manual")
 
 	// Filter by project.
-	got, err := Recall("", "proj-a", "", nil, 0, "active", 10)
+	got, _, err := Recall("", "proj-a", "", nil, 0, "active", 10)
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
@@ -131,25 +140,25 @@ func TestRecallFiltersAndSorts(t *testing.T) {
 	}
 
 	// Filter by type.
-	got, _ = Recall("", "", "incident", nil, 0, "active", 10)
+	got, _, _ = Recall("", "", "incident", nil, 0, "active", 10)
 	if len(got) != 1 || got[0].Type != "incident" {
 		t.Fatalf("type filter failed: %+v", got)
 	}
 
 	// Filter by tag.
-	got, _ = Recall("", "", "", []string{"go"}, 0, "active", 10)
+	got, _, _ = Recall("", "", "", []string{"go"}, 0, "active", 10)
 	if len(got) != 1 || got[0].Project != "proj-a" {
 		t.Fatalf("tag filter failed: %+v", got)
 	}
 
 	// Query keyword (case-insensitive) on body.
-	got, _ = Recall("CACHING", "", "", nil, 0, "active", 10)
+	got, _, _ = Recall("CACHING", "", "", nil, 0, "active", 10)
 	if len(got) != 1 {
 		t.Fatalf("query filter failed: %+v", got)
 	}
 
 	// Limit.
-	got, _ = Recall("", "", "", nil, 0, "active", 1)
+	got, _, _ = Recall("", "", "", nil, 0, "active", 1)
 	if len(got) != 1 {
 		t.Fatalf("limit failed: got %d, want 1", len(got))
 	}
@@ -215,7 +224,7 @@ func TestCleanupArchivesExpired(t *testing.T) {
 	if _, err := os.Stat(expired.Path); !os.IsNotExist(err) {
 		t.Errorf("expired file still present at %s", expired.Path)
 	}
-	arch, _ := readAllMemories("archived")
+	arch, _ := readAllMemories("archived", "")
 	if len(arch) != 1 || arch[0].Status != "archived" {
 		t.Fatalf("expected 1 archived memory, got %+v", arch)
 	}
@@ -238,7 +247,13 @@ func TestComputeIDStable(t *testing.T) {
 	if computeID("hello world") == computeID("different") {
 		t.Error("computeID collision for distinct content")
 	}
-	if len(a) != len("mem_")+8 {
+	// A4: ids are now derived from the full content (no 200-byte prefix cap) and
+	// widened to 16 hex. Two contents sharing a long prefix must NOT collide.
+	prefix := strings.Repeat("x", 500)
+	if computeID(prefix+"A") == computeID(prefix+"B") {
+		t.Error("computeID collides on shared 200+ byte prefix (A4 regression)")
+	}
+	if len(a) != len("mem_")+16 {
 		t.Errorf("unexpected id length: %s", a)
 	}
 }

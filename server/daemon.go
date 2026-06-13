@@ -14,8 +14,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ming-agents/server/agent"
 	"github.com/ming-agents/server/codegraph"
+	"github.com/ming-agents/server/memory"
 	"github.com/ming-agents/server/task"
+	"path/filepath"
 )
+
+// memoryBriefBudget is the token cap for memory injected ahead of a task. Small
+// on purpose: this is supplementary context, not the bulk of the prompt.
+const memoryBriefBudget = 4000
 
 // Daemon is the scheduler: it polls the queue, claims work per agent up to each
 // agent's concurrency, and runs each task as a child Claude Code process.
@@ -129,10 +135,16 @@ func (d *Daemon) execute(parent context.Context, t *task.Task, a *agent.Agent) {
 	defer stopHB()
 	go d.heartbeat(hbCtx, t.ID, d.manager)
 
+	// D1: pull relevant memory into the prompt (best-effort — a memory failure
+	// must never block a task). injectedMem records what we injected so the
+	// implicit-feedback loop after completion can judge whether it was used.
+	prompt := t.Prompt
+	injectedMem := d.injectMemory(t, &prompt)
+
 	spec := task.RunSpec{
 		Command:       d.commandFor(a),
 		Args:          d.argsFor(a),
-		Prompt:        t.Prompt,
+		Prompt:        prompt,
 		Model:         a.Model,
 		ThinkingLevel: a.ThinkingLevel,
 		Env: []string{
@@ -159,6 +171,9 @@ func (d *Daemon) execute(parent context.Context, t *task.Task, a *agent.Agent) {
 	case err == nil:
 		_ = d.queue.Complete(finCtx, t.ID, result)
 		t.Status = task.StatusCompleted
+		// D1: close the loop — judge whether the injected memories were actually
+		// used in the agent's output (implicit feedback). Best-effort.
+		d.recordMemoryFeedback(injectedMem, result)
 		d.publish(Event{Type: EventCompleted, Task: refresh(finCtx, d.queue, t), TaskID: t.ID})
 	case context.DeadlineExceeded == err:
 		_ = d.queue.Fail(finCtx, t.ID, "timeout: task exceeded maximum duration", result)
@@ -212,6 +227,44 @@ func (d *Daemon) CancelTask(ctx context.Context, id int64) (*task.Task, error) {
 		return d.queue.Get(ctx, id)
 	}
 	return d.queue.RequestCancel(ctx, id)
+}
+
+// projectForTask derives the memory "project" partition for a task from its repo
+// path, matching the convention memory.autoClassify uses (the repo's base dir
+// name). Empty when the task has no repo.
+func projectForTask(t *task.Task) string {
+	if t.RepoPath == "" {
+		return ""
+	}
+	return filepath.Base(t.RepoPath)
+}
+
+// injectMemory prepends a memory Brief to *prompt and returns the injected ids.
+// All failures are swallowed (logged) so memory can never break task execution.
+func (d *Daemon) injectMemory(t *task.Task, prompt *string) []string {
+	project := projectForTask(t)
+	block, audit, err := memory.Brief(project, t.Prompt, memory.Budget{MaxTokens: memoryBriefBudget})
+	if err != nil {
+		log.Printf("task %d memory brief: %v", t.ID, err)
+		return nil
+	}
+	if block == "" {
+		return nil
+	}
+	*prompt = "## Relevant memory (auto-recalled)\n\n" + block + "\n---\n\n" + t.Prompt
+	log.Printf("task %d injected %d memory note(s) (%d tokens)", t.ID, len(audit.InjectedIDs), audit.TotalTokens)
+	return audit.InjectedIDs
+}
+
+// recordMemoryFeedback runs implicit feedback over the memories injected into a
+// completed task, using the task result as the "conversation log". Best-effort.
+func (d *Daemon) recordMemoryFeedback(ids []string, result string) {
+	if len(ids) == 0 || result == "" {
+		return
+	}
+	if _, err := memory.ImplicitFeedback(ids, result); err != nil {
+		log.Printf("memory implicit feedback: %v", err)
+	}
 }
 
 func (d *Daemon) commandFor(a *agent.Agent) string {
