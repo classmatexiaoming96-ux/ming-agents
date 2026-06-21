@@ -25,6 +25,22 @@ func (r taskRepo) Create(t *domain.Task) error {
 	return nil
 }
 
+func (r taskRepo) CreateMany(tasks []*domain.Task) error {
+	return r.s.WithTx(func(tx *Tx) error {
+		q := `INSERT INTO agent_task_queue(id,run_id,step_id,iteration,attempt,status,adapter_key,agent_request,created_at,version)
+		      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1)`
+		for _, t := range tasks {
+			t.ID = uuid.New()
+			t.CreatedAt = Now()
+			if _, err := tx.Tx.Exec(q, t.ID, t.RunID, t.StepID, t.Iteration, t.Attempt,
+				t.Status, t.AdapterKey, t.AgentRequest, t.CreatedAt); err != nil {
+				return fmt.Errorf("create task: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 func (r taskRepo) Get(id uuid.UUID) (*domain.Task, error) {
 	q := `SELECT id,run_id,step_id,iteration,attempt,status,adapter_key,agent_request,agent_result,result_summary,claimed_at,completed_at,created_at,version
 	      FROM agent_task_queue WHERE id=$1`
@@ -62,7 +78,7 @@ func (r taskRepo) Update(t *domain.Task) error {
 // Uses SELECT FOR UPDATE SKIP LOCKED to avoid contention.
 func (r taskRepo) Claim() (*domain.Task, error) {
 	now := time.Now().UTC()
-	q := `UPDATE agent_task_queue SET status='claimed',claimed_at=$2,version=version+1
+	q := `UPDATE agent_task_queue SET status='claimed',claimed_at=$1,version=version+1
 	      WHERE id=(SELECT id FROM agent_task_queue WHERE status='pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
 	      RETURNING id,run_id,step_id,iteration,attempt,status,adapter_key,agent_request,agent_result,result_summary,claimed_at,completed_at,created_at,version`
 	var t domain.Task

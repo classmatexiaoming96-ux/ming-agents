@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -100,9 +101,7 @@ func (d *RunDriver) Launch(runID uuid.UUID) error {
 		log.Printf("[driver] recovered scheduler state for run %s", runID)
 		// Restore completed/skipped state into driver.
 		for stepName := range d.scheduler.GetCompletedSteps() {
-			d.mu.Lock()
-			d.markCompletedLocked(stepName)
-			d.mu.Unlock()
+			d.completeStep(stepName, nil)
 		}
 	}
 
@@ -156,14 +155,12 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 					_ = d.store.UpdateStep(step)
 
 					d.mu.Lock()
-					d.markCompletedLocked(step.Name)
 					d.scheduler.SkipStep(step.Name)
-					d.scheduler.StepCompleted(step.Name)
-					// Record skip (Epic 2.12).
 					if d.recorder != nil {
 						d.recorder.RecordSkippedStep(step.Name, step.SkipReasonStr)
 					}
 					d.mu.Unlock()
+					d.completeStep(step.Name, nil)
 					continue
 				}
 			}
@@ -179,32 +176,19 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 				d.recorder.RecordResolvedParams(step.Name, resolvedInputs)
 			}
 			if tasks == nil {
-				d.mu.Lock()
-				d.markCompletedLocked(step.Name)
-				d.scheduler.StepCompleted(step.Name)
-				d.mu.Unlock()
+				d.completeStep(step.Name, nil)
 				continue
 			}
 
-			var enqueueErr error
-			for _, task := range tasks {
-				if err := d.store.CreateTask(task); err != nil {
-					log.Printf("[driver] create task: %v", err)
-					enqueueErr = err
-					break
-				}
-				slots--
-			}
-			if enqueueErr != nil {
+			if err := d.store.CreateTasks(tasks); err != nil {
+				log.Printf("[driver] create tasks: %v", err)
 				step.Status = domain.StepStatusFailed
-				step.SkipReasonStr = fmt.Sprintf("enqueue task: %v", enqueueErr)
+				step.SkipReasonStr = fmt.Sprintf("enqueue task: %v", err)
 				_ = d.store.UpdateStep(step)
-				d.mu.Lock()
-				d.markCompletedLocked(step.Name)
-				d.scheduler.StepCompleted(step.Name)
-				d.mu.Unlock()
+				d.completeStep(step.Name, nil)
 				continue
 			}
+			slots -= len(tasks)
 
 			step.Status = domain.StepStatusRunning
 			_ = d.store.UpdateStep(step)
@@ -252,11 +236,7 @@ func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
 			d.ctx.SetOutput(step.Name, k, v)
 		}
 
-		d.mu.Lock()
-		d.markCompletedLocked(step.Name)
-		d.scheduler.StepCompleted(step.Name)
-		d.scheduler.MarkStepCompleted(step.Name, outputs)
-		d.mu.Unlock()
+		d.completeStep(step.Name, outputs)
 
 		// Persist scheduler state checkpoint (Epic 2.8).
 		if err := d.scheduler.PersistState(step.RunID); err != nil {
@@ -277,6 +257,16 @@ func (d *RunDriver) markCompletedLocked(stepName string) {
 	d.completed[stepName] = true
 }
 
+func (d *RunDriver) completeStep(stepName string, outputs map[string]any) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.markCompletedLocked(stepName)
+	d.scheduler.StepCompleted(stepName)
+	if outputs != nil {
+		d.scheduler.MarkStepCompleted(stepName, outputs)
+	}
+}
+
 func (d *RunDriver) completedSnapshotLocked() map[string]bool {
 	out := make(map[string]bool, len(d.completed))
 	for k, v := range d.completed {
@@ -289,7 +279,7 @@ func aggregateTaskOutputs(step *domain.Step, tasks []*domain.Task) map[string]an
 	if len(tasks) == 1 {
 		return taskOutputMap(step, tasks[0])
 	}
-	results := make([]map[string]any, 0, len(tasks))
+	byIndex := make(map[int]map[string]any, len(tasks))
 	byKey := make(map[string][]any)
 	for _, task := range tasks {
 		out := taskOutputMap(step, task)
@@ -298,6 +288,21 @@ func aggregateTaskOutputs(step *domain.Step, tasks []*domain.Task) map[string]an
 		entry["_index"] = task.Iteration
 		for k, v := range out {
 			entry[k] = v
+		}
+		byIndex[task.Iteration] = entry
+	}
+	indexes := make([]int, 0, len(byIndex))
+	for idx := range byIndex {
+		indexes = append(indexes, idx)
+	}
+	sort.Ints(indexes)
+	results := make([]map[string]any, 0, len(indexes))
+	for _, idx := range indexes {
+		entry := byIndex[idx]
+		for k, v := range entry {
+			if k == "_task_id" || k == "_index" {
+				continue
+			}
 			byKey[k] = append(byKey[k], v)
 		}
 		results = append(results, entry)
@@ -427,10 +432,8 @@ func (d *RunDriver) ResumeRun(runID uuid.UUID) (*RecoveryResult, error) {
 
 // EnqueueTasks enqueues tasks to the store.
 func (d *RunDriver) EnqueueTasks(tasks []*domain.Task) error {
-	for _, task := range tasks {
-		if err := d.store.CreateTask(task); err != nil {
-			return fmt.Errorf("enqueue task: %w", err)
-		}
+	if err := d.store.CreateTasks(tasks); err != nil {
+		return fmt.Errorf("enqueue task: %w", err)
 	}
 	return nil
 }

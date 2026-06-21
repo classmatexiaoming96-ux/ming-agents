@@ -45,11 +45,8 @@ func (pm *PersistenceManager) Snapshot(run *domain.Run, steps []*domain.Step, ta
 			Iteration: st.Iteration,
 			Attempt:   st.Attempt,
 		})
-		if st.Status == domain.StepStatusCompleted && st.OutputsJSON.Valid {
-			var outputs map[string]any
-			if err := json.Unmarshal([]byte(st.OutputsJSON.String), &outputs); err == nil {
-				ss.Ctx[st.Name] = outputs
-			}
+		if outputs, ok := runtimeOutputsForStep(st, tasks); ok {
+			ss.Ctx[st.Name] = outputs
 		}
 	}
 	for _, t := range tasks {
@@ -134,14 +131,11 @@ func (pm *PersistenceManager) RecoverRun(runID uuid.UUID) (*RecoveryResult, erro
 	ctx := NewContext()
 	restoredSteps := make(map[string]bool)
 	for _, st := range steps {
-		if st.Status == domain.StepStatusCompleted && st.OutputsJSON.Valid {
-			var outputs map[string]any
-			if err := json.Unmarshal([]byte(st.OutputsJSON.String), &outputs); err == nil {
-				for k, v := range outputs {
-					ctx.SetOutput(st.Name, k, v)
-				}
-				restoredSteps[st.Name] = true
+		if outputs, ok := runtimeOutputsForStep(st, tasks); ok {
+			for k, v := range outputs {
+				ctx.SetOutput(st.Name, k, v)
 			}
+			restoredSteps[st.Name] = true
 		}
 	}
 	if result.Snapshot != nil {
@@ -175,6 +169,22 @@ func (pm *PersistenceManager) RecoverRun(runID uuid.UUID) (*RecoveryResult, erro
 	result.PendingSteps = pendingSteps
 
 	return result, nil
+}
+
+func runtimeOutputsForStep(step *domain.Step, tasks []*domain.Task) (map[string]any, bool) {
+	if step.Status != domain.StepStatusCompleted {
+		return nil, false
+	}
+	var stepTasks []*domain.Task
+	for _, task := range tasks {
+		if task.StepID == step.ID && task.Status == domain.TaskStatusCompleted {
+			stepTasks = append(stepTasks, task)
+		}
+	}
+	if len(stepTasks) == 0 {
+		return nil, false
+	}
+	return aggregateTaskOutputs(step, stepTasks), true
 }
 
 // RecoveryResult holds the result of recovering a run.

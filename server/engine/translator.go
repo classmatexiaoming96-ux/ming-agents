@@ -154,6 +154,7 @@ func (t *Translator) fanOut(step *domain.Step, items []any, ctx *Context) ([]*do
 			}
 		}
 		task := t.createTaskWithInputs(step, itemInputs, ctx)
+		task.Iteration = i
 		tasks = append(tasks, task)
 	}
 	return tasks, nil

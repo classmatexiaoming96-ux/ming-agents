@@ -80,6 +80,11 @@ func (s *Store) CreateTask(t *domain.Task) error {
 	return taskRepo{s}.Create(t)
 }
 
+// CreateTasks inserts all tasks atomically. If any insert fails, none are kept.
+func (s *Store) CreateTasks(tasks []*domain.Task) error {
+	return taskRepo{s}.CreateMany(tasks)
+}
+
 // GetTask fetches a task by ID.
 func (s *Store) GetTask(id uuid.UUID) (*domain.Task, error) {
 	return taskRepo{s}.Get(id)

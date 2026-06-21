@@ -205,16 +205,19 @@ func (s *ClaudeCodeSession) SendPrompt(ctx context.Context, prompt string) (stri
 		return "", errors.New("claude-code session is closed")
 	}
 
+	promptPaste := "\x1b[200~" + prompt + "\x1b[201~\r"
+	if _, err := s.pty.Write([]byte(promptPaste)); err != nil {
+		return "", fmt.Errorf("send prompt to claude-code: %w", err)
+	}
+
+	_, since := s.reader.Snapshot()
 	sentinel := "<<<MING_AGENTS_DONE:" + uuid.NewString() + ">>>"
 	sentinelPrefix, sentinelSuffix := strings.TrimSuffix(sentinel, ">>>"), ">>>"
-	fullPrompt := prompt + "\n\nWhen finished, print exactly these two quoted parts concatenated as one line on its own line and nothing after it:\n" +
+	sentinelPrompt := "\n\nWhen finished, print exactly these two quoted parts concatenated as one line on its own line and nothing after it:\n" +
 		fmt.Sprintf("%q + %q\n", sentinelPrefix, sentinelSuffix)
-	before, since := s.reader.Snapshot()
-	_ = before
-
-	paste := "\x1b[200~" + fullPrompt + "\x1b[201~\r"
+	paste := "\x1b[200~" + sentinelPrompt + "\x1b[201~\r"
 	if _, err := s.pty.Write([]byte(paste)); err != nil {
-		return "", fmt.Errorf("send prompt to claude-code: %w", err)
+		return "", fmt.Errorf("send completion sentinel to claude-code: %w", err)
 	}
 
 	match := s.reader.WaitFor(ctx, regexp.QuoteMeta(sentinel), since)
@@ -234,7 +237,7 @@ func (s *ClaudeCodeSession) SendPrompt(ctx context.Context, prompt string) (stri
 
 	after, _ := s.reader.Snapshot()
 	output := strings.TrimSpace(after[since:match])
-	output = stripPromptEcho(output, fullPrompt)
+	output = stripPromptEcho(output, sentinelPrompt)
 	return output, nil
 }
 
