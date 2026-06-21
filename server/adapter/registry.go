@@ -13,7 +13,10 @@ type Registry struct {
 
 // NewRegistry creates a new adapter registry.
 func NewRegistry() *Registry {
-	return &Registry{adapters: make(map[string]AgentAdapter)}
+	r := &Registry{adapters: make(map[string]AgentAdapter)}
+	r.Register(CodexAdapter{})
+	r.Register(ClaudeCodeAdapter{})
+	return r
 }
 
 // Register adds an adapter to the registry.
