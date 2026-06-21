@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ming-agents/server/domain"
 	_ "github.com/lib/pq"
+	"github.com/ming-agents/server/domain"
 )
 
 // Store manages all persistence operations.
@@ -148,6 +148,12 @@ func (s *Store) UpdateTaskStatus(id uuid.UUID, status domain.TaskStatus) error {
 // TODO: implement using taskRepo{}.SetResult
 func (s *Store) SetTaskResult(id uuid.UUID, result json.RawMessage, summary string) error {
 	return taskRepo{s}.SetResult(id, result, summary, domain.TaskStatusCompleted)
+}
+
+// SetTaskFailure writes a failed result back to a task atomically.
+// Sets status to failed, agent_result, result_summary, and completed_at.
+func (s *Store) SetTaskFailure(id uuid.UUID, result json.RawMessage, summary string) error {
+	return taskRepo{s}.SetResult(id, result, summary, domain.TaskStatusFailed)
 }
 
 // ─── Run Status Update ─────────────────────────────────────────────────────────

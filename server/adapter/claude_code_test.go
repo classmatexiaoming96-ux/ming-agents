@@ -20,7 +20,10 @@ printf '%s' "$reply" > trust-reply.txt
 printf '\nHow can I help?\n'
 while IFS= read -r line; do
   case "$line" in
-    *MING_AGENTS_DONE:*) printf 'accepted\n%s\n' "$line";;
+    *MING_AGENTS_DONE:*)
+      marker=$(printf '%s' "$line" | tr -d '"' | sed 's/ + //g')
+      printf 'accepted\n%s\n' "$marker"
+      ;;
   esac
 done
 `)
@@ -56,7 +59,10 @@ while IFS= read -r line; do
   esac
   printf '%s\n' "$line" >> capture.txt
   case "$line" in
-    *MING_AGENTS_DONE:*) printf 'done\n%s\n' "$line";;
+    *MING_AGENTS_DONE:*)
+      marker=$(printf '%s' "$line" | tr -d '"' | sed 's/ + //g')
+      printf 'done\n%s\n' "$marker"
+      ;;
   esac
 done
 `)
@@ -83,9 +89,10 @@ printf 'How can I help?\n'
 while IFS= read -r line; do
   case "$line" in
     *MING_AGENTS_DONE:*)
+      marker=$(printf '%s' "$line" | tr -d '"' | sed 's/ + //g')
       printf 'first line\n'
       printf 'second line\n'
-      printf '%s\n' "$line"
+      printf '%s\n' "$marker"
       printf 'noise after sentinel\n'
       ;;
   esac
@@ -159,7 +166,10 @@ printf '%s\n' "$@" > args.txt
 printf 'Claude Code ready\n'
 while IFS= read -r line; do
   case "$line" in
-    *MING_AGENTS_DONE:*) printf 'ok\n%s\n' "$line";;
+    *MING_AGENTS_DONE:*)
+      marker=$(printf '%s' "$line" | tr -d '"' | sed 's/ + //g')
+      printf 'ok\n%s\n' "$marker"
+      ;;
   esac
 done
 `)

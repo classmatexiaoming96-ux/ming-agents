@@ -48,6 +48,11 @@ func (a ClaudeCodeAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
 		return result, fmt.Errorf("%s adapter: %w", a.Key(), err)
 	}
 
+	// Close session if using a per-invoke manager (custom Command).
+	if a.Command != "" {
+		session.Close()
+	}
+
 	return &AgentResult{
 		Output: output,
 		RawJSON: marshalProcessResult(processResult{

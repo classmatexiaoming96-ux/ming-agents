@@ -7,31 +7,41 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ming-agents/server/adapter"
 	"github.com/ming-agents/server/domain"
 	"github.com/ming-agents/server/store"
 )
 
+// TaskCallback is called by the worker when a task completes or fails.
+type TaskCallback interface {
+	OnTaskCompleted(taskID uuid.UUID) error
+}
+
 // Worker consumes tasks from agent_task_queue, invokes adapters, and writes results.
 // Epic 4.1: 队列消费 worker — 消费 agent_task_queue → 调 Adapter → 回写.
 type Worker struct {
-	store    *store.Store
-	registry *adapter.Registry
+	store        *store.Store
+	registry     *adapter.Registry
+	callback     TaskCallback
 	pollInterval time.Duration
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	stopCh       chan struct{}
+	stopChMu     sync.Mutex
+	stopped      bool
+	wg           sync.WaitGroup
 }
 
 // NewWorker creates a new queue consumer worker.
-func NewWorker(s *store.Store, r *adapter.Registry, pollInterval time.Duration) *Worker {
+func NewWorker(s *store.Store, r *adapter.Registry, callback TaskCallback, pollInterval time.Duration) *Worker {
 	if pollInterval == 0 {
 		pollInterval = 100 * time.Millisecond
 	}
 	return &Worker{
-		store:    s,
-		registry: r,
+		store:        s,
+		registry:     r,
+		callback:     callback,
 		pollInterval: pollInterval,
-		stopCh:   make(chan struct{}),
+		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -43,6 +53,13 @@ func (w *Worker) Start() {
 
 // Stop gracefully stops the worker.
 func (w *Worker) Stop() {
+	w.stopChMu.Lock()
+	if w.stopped {
+		w.stopChMu.Unlock()
+		return
+	}
+	w.stopped = true
+	w.stopChMu.Unlock()
 	close(w.stopCh)
 	w.wg.Wait()
 }
@@ -102,18 +119,34 @@ func (w *Worker) completeTask(task *domain.Task, result *adapter.AgentResult) {
 			summary = summary[:200] + "..."
 		}
 	}
-	if err := w.store.UpdateTaskStatus(task.ID, domain.TaskStatusCompleted); err != nil {
-		log.Printf("[worker] update status: %v", err)
-	}
+	// Atomically write status + result + summary + timestamp.
 	if err := w.store.SetTaskResult(task.ID, raw, summary); err != nil {
 		log.Printf("[worker] set result: %v", err)
+		return
+	}
+	// Notify callback after result is durably written.
+	if w.callback != nil {
+		if err := w.callback.OnTaskCompleted(task.ID); err != nil {
+			log.Printf("[worker] OnTaskCompleted callback: %v", err)
+		}
 	}
 }
 
 func (w *Worker) failTask(task *domain.Task, reason string) {
 	log.Printf("[worker] task %s failed: %s", task.ID, reason)
-	if err := w.store.UpdateTaskStatus(task.ID, domain.TaskStatusFailed); err != nil {
-		log.Printf("[worker] update status: %v", err)
+	result := &adapter.AgentResult{
+		Error:   reason,
+		Summary: reason,
+	}
+	raw, _ := json.Marshal(result)
+	if err := w.store.SetTaskFailure(task.ID, raw, reason); err != nil {
+		log.Printf("[worker] set failure result: %v", err)
+		return
+	}
+	if w.callback != nil {
+		if err := w.callback.OnTaskCompleted(task.ID); err != nil {
+			log.Printf("[worker] OnTaskCompleted callback (fail): %v", err)
+		}
 	}
 }
 
@@ -126,7 +159,7 @@ type Pool struct {
 func NewPool(n int, s *store.Store, r *adapter.Registry, pollInterval time.Duration) *Pool {
 	pool := &Pool{workers: make([]*Worker, n)}
 	for i := 0; i < n; i++ {
-		pool.workers[i] = NewWorker(s, r, pollInterval)
+		pool.workers[i] = NewWorker(s, r, nil, pollInterval)
 	}
 	return pool
 }

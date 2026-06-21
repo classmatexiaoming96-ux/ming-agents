@@ -70,7 +70,9 @@ func (p *ContextPropagator) PropagateFromTask(task *domain.Task, step *domain.St
 		if err := p.store.CreateArtifact(artifact); err != nil {
 			log.Printf("WARN: create artifact: %v", err)
 		}
+		p.ctx.mu.Lock()
 		p.ctx.artifacts[fmt.Sprintf("%s/%s", step.Name, k)] = artifact
+		p.ctx.mu.Unlock()
 	}
 
 	return nil
@@ -133,6 +135,8 @@ func (p *ContextPropagator) RenderBindings(step *domain.Step) (map[string]any, e
 
 // GetArtifact returns a stored artifact by step name and key.
 func (p *ContextPropagator) GetArtifact(stepName, key string) (*store.Artifact, bool) {
+	p.ctx.mu.RLock()
+	defer p.ctx.mu.RUnlock()
 	a, ok := p.ctx.artifacts[fmt.Sprintf("%s/%s", stepName, key)]
 	return a, ok
 }
@@ -141,11 +145,14 @@ func (p *ContextPropagator) GetArtifact(stepName, key string) (*store.Artifact, 
 func (p *ContextPropagator) ContextSnapshot() ([]byte, error) {
 	type snapshot struct {
 		Outputs   map[string]map[string]any `json:"outputs"`
-		Artifacts int                        `json:"artifacts"`
+		Artifacts int                       `json:"artifacts"`
 	}
+	p.ctx.mu.RLock()
+	artifactCount := len(p.ctx.artifacts)
+	p.ctx.mu.RUnlock()
 	s := snapshot{
-		Outputs:   p.ctx.mu,
-		Artifacts: len(p.ctx.artifacts),
+		Outputs:   p.ctx.GetAll(),
+		Artifacts: artifactCount,
 	}
 	return json.Marshal(s)
 }
@@ -155,7 +162,7 @@ func (p *ContextPropagator) ContextSnapshot() ([]byte, error) {
 
 const (
 	skipReasonConditionFalse = "condition_evaluated_false"
-	skipReasonNoInputs      = "no_inputs"
+	skipReasonNoInputs       = "no_inputs"
 )
 
 // ConditionalEvaluator evaluates step conditions and determines skip eligibility.
@@ -301,7 +308,7 @@ func (e *ConditionalEvaluator) resolveVar(name string) any {
 		return v
 	}
 	// Check if it's a top-level key.
-	for _, outputs := range e.ctx.mu {
+	for _, outputs := range e.ctx.GetAll() {
 		if v, ok := outputs[name]; ok {
 			return v
 		}

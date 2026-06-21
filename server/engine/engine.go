@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/ming-agents/server/adapter"
@@ -17,9 +18,9 @@ import (
 
 // Engine is the core execution engine for WDL runs.
 type Engine struct {
-	store     *store.Store
-	registry  *adapter.Registry
-	ctx       *Context // shared execution context
+	store    *store.Store
+	registry *adapter.Registry
+	ctx      *Context // shared execution context
 }
 
 // NewEngine creates a new execution engine.
@@ -75,16 +76,26 @@ func (e *Engine) Compile(wdlSrc string) (*CompileResult, error) {
 	// Create steps.
 	for _, ws := range wdl.Steps {
 		st := &domain.Step{
-			ID:        uuid.New(),
-			RunID:     run.ID,
-			Name:      ws.Name,
-			StepType:  domain.StepType(ws.StepType),
-			Status:    domain.StepStatusPending,
-			Iteration: 0,
-			Attempt:   1,
+			ID:         uuid.New(),
+			RunID:      run.ID,
+			Name:       ws.Name,
+			StepType:   domain.StepType(ws.StepType),
+			AdapterKey: ws.Adapter,
+			Status:     domain.StepStatusPending,
+			Iteration:  0,
+			Attempt:    1,
 		}
 		if ws.Inputs != nil {
-			st.InputsJSON = sql.NullString{String: toJSON(ws.Inputs), Valid: true}
+			inputs := make(map[string]any, len(ws.Inputs)+1)
+			for k, v := range ws.Inputs {
+				inputs[k] = v
+			}
+			if ws.Adapter != "" {
+				inputs["_adapter"] = ws.Adapter
+			}
+			st.InputsJSON = sql.NullString{String: toJSON(inputs), Valid: true}
+		} else if ws.Adapter != "" {
+			st.InputsJSON = sql.NullString{String: toJSON(map[string]any{"_adapter": ws.Adapter}), Valid: true}
 		}
 		if ws.When != nil && *ws.When != "" {
 			st.When = sql.NullString{String: *ws.When, Valid: true}
@@ -99,31 +110,36 @@ func (e *Engine) Compile(wdlSrc string) (*CompileResult, error) {
 
 // Context holds the shared execution context (step outputs for binding).
 type Context struct {
-	mu      map[string]map[string]any // stepName → outputKey → value
+	mu        sync.RWMutex
+	outputs   map[string]map[string]any  // stepName → outputKey → value
 	artifacts map[string]*store.Artifact // "stepName/key" → artifact
 }
 
 func NewContext() *Context {
 	return &Context{
-		mu:        make(map[string]map[string]any),
+		outputs:   make(map[string]map[string]any),
 		artifacts: make(map[string]*store.Artifact),
 	}
 }
 
 // SetOutput sets an output value in the context.
 func (c *Context) SetOutput(stepName, key string, value any) {
-	if c.mu[stepName] == nil {
-		c.mu[stepName] = make(map[string]any)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.outputs[stepName] == nil {
+		c.outputs[stepName] = make(map[string]any)
 	}
-	c.mu[stepName][key] = value
+	c.outputs[stepName][key] = value
 }
 
 // GetOutput retrieves an output value from the context.
 func (c *Context) GetOutput(stepName, key string) (any, bool) {
-	if c.mu[stepName] == nil {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.outputs[stepName] == nil {
 		return nil, false
 	}
-	v, ok := c.mu[stepName][key]
+	v, ok := c.outputs[stepName][key]
 	return v, ok
 }
 
@@ -171,17 +187,29 @@ func (c *Context) HasUnresolvedPlaceholder(s string) bool {
 
 // GetOutputs returns all outputs for a given step.
 func (c *Context) GetOutputs(stepName string) (map[string]any, bool) {
-	if c.mu[stepName] == nil {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.outputs[stepName] == nil {
 		return nil, false
 	}
-	return c.mu[stepName], true
+	out := make(map[string]any, len(c.outputs[stepName]))
+	for k, v := range c.outputs[stepName] {
+		out[k] = v
+	}
+	return out, true
 }
 
 // GetAll returns a copy of all step outputs (for evaluation/debugging).
 func (c *Context) GetAll() map[string]map[string]any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	out := make(map[string]map[string]any)
-	for k, v := range c.mu {
-		out[k] = v
+	for k, v := range c.outputs {
+		copied := make(map[string]any, len(v))
+		for outKey, outVal := range v {
+			copied[outKey] = outVal
+		}
+		out[k] = copied
 	}
 	return out
 }
@@ -359,7 +387,7 @@ func resolveVar(name string, ctx *Context) any {
 		return v
 	}
 	// Check if it's a top-level key in any step outputs.
-	for _, outputs := range ctx.mu {
+	for _, outputs := range ctx.GetAll() {
 		if v, ok := outputs[name]; ok {
 			return v
 		}

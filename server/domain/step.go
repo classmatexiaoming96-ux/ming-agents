@@ -23,30 +23,31 @@ const (
 type StepType string
 
 const (
-	StepTypeTask         StepType = "task"
-	StepTypeLoop         StepType = "loop"
-	StepTypeConditional  StepType = "conditional"
-	StepTypeInput        StepType = "input"
+	StepTypeTask        StepType = "task"
+	StepTypeLoop        StepType = "loop"
+	StepTypeConditional StepType = "conditional"
+	StepTypeInput       StepType = "input"
 )
 
 // Step is a DAG node within a Run.
 type Step struct {
-	ID          uuid.UUID       `json:"id"`
-	RunID       uuid.UUID       `json:"run_id"`
-	Name        string          `json:"name"`
-	StepType    StepType        `json:"step_type"`
-	Status      StepStatus      `json:"status"`
-	Iteration   int             `json:"iteration"`
-	Attempt     int             `json:"attempt"`
-	When        sql.NullString  `json:"-"`
-	InputsJSON  sql.NullString  `json:"-"`
-	InputsMap   map[string]any  `json:"inputs,omitempty"`
-	OutputsJSON sql.NullString  `json:"-"`
-	OutputsMap  map[string]any  `json:"outputs,omitempty"`
-	SkipReason  sql.NullString  `json:"-"`
-	SkipReasonStr string        `json:"skip_reason,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	ID            uuid.UUID      `json:"id"`
+	RunID         uuid.UUID      `json:"run_id"`
+	Name          string         `json:"name"`
+	StepType      StepType       `json:"step_type"`
+	AdapterKey    string         `json:"adapter_key,omitempty"`
+	Status        StepStatus     `json:"status"`
+	Iteration     int            `json:"iteration"`
+	Attempt       int            `json:"attempt"`
+	When          sql.NullString `json:"-"`
+	InputsJSON    sql.NullString `json:"-"`
+	InputsMap     map[string]any `json:"inputs,omitempty"`
+	OutputsJSON   sql.NullString `json:"-"`
+	OutputsMap    map[string]any `json:"outputs,omitempty"`
+	SkipReason    sql.NullString `json:"-"`
+	SkipReasonStr string         `json:"skip_reason,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 // MarshalJSON custom marshaler.
@@ -56,7 +57,7 @@ func (s Step) MarshalJSON() ([]byte, error) {
 		Alias
 		SkipReasonStr string `json:"skip_reason,omitempty"`
 	}{
-		Alias:        Alias(s),
+		Alias:         Alias(s),
 		SkipReasonStr: s.SkipReason.String,
 	}
 	if s.InputsJSON.Valid {

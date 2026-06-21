@@ -84,14 +84,25 @@ func (m *ClaudeCodeSessionManager) GetOrStart(ctx context.Context, workDir strin
 		m.mu.Unlock()
 		return session, nil
 	}
+	oldSession := m.sessions[key]
+	// Mark in-flight so other goroutines wait for the same session.
+	m.sessions[key] = nil
 	m.mu.Unlock()
 
 	session, err := m.StartSession(ctx, workDir)
 	if err != nil {
+		// Remove in-flight marker so retry can succeed.
+		m.mu.Lock()
+		delete(m.sessions, key)
+		m.mu.Unlock()
 		return nil, err
 	}
 
 	m.mu.Lock()
+	// Clean up any dead sessions before storing the new one.
+	if oldSession != nil && oldSession != session {
+		oldSession.Close()
+	}
 	m.sessions[key] = session
 	m.mu.Unlock()
 	return session, nil
@@ -121,6 +132,7 @@ func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir str
 	go func() {
 		err := cmd.Wait()
 		session.stateMu.Lock()
+		session.closed = true
 		session.doneErr = err
 		session.stateMu.Unlock()
 		session.done <- err
@@ -194,7 +206,9 @@ func (s *ClaudeCodeSession) SendPrompt(ctx context.Context, prompt string) (stri
 	}
 
 	sentinel := "<<<MING_AGENTS_DONE:" + uuid.NewString() + ">>>"
-	fullPrompt := prompt + "\n\nWhen finished, print exactly this line on its own line and nothing after it:\n" + sentinel + "\n"
+	sentinelPrefix, sentinelSuffix := strings.TrimSuffix(sentinel, ">>>"), ">>>"
+	fullPrompt := prompt + "\n\nWhen finished, print exactly these two quoted parts concatenated as one line on its own line and nothing after it:\n" +
+		fmt.Sprintf("%q + %q\n", sentinelPrefix, sentinelSuffix)
 	before, since := s.reader.Snapshot()
 	_ = before
 

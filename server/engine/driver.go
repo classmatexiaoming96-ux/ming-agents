@@ -39,8 +39,8 @@ type RunDriver struct {
 func NewRunDriver(s *store.Store, r *adapter.Registry, e *Engine) *RunDriver {
 	return &RunDriver{
 		store:              s,
-		registry:            r,
-		translator:          NewTranslator(s, r),
+		registry:           r,
+		translator:         NewTranslator(s, r),
 		ctx:                NewContext(),
 		pm:                 NewPersistenceManager(s),
 		engine:             e,
@@ -100,7 +100,9 @@ func (d *RunDriver) Launch(runID uuid.UUID) error {
 		log.Printf("[driver] recovered scheduler state for run %s", runID)
 		// Restore completed/skipped state into driver.
 		for stepName := range d.scheduler.GetCompletedSteps() {
-			d.completed[stepName] = true
+			d.mu.Lock()
+			d.markCompletedLocked(stepName)
+			d.mu.Unlock()
 		}
 	}
 
@@ -115,7 +117,7 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 	}
 
 	for {
-		if d.isRunComplete(allSteps) {
+		if d.isRunComplete(run.ID) {
 			d.finalizeRun(run, allSteps)
 			return
 		}
@@ -128,7 +130,7 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 		}
 
 		d.mu.Lock()
-		readyNodes := d.scheduler.Advance(d.ctx, d.completed)
+		readyNodes := d.scheduler.Advance(d.ctx, d.completedSnapshotLocked())
 		d.mu.Unlock()
 
 		for _, node := range readyNodes {
@@ -154,7 +156,7 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 					_ = d.store.UpdateStep(step)
 
 					d.mu.Lock()
-					d.completed[step.Name] = true
+					d.markCompletedLocked(step.Name)
 					d.scheduler.SkipStep(step.Name)
 					d.scheduler.StepCompleted(step.Name)
 					// Record skip (Epic 2.12).
@@ -177,17 +179,31 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 				d.recorder.RecordResolvedParams(step.Name, resolvedInputs)
 			}
 			if tasks == nil {
-				d.completed[step.Name] = true
+				d.mu.Lock()
+				d.markCompletedLocked(step.Name)
 				d.scheduler.StepCompleted(step.Name)
+				d.mu.Unlock()
 				continue
 			}
 
+			var enqueueErr error
 			for _, task := range tasks {
 				if err := d.store.CreateTask(task); err != nil {
 					log.Printf("[driver] create task: %v", err)
-					continue
+					enqueueErr = err
+					break
 				}
 				slots--
+			}
+			if enqueueErr != nil {
+				step.Status = domain.StepStatusFailed
+				step.SkipReasonStr = fmt.Sprintf("enqueue task: %v", enqueueErr)
+				_ = d.store.UpdateStep(step)
+				d.mu.Lock()
+				d.markCompletedLocked(step.Name)
+				d.scheduler.StepCompleted(step.Name)
+				d.mu.Unlock()
+				continue
 			}
 
 			step.Status = domain.StepStatusRunning
@@ -197,16 +213,14 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 }
 
 // OnTaskCompleted is called when a task completes (by the worker callback).
-func (d *RunDriver) OnTaskCompleted(task *domain.Task) error {
+func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
+	task, err := d.store.GetTask(taskID)
+	if err != nil {
+		return fmt.Errorf("get task: %w", err)
+	}
 	step, err := d.store.GetStep(task.StepID)
 	if err != nil {
 		return fmt.Errorf("get step: %w", err)
-	}
-
-	// Propagate outputs to context.
-	propagator := NewContextPropagator(d.ctx, d.store)
-	if err := propagator.PropagateFromTask(task, step); err != nil {
-		log.Printf("[driver] propagate: %v", err)
 	}
 
 	// Persist step output if all tasks done.
@@ -228,13 +242,19 @@ func (d *RunDriver) OnTaskCompleted(task *domain.Task) error {
 		} else {
 			step.Status = domain.StepStatusCompleted
 		}
-		_ = d.store.UpdateStep(step)
+
+		outputs := aggregateTaskOutputs(step, tasks)
+		if err := d.pm.PersistStepOutput(step, outputs); err != nil {
+			log.Printf("[driver] persist step output: %v", err)
+			_ = d.store.UpdateStep(step)
+		}
+		for k, v := range outputs {
+			d.ctx.SetOutput(step.Name, k, v)
+		}
 
 		d.mu.Lock()
-		d.completed[step.Name] = true
+		d.markCompletedLocked(step.Name)
 		d.scheduler.StepCompleted(step.Name)
-		// Extract outputs from context for persistence.
-		outputs, _ := d.ctx.GetOutputs(step.Name)
 		d.scheduler.MarkStepCompleted(step.Name, outputs)
 		d.mu.Unlock()
 
@@ -253,7 +273,57 @@ func (d *RunDriver) OnTaskCompleted(task *domain.Task) error {
 	return nil
 }
 
-func (d *RunDriver) isRunComplete(steps []*domain.Step) bool {
+func (d *RunDriver) markCompletedLocked(stepName string) {
+	d.completed[stepName] = true
+}
+
+func (d *RunDriver) completedSnapshotLocked() map[string]bool {
+	out := make(map[string]bool, len(d.completed))
+	for k, v := range d.completed {
+		out[k] = v
+	}
+	return out
+}
+
+func aggregateTaskOutputs(step *domain.Step, tasks []*domain.Task) map[string]any {
+	if len(tasks) == 1 {
+		return taskOutputMap(step, tasks[0])
+	}
+	results := make([]map[string]any, 0, len(tasks))
+	byKey := make(map[string][]any)
+	for _, task := range tasks {
+		out := taskOutputMap(step, task)
+		entry := make(map[string]any, len(out)+2)
+		entry["_task_id"] = task.ID.String()
+		entry["_index"] = task.Iteration
+		for k, v := range out {
+			entry[k] = v
+			byKey[k] = append(byKey[k], v)
+		}
+		results = append(results, entry)
+	}
+	aggregated := map[string]any{"results": results}
+	for k, v := range byKey {
+		aggregated[k] = v
+	}
+	return aggregated
+}
+
+func taskOutputMap(step *domain.Step, task *domain.Task) map[string]any {
+	var result adapter.AgentResult
+	if len(task.AgentResult) > 0 {
+		if err := json.Unmarshal(task.AgentResult, &result); err != nil {
+			result.Output = string(task.AgentResult)
+		}
+	}
+	return (&ContextPropagator{}).extractOutputs(step, &result, task.ResultSummary.String)
+}
+
+func (d *RunDriver) isRunComplete(runID uuid.UUID) bool {
+	steps, err := d.store.GetStepsByRun(runID)
+	if err != nil {
+		return false
+	}
 	for _, s := range steps {
 		if s.Status == domain.StepStatusPending || s.Status == domain.StepStatusRunning {
 			return false
@@ -329,7 +399,9 @@ func (d *RunDriver) ResumeRun(runID uuid.UUID) (*RecoveryResult, error) {
 		log.Printf("[driver] recovered scheduler state for run %s", runID)
 		// Restore completed/skipped state into driver.
 		for stepName := range d.scheduler.GetCompletedSteps() {
-			d.completed[stepName] = true
+			d.mu.Lock()
+			d.markCompletedLocked(stepName)
+			d.mu.Unlock()
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/google/uuid"
 	"github.com/ming-agents/server/adapter"
@@ -32,6 +33,9 @@ func NewTranslator(s *store.Store, r *adapter.Registry) *Translator {
 // Fan-out: if inputs contain a list reference (e.g. "${upstream.items}"),
 // this creates one task per list element.
 func (t *Translator) TranslateStep(step *domain.Step, ctx *Context) ([]*domain.Task, error) {
+	if err := hydrateStepInputs(step); err != nil {
+		return nil, err
+	}
 	// Resolve inputs from context.
 	resolvedInputs, err := t.resolveInputs(step, ctx)
 	if err != nil {
@@ -64,13 +68,10 @@ func (t *Translator) TranslateStep(step *domain.Step, ctx *Context) ([]*domain.T
 
 // resolveInputs resolves step inputs using the execution context.
 func (t *Translator) resolveInputs(step *domain.Step, ctx *Context) (map[string]any, error) {
-	if !step.InputsJSON.Valid {
-		return make(map[string]any), nil
+	if err := hydrateStepInputs(step); err != nil {
+		return nil, err
 	}
-	var inputs map[string]any
-	if err := json.Unmarshal([]byte(step.InputsJSON.String), &inputs); err != nil {
-		return nil, fmt.Errorf("unmarshal inputs: %w", err)
-	}
+	inputs := copyMap(step.InputsMap)
 	// Resolve each input by replacing ${ref} with context values.
 	for k, v := range inputs {
 		if s, ok := v.(string); ok {
@@ -131,17 +132,25 @@ func (t *Translator) extractList(inputs map[string]any) []any {
 
 // fanOut creates one task per item in the list.
 func (t *Translator) fanOut(step *domain.Step, items []any, ctx *Context) ([]*domain.Task, error) {
+	if err := hydrateStepInputs(step); err != nil {
+		return nil, err
+	}
 	var tasks []*domain.Task
 	for i, item := range items {
 		itemInputs := map[string]any{
-			"_item":     item,
-			"_index":    i,
-			"_total":    len(items),
+			"_item":  item,
+			"_index": i,
+			"_total": len(items),
 		}
 		// Copy non-special inputs.
 		for k, v := range step.InputsMap {
-			if k != "_list" && k != "_items" {
+			if k != "_list" && k != "_items" && k != "_adapter" {
 				itemInputs[k] = v
+			}
+		}
+		for k, v := range itemInputs {
+			if s, ok := v.(string); ok {
+				itemInputs[k] = renderTaskTemplate(s, ctx, itemInputs)
 			}
 		}
 		task := t.createTaskWithInputs(step, itemInputs, ctx)
@@ -187,8 +196,62 @@ func buildAgentRequest(step *domain.Step, inputs map[string]any) json.RawMessage
 
 // adapterKeyForStep returns the adapter key for a step.
 func adapterKeyForStep(step *domain.Step) string {
-	// Default to "fake" if not specified.
+	if step.AdapterKey != "" {
+		return step.AdapterKey
+	}
+	if err := hydrateStepInputs(step); err == nil {
+		if v, ok := step.InputsMap["_adapter"].(string); ok && v != "" {
+			return v
+		}
+		if v, ok := step.InputsMap["adapter"].(string); ok && v != "" {
+			return v
+		}
+	}
 	return "fake"
+}
+
+func hydrateStepInputs(step *domain.Step) error {
+	if step.InputsMap == nil {
+		step.InputsMap = make(map[string]any)
+	}
+	if step.InputsJSON.Valid && len(step.InputsMap) == 0 {
+		if err := json.Unmarshal([]byte(step.InputsJSON.String), &step.InputsMap); err != nil {
+			return fmt.Errorf("unmarshal inputs: %w", err)
+		}
+	}
+	if step.AdapterKey == "" {
+		if v, ok := step.InputsMap["_adapter"].(string); ok {
+			step.AdapterKey = v
+		}
+	}
+	return nil
+}
+
+func copyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func renderTaskTemplate(s string, ctx *Context, locals map[string]any) string {
+	rendered := ctx.RenderTemplate(s)
+	re := regexp.MustCompile(`\$\{([^}]+)\}`)
+	return re.ReplaceAllStringFunc(rendered, func(match string) string {
+		key := match[2 : len(match)-1]
+		v, ok := locals[key]
+		if !ok {
+			return match
+		}
+		if vs, ok := v.(string); ok {
+			return vs
+		}
+		if bs, err := json.Marshal(v); err == nil {
+			return string(bs)
+		}
+		return fmt.Sprintf("%v", v)
+	})
 }
 
 // ─── Scheduler ────────────────────────────────────────────────────────────────
@@ -197,32 +260,34 @@ func adapterKeyForStep(step *domain.Step) string {
 
 // Scheduler drives the DAG execution, respecting dependencies and max parallelism.
 type Scheduler struct {
-	store          *store.Store
-	dag            *workflow.DAG
-	maxParallel    int
-	readySet       map[string]*workflow.Node   // nodes with all inputs satisfied
-	pendingCount   int
-	blocked        map[string]bool             // nodes blocked by unmet dependencies
-	skipped        map[string]bool            // nodes skipped due to when condition or parent skip
-	completedSteps map[string]bool            // steps completed (for checkpointing)
-	stepOutputs    map[string]map[string]any  // step outputs for recovery
-	wasAdvanced    bool                       // tracks whether Advance was ever called (for first-call optimization)
-	returned       map[string]bool            // nodes already returned by Advance (prevents re-add to readySet)
+	store                *store.Store
+	dag                  *workflow.DAG
+	maxParallel          int
+	readySet             map[string]*workflow.Node // nodes with all inputs satisfied
+	pendingCount         int
+	blocked              map[string]bool           // nodes blocked by unmet dependencies
+	skipped              map[string]bool           // nodes skipped due to when condition or parent skip
+	completedSteps       map[string]bool           // steps completed (for checkpointing)
+	stepOutputs          map[string]map[string]any // step outputs for recovery
+	wasAdvanced          bool                      // tracks whether Advance was ever called (for first-call optimization)
+	returned             map[string]bool           // nodes already returned by Advance (prevents re-add to readySet)
+	processedCompletions map[string]bool           // steps whose edges have been released (prevents double-decrement)
 }
 
 // NewScheduler creates a new scheduler for a run.
 // maxParallel controls how many tasks can run concurrently.
 func NewScheduler(s *store.Store, dag *workflow.DAG, maxParallel int) *Scheduler {
 	return &Scheduler{
-		store:          s,
-		dag:            dag,
-		maxParallel:    maxParallel,
-		readySet:       make(map[string]*workflow.Node),
-		blocked:        make(map[string]bool),
-		skipped:        make(map[string]bool),
-		completedSteps: make(map[string]bool),
-		stepOutputs:    make(map[string]map[string]any),
-		returned:       make(map[string]bool),
+		store:                s,
+		dag:                  dag,
+		maxParallel:          maxParallel,
+		readySet:             make(map[string]*workflow.Node),
+		blocked:              make(map[string]bool),
+		skipped:              make(map[string]bool),
+		completedSteps:       make(map[string]bool),
+		stepOutputs:          make(map[string]map[string]any),
+		returned:             make(map[string]bool),
+		processedCompletions: make(map[string]bool),
 	}
 }
 
@@ -255,9 +320,15 @@ func (s *Scheduler) Advance(ctx *Context, completedSteps map[string]bool) []*wor
 		return newlyReady
 	}
 
-	// Mark completed steps and decrement in-degree of their children.
+	// Mark completed steps and decrement in-degree of their children (one-time).
 	// Also propagate skips to children.
 	for stepName := range completedSteps {
+		if s.processedCompletions[stepName] {
+			// Already processed this completion; skip to avoid double-decrement.
+			continue
+		}
+		s.processedCompletions[stepName] = true
+
 		if s.readySet[stepName] != nil {
 			delete(s.readySet, stepName)
 		}
@@ -276,20 +347,7 @@ func (s *Scheduler) Advance(ctx *Context, completedSteps map[string]bool) []*wor
 		}
 	}
 
-	// Also handle skipped steps propagation
-	for stepName := range s.skipped {
-		if s.readySet[stepName] != nil {
-			delete(s.readySet, stepName)
-		}
-		// Propagate skip to children
-		for _, childID := range s.dag.Children(stepName) {
-			if !s.skipped[childID] {
-				s.skipped[childID] = true
-				// Also decrement in-degree so children can be processed
-				s.dag.UpdateInDegree(childID)
-			}
-		}
-	}
+	s.propagateSkips()
 
 	// Find any remaining nodes that have become ready (parents completed in same tick).
 	// Skip nodes that are already completed or skipped.
@@ -322,7 +380,8 @@ func (s *Scheduler) PendingSlots(claimed, pending int) int {
 		return 0
 	}
 	avail := max - claimed
-	if avail > pending {
+	// On first dispatch (pending==0), don't cap by pending — allow full remaining capacity.
+	if pending > 0 && avail > pending {
 		avail = pending
 	}
 	return avail
@@ -341,6 +400,30 @@ func (s *Scheduler) SkipStep(stepName string) {
 	s.skipped[stepName] = true
 	if s.readySet[stepName] != nil {
 		delete(s.readySet, stepName)
+	}
+}
+
+func (s *Scheduler) propagateSkips() {
+	queue := make([]string, 0, len(s.skipped))
+	seen := make(map[string]bool, len(s.skipped))
+	for stepName := range s.skipped {
+		queue = append(queue, stepName)
+		seen[stepName] = true
+	}
+	for len(queue) > 0 {
+		stepName := queue[0]
+		queue = queue[1:]
+		delete(s.readySet, stepName)
+		for _, childID := range s.dag.Children(stepName) {
+			if !s.skipped[childID] {
+				s.skipped[childID] = true
+				s.dag.UpdateInDegree(childID)
+			}
+			if !seen[childID] {
+				seen[childID] = true
+				queue = append(queue, childID)
+			}
+		}
 	}
 }
 
@@ -386,11 +469,11 @@ const checkpointDir = "/tmp/ming-agents-run"
 
 // SchedulerCheckpoint is the persisted state for a scheduler.
 type SchedulerCheckpoint struct {
-	Version        string                   `json:"version"`
-	RunID         uuid.UUID                `json:"run_id"`
-	CompletedSteps map[string]bool         `json:"completed_steps"`
-	Skipped        map[string]bool         `json:"skipped"`
-	StepOutputs   map[string]map[string]any `json:"step_outputs"`
+	Version        string                    `json:"version"`
+	RunID          uuid.UUID                 `json:"run_id"`
+	CompletedSteps map[string]bool           `json:"completed_steps"`
+	Skipped        map[string]bool           `json:"skipped"`
+	StepOutputs    map[string]map[string]any `json:"step_outputs"`
 }
 
 // PersistState persists the scheduler state to a checkpoint file.
@@ -398,10 +481,10 @@ type SchedulerCheckpoint struct {
 func (s *Scheduler) PersistState(runID uuid.UUID) error {
 	ckpt := SchedulerCheckpoint{
 		Version:        "1.0",
-		RunID:         runID,
+		RunID:          runID,
 		CompletedSteps: s.completedSteps,
 		Skipped:        s.skipped,
-		StepOutputs:   s.stepOutputs,
+		StepOutputs:    s.stepOutputs,
 	}
 
 	raw, err := json.Marshal(ckpt)
@@ -502,20 +585,35 @@ func (e *Engine) SchedulerForRun(run *domain.Run, steps []*domain.Step) (*Schedu
 			continue
 		}
 		for _, v := range inputs {
-			if s, ok := v.(string); ok {
-				ref := extractRef(s)
-				if ref == "" {
-					continue
-				}
+			refs := extractAllRefs(v)
+			for _, ref := range refs {
 				parts := splitRef(ref)
 				if parts == nil {
 					continue
 				}
-				_ = dag.AddEdge(parts[0], st.Name)
+				if err := dag.AddEdge(parts[0], st.Name); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
-	return NewScheduler(e.store, dag, run.MaxParallel), nil
+	s := NewScheduler(e.store, dag, run.MaxParallel)
+	s.InitReadySet()
+	return s, nil
+}
+
+func extractAllRefs(v any) []string {
+	var refs []string
+	if s, ok := v.(string); ok {
+		re := regexp.MustCompile(`\$\{([^}]+)\}`)
+		matches := re.FindAllStringSubmatch(s, -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				refs = append(refs, m[1])
+			}
+		}
+	}
+	return refs
 }
 
 func extractRef(v any) string {

@@ -26,15 +26,16 @@ func NewPersistenceManager(s *store.Store) *PersistenceManager {
 // This is called periodically or after each step completion.
 func (pm *PersistenceManager) Snapshot(run *domain.Run, steps []*domain.Step, tasks []*domain.Task) error {
 	type snapshot struct {
-		RunID     uuid.UUID              `json:"run_id"`
-		RunStatus domain.RunStatus       `json:"run_status"`
-		Steps     []stepSnapshot         `json:"steps"`
-		Tasks     []taskSnapshot         `json:"tasks"`
+		RunID     uuid.UUID                 `json:"run_id"`
+		RunStatus domain.RunStatus          `json:"run_status"`
+		Steps     []stepSnapshot            `json:"steps"`
+		Tasks     []taskSnapshot            `json:"tasks"`
 		Ctx       map[string]map[string]any `json:"context"`
 	}
 	ss := snapshot{
 		RunID:     run.ID,
 		RunStatus: run.Status,
+		Ctx:       make(map[string]map[string]any),
 	}
 	for _, st := range steps {
 		ss.Steps = append(ss.Steps, stepSnapshot{
@@ -44,13 +45,19 @@ func (pm *PersistenceManager) Snapshot(run *domain.Run, steps []*domain.Step, ta
 			Iteration: st.Iteration,
 			Attempt:   st.Attempt,
 		})
+		if st.Status == domain.StepStatusCompleted && st.OutputsJSON.Valid {
+			var outputs map[string]any
+			if err := json.Unmarshal([]byte(st.OutputsJSON.String), &outputs); err == nil {
+				ss.Ctx[st.Name] = outputs
+			}
+		}
 	}
 	for _, t := range tasks {
 		ss.Tasks = append(ss.Tasks, taskSnapshot{
-			ID:       t.ID,
-			StepID:   t.StepID,
-			Status:   t.Status,
-			Claimed:  t.ClaimedAt.Valid,
+			ID:      t.ID,
+			StepID:  t.StepID,
+			Status:  t.Status,
+			Claimed: t.ClaimedAt.Valid,
 		})
 	}
 	raw, err := json.Marshal(ss)
@@ -107,11 +114,11 @@ func (pm *PersistenceManager) RecoverRun(runID uuid.UUID) (*RecoveryResult, erro
 	}
 
 	result := &RecoveryResult{
-		Run:        run,
-		Steps:      steps,
-		Tasks:      tasks,
-		Artifacts:  artifacts,
-		Recovered:  true,
+		Run:       run,
+		Steps:     steps,
+		Tasks:     tasks,
+		Artifacts: artifacts,
+		Recovered: true,
 	}
 
 	if latestSnapshot != nil {
@@ -125,6 +132,7 @@ func (pm *PersistenceManager) RecoverRun(runID uuid.UUID) (*RecoveryResult, erro
 
 	// Restore context from completed steps.
 	ctx := NewContext()
+	restoredSteps := make(map[string]bool)
 	for _, st := range steps {
 		if st.Status == domain.StepStatusCompleted && st.OutputsJSON.Valid {
 			var outputs map[string]any
@@ -132,6 +140,17 @@ func (pm *PersistenceManager) RecoverRun(runID uuid.UUID) (*RecoveryResult, erro
 				for k, v := range outputs {
 					ctx.SetOutput(st.Name, k, v)
 				}
+				restoredSteps[st.Name] = true
+			}
+		}
+	}
+	if result.Snapshot != nil {
+		for stepName, outputs := range result.Snapshot.Ctx {
+			if restoredSteps[stepName] {
+				continue
+			}
+			for k, v := range outputs {
+				ctx.SetOutput(stepName, k, v)
 			}
 		}
 	}
@@ -189,24 +208,24 @@ func (pm *PersistenceManager) CheckpointRun(run *domain.Run) error {
 }
 
 type stepSnapshot struct {
-	ID        uuid.UUID       `json:"id"`
-	Name      string          `json:"name"`
+	ID        uuid.UUID         `json:"id"`
+	Name      string            `json:"name"`
 	Status    domain.StepStatus `json:"status"`
-	Iteration int             `json:"iteration"`
-	Attempt   int             `json:"attempt"`
+	Iteration int               `json:"iteration"`
+	Attempt   int               `json:"attempt"`
 }
 
 type taskSnapshot struct {
-	ID     uuid.UUID      `json:"id"`
-	StepID uuid.UUID      `json:"step_id"`
-	Status domain.TaskStatus `json:"status"`
-	Claimed bool           `json:"claimed"`
+	ID      uuid.UUID         `json:"id"`
+	StepID  uuid.UUID         `json:"step_id"`
+	Status  domain.TaskStatus `json:"status"`
+	Claimed bool              `json:"claimed"`
 }
 
 type snapshot struct {
-	RunID     uuid.UUID              `json:"run_id"`
-	RunStatus domain.RunStatus       `json:"run_status"`
-	Steps     []stepSnapshot         `json:"steps"`
-	Tasks     []taskSnapshot         `json:"tasks"`
+	RunID     uuid.UUID                 `json:"run_id"`
+	RunStatus domain.RunStatus          `json:"run_status"`
+	Steps     []stepSnapshot            `json:"steps"`
+	Tasks     []taskSnapshot            `json:"tasks"`
 	Ctx       map[string]map[string]any `json:"context"`
 }
