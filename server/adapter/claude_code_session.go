@@ -56,6 +56,7 @@ type ClaudeCodeSession struct {
 type ClaudeCodeSessionManager struct {
 	mu       sync.Mutex
 	sessions map[string]*ClaudeCodeSession
+	starting map[string]chan struct{}
 	config   ClaudeCodeConfig
 }
 
@@ -74,39 +75,52 @@ func NewClaudeCodeSessionManager(config ClaudeCodeConfig) *ClaudeCodeSessionMana
 	}
 	return &ClaudeCodeSessionManager{
 		sessions: make(map[string]*ClaudeCodeSession),
+		starting: make(map[string]chan struct{}),
 		config:   config,
 	}
 }
 
 func (m *ClaudeCodeSessionManager) GetOrStart(ctx context.Context, workDir string) (*ClaudeCodeSession, error) {
 	key := workDir
-	m.mu.Lock()
-	if session := m.sessions[key]; session != nil && !session.isClosed() {
+	for {
+		m.mu.Lock()
+		if session := m.sessions[key]; session != nil && !session.isClosed() {
+			m.mu.Unlock()
+			return session, nil
+		}
+		if done := m.starting[key]; done != nil {
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("wait for claude-code session startup: %w", ctx.Err())
+			case <-done:
+				continue
+			}
+		}
+		m.starting[key] = make(chan struct{})
+		oldSession := m.sessions[key]
+		m.mu.Unlock()
+
+		session, err := m.StartSession(ctx, workDir)
+
+		m.mu.Lock()
+		done := m.starting[key]
+		delete(m.starting, key)
+		if err != nil {
+			delete(m.sessions, key)
+			close(done)
+			m.mu.Unlock()
+			return nil, err
+		}
+		// Clean up any dead sessions before storing the new one.
+		if oldSession != nil && oldSession != session {
+			oldSession.Close()
+		}
+		m.sessions[key] = session
+		close(done)
 		m.mu.Unlock()
 		return session, nil
 	}
-	oldSession := m.sessions[key]
-	// Mark in-flight so other goroutines wait for the same session.
-	m.sessions[key] = nil
-	m.mu.Unlock()
-
-	session, err := m.StartSession(ctx, workDir)
-	if err != nil {
-		// Remove in-flight marker so retry can succeed.
-		m.mu.Lock()
-		delete(m.sessions, key)
-		m.mu.Unlock()
-		return nil, err
-	}
-
-	m.mu.Lock()
-	// Clean up any dead sessions before storing the new one.
-	if oldSession != nil && oldSession != session {
-		oldSession.Close()
-	}
-	m.sessions[key] = session
-	m.mu.Unlock()
-	return session, nil
 }
 
 func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir string) (*ClaudeCodeSession, error) {

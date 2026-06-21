@@ -38,6 +38,35 @@ func effectiveTimeout(timeout time.Duration) time.Duration {
 	return defaultAgentTimeout
 }
 
+func mergeExecutionContext(workDir, command string, timeout time.Duration, overrides []ExecutionContext, req AgentRequest) ExecutionContext {
+	effective := ExecutionContext{
+		WorkDir: workDir,
+		Command: command,
+		Timeout: timeout,
+	}
+	if req.Execution.WorkDir != "" {
+		effective.WorkDir = req.Execution.WorkDir
+	}
+	if req.Execution.Command != "" {
+		effective.Command = req.Execution.Command
+	}
+	if req.Execution.Timeout > 0 {
+		effective.Timeout = req.Execution.Timeout
+	}
+	for _, override := range overrides {
+		if override.WorkDir != "" {
+			effective.WorkDir = override.WorkDir
+		}
+		if override.Command != "" {
+			effective.Command = override.Command
+		}
+		if override.Timeout > 0 {
+			effective.Timeout = override.Timeout
+		}
+	}
+	return effective
+}
+
 func marshalProcessResult(meta processResult) json.RawMessage {
 	raw, err := json.Marshal(meta)
 	if err != nil {

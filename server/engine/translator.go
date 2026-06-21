@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ming-agents/server/adapter"
@@ -201,15 +203,92 @@ func (t *Translator) createTaskWithInputs(step *domain.Step, inputs map[string]a
 // buildAgentRequest builds an agent request from step + inputs.
 func buildAgentRequest(step *domain.Step, inputs map[string]any) json.RawMessage {
 	req := adapter.AgentRequest{}
+	req.Execution = executionContextFromInputs(inputs)
 	// If there's a "prompt" in inputs, use it.
 	if prompt, ok := inputs["prompt"].(string); ok {
 		req.Prompt = prompt
 	} else {
 		// Serialize inputs as raw JSON.
-		req.RawJSON, _ = json.Marshal(inputs)
+		req.RawJSON, _ = json.Marshal(agentPayloadInputs(inputs))
 	}
 	raw, _ := json.Marshal(req)
 	return raw
+}
+
+func executionContextFromInputs(inputs map[string]any) adapter.ExecutionContext {
+	return adapter.ExecutionContext{
+		WorkDir: stringInput(inputs, "_work_dir", "work_dir"),
+		Command: stringInput(inputs, "_command", "command"),
+		Timeout: timeoutInput(inputs),
+	}
+}
+
+func stringInput(inputs map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := inputs[key]; ok {
+			if s, ok := v.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func timeoutInput(inputs map[string]any) time.Duration {
+	if d := durationInput(inputs, "_timeout_ms", "timeout_ms"); d > 0 {
+		return d
+	}
+	return durationInput(inputs, "_timeout_seconds", "timeout_seconds")
+}
+
+func durationInput(inputs map[string]any, keys ...string) time.Duration {
+	for _, key := range keys {
+		v, ok := inputs[key]
+		if !ok {
+			continue
+		}
+		switch value := v.(type) {
+		case int:
+			return time.Duration(value) * unitForTimeoutKey(key)
+		case int64:
+			return time.Duration(value) * unitForTimeoutKey(key)
+		case float64:
+			return time.Duration(value * float64(unitForTimeoutKey(key)))
+		case json.Number:
+			n, err := value.Float64()
+			if err == nil {
+				return time.Duration(n * float64(unitForTimeoutKey(key)))
+			}
+		case string:
+			if parsed, err := time.ParseDuration(value); err == nil {
+				return parsed
+			}
+			if n, err := strconv.ParseFloat(value, 64); err == nil {
+				return time.Duration(n * float64(unitForTimeoutKey(key)))
+			}
+		}
+	}
+	return 0
+}
+
+func unitForTimeoutKey(key string) time.Duration {
+	if key == "_timeout_seconds" || key == "timeout_seconds" {
+		return time.Second
+	}
+	return time.Millisecond
+}
+
+func agentPayloadInputs(inputs map[string]any) map[string]any {
+	payload := copyMap(inputs)
+	for _, key := range []string{
+		"_work_dir", "work_dir",
+		"_command", "command",
+		"_timeout_ms", "timeout_ms",
+		"_timeout_seconds", "timeout_seconds",
+	} {
+		delete(payload, key)
+	}
+	return payload
 }
 
 // adapterKeyForStep returns the adapter key for a step.

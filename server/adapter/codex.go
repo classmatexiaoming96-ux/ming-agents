@@ -11,10 +11,11 @@ type CodexAdapter struct {
 
 func (a CodexAdapter) Key() string { return "codex" }
 
-func (a CodexAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
-	command := a.Command
+func (a CodexAdapter) Invoke(req AgentRequest, execCtx ...ExecutionContext) (*AgentResult, error) {
+	effective := mergeExecutionContext(a.WorkDir, a.Command, a.Timeout, execCtx, req)
+	command := effective.Command
 	if command == "" {
 		command = "codex"
 	}
-	return runAgentCommand(a.Key(), a.WorkDir, a.Timeout, command, []string{"exec", promptFromRequest(req)}, "")
+	return runAgentCommand(a.Key(), effective.WorkDir, effective.Timeout, command, []string{"exec", promptFromRequest(req)}, "")
 }

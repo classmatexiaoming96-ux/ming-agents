@@ -199,6 +199,9 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 
 // OnTaskCompleted is called when a task completes (by the worker callback).
 func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	task, err := d.store.GetTask(taskID)
 	if err != nil {
 		return fmt.Errorf("get task: %w", err)
@@ -206,6 +209,9 @@ func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
 	step, err := d.store.GetStep(task.StepID)
 	if err != nil {
 		return fmt.Errorf("get step: %w", err)
+	}
+	if step.Status == domain.StepStatusCompleted || step.Status == domain.StepStatusFailed || step.Status == domain.StepStatusSkipped {
+		return nil
 	}
 
 	// Persist step output if all tasks done.
@@ -237,7 +243,7 @@ func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
 			d.ctx.SetOutput(step.Name, k, v)
 		}
 
-		d.completeStep(step.Name, outputs)
+		d.completeStepLocked(step.Name, outputs)
 
 		// Persist scheduler state checkpoint (Epic 2.8).
 		if err := d.scheduler.PersistState(step.RunID); err != nil {
@@ -261,6 +267,10 @@ func (d *RunDriver) markCompletedLocked(stepName string) {
 func (d *RunDriver) completeStep(stepName string, outputs map[string]any) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.completeStepLocked(stepName, outputs)
+}
+
+func (d *RunDriver) completeStepLocked(stepName string, outputs map[string]any) {
 	d.markCompletedLocked(stepName)
 	d.scheduler.StepCompleted(stepName)
 	if outputs != nil {

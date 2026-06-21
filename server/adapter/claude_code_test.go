@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -167,6 +168,57 @@ func TestClaudeCodeAdapterManagersAreKeyedByCommand(t *testing.T) {
 	}
 	if second.config.Command != "/tmp/second-claude" {
 		t.Fatalf("second manager command = %q", second.config.Command)
+	}
+}
+
+func TestClaudeCodeSessionManagerSharesConcurrentStartupForWorkDir(t *testing.T) {
+	workDir := t.TempDir()
+	startsPath := filepath.Join(workDir, "starts.txt")
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf 'start\n' >> starts.txt
+sleep 0.05
+printf 'Claude Code ready\n'
+while IFS= read -r line; do
+  case "$line" in
+    *MING_AGENTS_DONE:*)
+      marker=$(printf '%s' "$line" | tr -d '"' | sed 's/ + //g')
+      printf 'ok\n%s\n' "$marker"
+      ;;
+  esac
+done
+`)
+	manager := NewClaudeCodeSessionManager(ClaudeCodeConfig{
+		Command:        cmd,
+		StartupTimeout: time.Second,
+		ReadyTimeout:   time.Second,
+	})
+
+	var wg sync.WaitGroup
+	sessions := make([]*ClaudeCodeSession, 2)
+	errs := make([]error, 2)
+	for i := range sessions {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sessions[i], errs[i] = manager.GetOrStart(testCtx(t, time.Second), workDir)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("GetOrStart(%d) error = %v", i, err)
+		}
+	}
+	t.Cleanup(func() { sessions[0].Close() })
+	if sessions[0] != sessions[1] {
+		t.Fatal("concurrent GetOrStart returned different sessions for same workDir")
+	}
+	starts, err := os.ReadFile(startsPath)
+	if err != nil {
+		t.Fatalf("read starts: %v", err)
+	}
+	if got := strings.Count(string(starts), "start"); got != 1 {
+		t.Fatalf("session starts = %d, want 1", got)
 	}
 }
 

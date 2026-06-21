@@ -14,7 +14,7 @@ type APIAdapter struct {
 
 func (a APIAdapter) Key() string { return "api" }
 
-func (a APIAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
+func (a APIAdapter) Invoke(req AgentRequest, execCtx ...ExecutionContext) (*AgentResult, error) {
 	// req.RawJSON is forwarded as-is to the configured API endpoint.
 	// A real implementation would HTTP POST to a.BaseURL with a.APIKey header.
 	_ = a.BaseURL
@@ -33,7 +33,7 @@ type ExecAdapter struct {
 
 func (a ExecAdapter) Key() string { return "exec" }
 
-func (a ExecAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
+func (a ExecAdapter) Invoke(req AgentRequest, execCtx ...ExecutionContext) (*AgentResult, error) {
 	cmd := a.Command
 	args := a.Args
 	if len(req.RawJSON) > 0 {
@@ -53,7 +53,7 @@ type FakeAdapter struct{}
 
 func (a FakeAdapter) Key() string { return "fake" }
 
-func (a FakeAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
+func (a FakeAdapter) Invoke(req AgentRequest, execCtx ...ExecutionContext) (*AgentResult, error) {
 	raw, _ := json.Marshal(req)
 	return &AgentResult{
 		Output:  "fake output for: " + req.Prompt,

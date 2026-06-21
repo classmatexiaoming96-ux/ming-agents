@@ -27,7 +27,7 @@ func TestAgentEvaluator_Evaluate_Invoke(t *testing.T) {
 
 	ae := NewAgentEvaluator(spy, AgentEvaluatorConfig{
 		AdapterKey: "spy",
-		Model:     "test-model",
+		Model:      "test-model",
 	})
 
 	ctx := engine.NewContext()
@@ -349,8 +349,8 @@ type spyAdapter struct {
 	fn func(adapter.AgentRequest) (*adapter.AgentResult, error)
 }
 
-func (s *spyAdapter) Key() string   { return "spy" }
-func (s *spyAdapter) Invoke(req adapter.AgentRequest) (*adapter.AgentResult, error) {
+func (s *spyAdapter) Key() string { return "spy" }
+func (s *spyAdapter) Invoke(req adapter.AgentRequest, execCtx ...adapter.ExecutionContext) (*adapter.AgentResult, error) {
 	return s.fn(req)
 }
 

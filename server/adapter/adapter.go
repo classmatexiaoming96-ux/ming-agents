@@ -1,6 +1,9 @@
 package adapter
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // AgentAdapter is the interface for invoking an LLM-backed agent.
 type AgentAdapter interface {
@@ -8,14 +11,22 @@ type AgentAdapter interface {
 	Key() string
 
 	// Invoke sends a request to the agent and returns the result.
-	Invoke(req AgentRequest) (*AgentResult, error)
+	Invoke(req AgentRequest, execCtx ...ExecutionContext) (*AgentResult, error)
 }
 
 // AgentRequest wraps an agent invocation request as opaque JSON.
 type AgentRequest struct {
-	Model   string          `json:"model,omitempty"`
-	Prompt  string          `json:"prompt,omitempty"`
-	RawJSON json.RawMessage `json:"raw_json,omitempty"`
+	Model     string           `json:"model,omitempty"`
+	Prompt    string           `json:"prompt,omitempty"`
+	RawJSON   json.RawMessage  `json:"raw_json,omitempty"`
+	Execution ExecutionContext `json:"execution_context,omitempty"`
+}
+
+// ExecutionContext carries per-invocation runtime options that must vary by task.
+type ExecutionContext struct {
+	WorkDir string        `json:"work_dir,omitempty"`
+	Command string        `json:"command,omitempty"`
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 // AgentResult is the result of an agent invocation.

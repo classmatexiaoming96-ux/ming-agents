@@ -94,7 +94,7 @@ func (w *Worker) processOne() {
 	}
 
 	// Invoke.
-	result, err := a.Invoke(req)
+	result, err := a.Invoke(req, req.Execution)
 	if err != nil {
 		w.failTask(task, fmt.Sprintf("adapter invoke: %v", err))
 		return

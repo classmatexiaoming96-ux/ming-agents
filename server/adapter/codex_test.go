@@ -40,6 +40,27 @@ printf 'cwd=%s\nprompt=%s\n' "$(pwd)" "$2"
 	}
 }
 
+func TestCodexAdapterInvokeUsesPerInvocationWorkDir(t *testing.T) {
+	staticDir := t.TempDir()
+	dynamicDir := t.TempDir()
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf 'cwd=%s\n' "$(pwd)"
+`)
+
+	result, err := (CodexAdapter{
+		Command: cmd,
+		WorkDir: staticDir,
+		Timeout: time.Second,
+	}).Invoke(AgentRequest{Prompt: "repair the tests"}, ExecutionContext{WorkDir: dynamicDir})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+
+	if want := "cwd=" + dynamicDir + "\n"; result.Output != want {
+		t.Fatalf("Output = %q, want %q", result.Output, want)
+	}
+}
+
 func TestCodexAdapterInvokeReturnsExitCodeAndOutputOnFailure(t *testing.T) {
 	cmd := writeTestCommand(t, `#!/bin/sh
 echo "partial output"

@@ -23,17 +23,18 @@ var (
 	claudeCodeManagers sync.Map
 )
 
-func (a ClaudeCodeAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
-	command := a.Command
+func (a ClaudeCodeAdapter) Invoke(req AgentRequest, execCtx ...ExecutionContext) (*AgentResult, error) {
+	effective := mergeExecutionContext(a.WorkDir, a.Command, a.Timeout, execCtx, req)
+	command := effective.Command
 	if command == "" {
 		command = "claude"
 	}
 
 	manager := a.manager(command)
-	timeout := effectiveTimeout(a.Timeout)
-	session, err := manager.GetOrStart(context.Background(), a.WorkDir)
+	timeout := effectiveTimeout(effective.Timeout)
+	session, err := manager.GetOrStart(context.Background(), effective.WorkDir)
 	if err != nil {
-		result := processErrorResult(a.Key(), a.WorkDir, []string{command}, -1, false, err.Error())
+		result := processErrorResult(a.Key(), effective.WorkDir, []string{command}, -1, false, err.Error())
 		return result, fmt.Errorf("%s adapter: %w", a.Key(), err)
 	}
 
@@ -46,12 +47,12 @@ func (a ClaudeCodeAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
 		if timedOut {
 			session.Close()
 		}
-		result := processErrorResult(a.Key(), a.WorkDir, []string{command}, -1, timedOut, err.Error())
+		result := processErrorResult(a.Key(), effective.WorkDir, []string{command}, -1, timedOut, err.Error())
 		return result, fmt.Errorf("%s adapter: %w", a.Key(), err)
 	}
 
 	// Close session if using a per-invoke manager (custom Command).
-	if a.Command != "" {
+	if effective.Command != "" {
 		session.Close()
 	}
 
@@ -60,7 +61,7 @@ func (a ClaudeCodeAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
 		RawJSON: marshalProcessResult(processResult{
 			Adapter:  a.Key(),
 			Command:  []string{command},
-			WorkDir:  a.WorkDir,
+			WorkDir:  effective.WorkDir,
 			ExitCode: 0,
 		}),
 		Summary: fmt.Sprintf("%s adapter completed", a.Key()),
