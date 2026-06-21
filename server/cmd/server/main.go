@@ -10,8 +10,11 @@ import (
 
 	"github.com/ming-agents/server/adapter"
 	"github.com/ming-agents/server/api"
+	"github.com/ming-agents/server/codegraph"
+	pgxdb "github.com/ming-agents/server/db"
 	"github.com/ming-agents/server/engine"
 	"github.com/ming-agents/server/eval"
+	"github.com/ming-agents/server/memory"
 	"github.com/ming-agents/server/store"
 )
 
@@ -27,16 +30,29 @@ func main() {
 		log.Fatal("DATABASE_URL not set")
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	sqlDB, err := sql.Open("postgres", *dsn)
 	if err != nil {
 		log.Fatalf("open DB: %v", err)
 	}
-	if err := db.Ping(); err != nil {
+	if err := sqlDB.Ping(); err != nil {
 		log.Fatalf("ping DB: %v", err)
 	}
-	defer db.Close()
+	defer sqlDB.Close()
 
-	s := store.NewStore(db)
+	pgxPool, err := pgxdb.Connect(context.Background(), *dsn)
+	if err != nil {
+		log.Fatalf("open pgx DB: %v", err)
+	}
+	defer pgxPool.Close()
+	if err := pgxdb.Migrate(context.Background(), pgxPool); err != nil {
+		log.Fatalf("migrate DB: %v", err)
+	}
+
+	if err := memory.InitFTS(); err != nil {
+		log.Printf("memory FTS init failed; recall will fall back where possible: %v", err)
+	}
+
+	s := store.NewStore(sqlDB)
 
 	// One-shot retention cleanup mode: prune tasks/iterations for terminal runs
 	// older than the retention period, then exit.
@@ -61,7 +77,8 @@ func main() {
 	er.Register(&eval.NoProgressEvaluator{Patience: 3})
 
 	eng := engine.NewEngine(s, ar)
-	srv := api.NewServer(s, eng, ar, er)
+	graph := codegraph.NewRepoGraph()
+	srv := api.NewServer(s, eng, ar, er, api.WithCodeGraph(graph, pgxPool))
 
 	// Background retention cleanup: periodically prune tasks/iterations for
 	// terminal runs older than the retention period. Tied to the process

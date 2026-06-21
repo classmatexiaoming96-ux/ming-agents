@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ming-agents/server/adapter"
+	"github.com/ming-agents/server/codegraph"
 	"github.com/ming-agents/server/domain"
 	"github.com/ming-agents/server/engine"
 	"github.com/ming-agents/server/eval"
@@ -25,10 +27,23 @@ type Server struct {
 	adapterReg *adapter.Registry
 	evalReg    *eval.Registry
 	mux        *http.ServeMux
+	graph      *codegraph.RepoGraph
+	pgxPool    *pgxpool.Pool
+}
+
+// Option configures optional API modules.
+type Option func(*Server)
+
+// WithCodeGraph registers CodeGraph routes backed by the given graph and pool.
+func WithCodeGraph(graph *codegraph.RepoGraph, pool *pgxpool.Pool) Option {
+	return func(s *Server) {
+		s.graph = graph
+		s.pgxPool = pool
+	}
 }
 
 // NewServer creates a new API server.
-func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eval.Registry) *Server {
+func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eval.Registry, opts ...Option) *Server {
 	driver := engine.NewRunDriver(s, ar, eng)
 	srv := &Server{
 		store:      s,
@@ -38,6 +53,9 @@ func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eva
 		adapterReg: ar,
 		evalReg:    er,
 		mux:        http.NewServeMux(),
+	}
+	for _, opt := range opts {
+		opt(srv)
 	}
 	srv.routes()
 	return srv
@@ -55,6 +73,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}/timeline", s.handleTimeline)
 	s.mux.HandleFunc("GET /runs/{id}/snapshot", s.handleGetSnapshot)
 	s.mux.HandleFunc("POST /admin/cleanup", s.handleCleanup)
+	s.registerMemoryRoutes()
+	if s.graph != nil && s.pgxPool != nil {
+		NewGraphHandler(s.pgxPool, s.graph).RegisterRoutes(s.mux)
+	}
 }
 
 // ServeHTTP implements http.Handler.
