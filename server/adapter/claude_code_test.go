@@ -111,6 +111,65 @@ done
 	}
 }
 
+func TestClaudeCodeSessionSendPromptHonorsContextWhenSendLocked(t *testing.T) {
+	session := &ClaudeCodeSession{}
+	session.sendMu.Lock()
+	defer session.sendMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := session.SendPrompt(ctx, "should not wait forever")
+	if err == nil {
+		t.Fatal("SendPrompt() error = nil, want context error while send lock is held")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("SendPrompt() waited %s, want it to return promptly when context is done", time.Since(start))
+	}
+}
+
+func TestClaudeCodeSessionWaitForUsesNormalizedResponseSnapshot(t *testing.T) {
+	workDir := t.TempDir()
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf 'Claude Code ready\n'
+while IFS= read -r line; do
+  case "$line" in
+    *MING_AGENTS_DONE:*)
+      marker=$(printf '%s' "$line" | tr -d '"' | sed 's/ + //g')
+      printf '\033[31mred response\033[0m\n'
+      printf '%s\n' "$marker"
+      ;;
+  esac
+done
+`)
+
+	session := startTestClaudeSession(t, cmd, workDir)
+	defer session.Close()
+
+	output, err := session.SendPrompt(testCtx(t, time.Second), "answer me")
+	if err != nil {
+		t.Fatalf("SendPrompt() error = %v", err)
+	}
+	if output != "red response" {
+		t.Fatalf("output = %q, want normalized response before sentinel", output)
+	}
+}
+
+func TestClaudeCodeAdapterManagersAreKeyedByCommand(t *testing.T) {
+	first := ClaudeCodeAdapter{Command: "/tmp/first-claude", Timeout: time.Second}.manager("/tmp/first-claude")
+	second := ClaudeCodeAdapter{Command: "/tmp/second-claude", Timeout: time.Second}.manager("/tmp/second-claude")
+
+	if first == second {
+		t.Fatal("manager() returned same manager for different commands")
+	}
+	if first.config.Command != "/tmp/first-claude" {
+		t.Fatalf("first manager command = %q", first.config.Command)
+	}
+	if second.config.Command != "/tmp/second-claude" {
+		t.Fatalf("second manager command = %q", second.config.Command)
+	}
+}
+
 func TestClaudeCodeAdapterInvokeTimeoutReturnsStructuredError(t *testing.T) {
 	cmd := writeTestCommand(t, `#!/bin/sh
 printf 'Claude Code ready\n'

@@ -14,17 +14,20 @@ type PTYReader struct {
 	pty *os.File
 
 	mu         sync.Mutex
-	cond       *sync.Cond
-	raw        []byte
+	updateCh   chan struct{}
+	done       chan struct{}
+	closeOnce  sync.Once
 	normalized strings.Builder
 	ring       string
 	closed     bool
 }
 
 func NewPTYReader(pty *os.File) *PTYReader {
-	r := &PTYReader{pty: pty}
-	r.cond = sync.NewCond(&r.mu)
-	return r
+	return &PTYReader{
+		pty:      pty,
+		updateCh: make(chan struct{}),
+		done:     make(chan struct{}),
+	}
 }
 
 func (r *PTYReader) ReadLoop() {
@@ -34,57 +37,53 @@ func (r *PTYReader) ReadLoop() {
 		if n > 0 {
 			normalized := StripANSI(buf[:n])
 			r.mu.Lock()
-			r.raw = append(r.raw, buf[:n]...)
 			r.normalized.WriteString(normalized)
 			r.ring += normalized
 			if len(r.ring) > ptyReaderRingLimit {
 				r.ring = r.ring[len(r.ring)-ptyReaderRingLimit:]
 			}
-			r.cond.Broadcast()
+			r.notifyLocked()
 			r.mu.Unlock()
 		}
 		if err != nil {
-			r.mu.Lock()
-			r.closed = true
-			r.cond.Broadcast()
-			r.mu.Unlock()
+			r.Close()
 			return
 		}
 	}
 }
 
-func (r *PTYReader) WaitFor(ctx context.Context, pattern string, sinceOffset int) int {
+func (r *PTYReader) WaitFor(ctx context.Context, pattern string, sinceOffset int) (string, bool) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return -1
+		return "", false
 	}
 
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			r.mu.Lock()
-			r.cond.Broadcast()
-			r.mu.Unlock()
-		case <-done:
-		}
-	}()
-	defer close(done)
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	for {
+		r.mu.Lock()
 		text := r.normalized.String()
 		if sinceOffset < 0 || sinceOffset > len(text) {
 			sinceOffset = len(text)
 		}
 		if loc := re.FindStringIndex(text[sinceOffset:]); loc != nil {
-			return sinceOffset + loc[0]
+			response := text[sinceOffset : sinceOffset+loc[0]]
+			r.mu.Unlock()
+			return response, true
 		}
-		if ctx.Err() != nil || r.closed {
-			return -1
+		if r.closed {
+			r.mu.Unlock()
+			return "", false
 		}
-		r.cond.Wait()
+		updateCh := r.updateCh
+		done := r.done
+		r.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return "", false
+		case <-done:
+			return "", false
+		case <-updateCh:
+		}
 	}
 }
 
@@ -96,13 +95,19 @@ func (r *PTYReader) Snapshot() (string, int) {
 }
 
 func (r *PTYReader) Close() {
-	r.mu.Lock()
-	if !r.closed {
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
 		r.closed = true
 		_ = r.pty.Close()
-	}
-	r.cond.Broadcast()
-	r.mu.Unlock()
+		close(r.done)
+		r.notifyLocked()
+		r.mu.Unlock()
+	})
+}
+
+func (r *PTYReader) notifyLocked() {
+	close(r.updateCh)
+	r.updateCh = make(chan struct{})
 }
 
 func StripANSI(data []byte) string {

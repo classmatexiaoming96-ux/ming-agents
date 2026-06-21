@@ -44,20 +44,25 @@ func (t *Translator) TranslateStep(step *domain.Step, ctx *Context) ([]*domain.T
 
 	// Check for conditional skip.
 	if step.StepType == domain.StepTypeConditional {
-		skip, reason, err := t.evaluateCondition(step, resolvedInputs)
+		skip, reason, err := t.evaluateCondition(step, resolvedInputs, ctx)
 		if err != nil {
 			return nil, err
 		}
 		if skip {
 			step.Status = domain.StepStatusSkipped
 			step.SkipReasonStr = reason
-			_ = t.store.UpdateStep(step)
+			if t.store != nil {
+				_ = t.store.UpdateStep(step)
+			}
 			return nil, nil // No tasks generated; step is skipped.
 		}
 	}
 
 	// Check for list fan-out.
-	listItems := t.extractList(resolvedInputs)
+	listItems, err := t.extractList(resolvedInputs)
+	if err != nil {
+		return nil, err
+	}
 	if len(listItems) > 0 {
 		return t.fanOut(step, listItems, ctx)
 	}
@@ -83,51 +88,63 @@ func (t *Translator) resolveInputs(step *domain.Step, ctx *Context) (map[string]
 
 // evaluateCondition evaluates a conditional step's `when` expression.
 // Returns (skip=true, reason) if the condition is false.
-func (t *Translator) evaluateCondition(step *domain.Step, inputs map[string]any) (bool, string, error) {
+func (t *Translator) evaluateCondition(step *domain.Step, inputs map[string]any, ctx *Context) (bool, string, error) {
 	// The "when" field is stored in the step's inputs JSON as a "_when" key.
 	when, ok := inputs["_when"].(string)
 	if !ok {
 		return false, "", nil
 	}
-	// Simple expression evaluation: "output_key == value" or "output_key != value".
-	// In production this would be a proper expression evaluator.
-	var skip bool
-	var reason string
-	switch {
-	case matchExpr(when, `^([^!]+) != (.+)$`, &skip, &reason):
-	case matchExpr(when, `^([^=]+) == (.+)$`, &skip, &reason):
-	default:
-		return false, "", nil
+	ok, err := ctx.EvaluateCondition(when)
+	if err != nil {
+		return false, "", fmt.Errorf("evaluate condition %q: %w", when, err)
 	}
 	// skip=true means condition is FALSE (skip the step).
-	return skip, fmt.Sprintf("condition %q evaluated to false", when), nil
-}
-
-// matchExpr matches a simple expression pattern.
-func matchExpr(when, pattern string, skip *bool, reason *string) bool {
-	// Simplified: returns false (not skipping) for now.
-	// Real implementation would parse the expression.
-	return false
+	return !ok, fmt.Sprintf("condition %q evaluated to false", when), nil
 }
 
 // extractList checks if inputs contain a list reference and returns its items.
 // It handles both direct []any and JSON string representations of lists.
-func (t *Translator) extractList(inputs map[string]any) []any {
-	for _, v := range inputs {
-		if arr, ok := v.([]any); ok {
-			return arr
+func (t *Translator) extractList(inputs map[string]any) ([]any, error) {
+	if arr, ok := inputListValue(inputs["_list"]); ok {
+		return arr, nil
+	}
+	if arr, ok := inputListValue(inputs["_items"]); ok {
+		return arr, nil
+	}
+
+	var foundKey string
+	var found []any
+	for k, v := range inputs {
+		if k == "_list" || k == "_items" {
+			continue
 		}
-		// Handle JSON string that represents a list.
-		if s, ok := v.(string); ok {
-			if len(s) > 0 && s[0] == '[' {
-				var arr []any
-				if err := json.Unmarshal([]byte(s), &arr); err == nil {
-					return arr
-				}
+		arr, ok := inputListValue(v)
+		if !ok {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("ambiguous fan-out inputs %q and %q; use _list or _items to select the source", foundKey, k)
+		}
+		foundKey = k
+		found = arr
+	}
+	return found, nil
+}
+
+func inputListValue(v any) ([]any, bool) {
+	if arr, ok := v.([]any); ok {
+		return arr, true
+	}
+	// Handle JSON string that represents a list.
+	if s, ok := v.(string); ok {
+		if len(s) > 0 && s[0] == '[' {
+			var arr []any
+			if err := json.Unmarshal([]byte(s), &arr); err == nil {
+				return arr, true
 			}
 		}
 	}
-	return nil
+	return nil, false
 }
 
 // fanOut creates one task per item in the list.

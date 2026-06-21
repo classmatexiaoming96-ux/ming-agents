@@ -26,8 +26,7 @@ type Worker struct {
 	callback     TaskCallback
 	pollInterval time.Duration
 	stopCh       chan struct{}
-	stopChMu     sync.Mutex
-	stopped      bool
+	stopOnce     sync.Once
 	wg           sync.WaitGroup
 }
 
@@ -53,14 +52,9 @@ func (w *Worker) Start() {
 
 // Stop gracefully stops the worker.
 func (w *Worker) Stop() {
-	w.stopChMu.Lock()
-	if w.stopped {
-		w.stopChMu.Unlock()
-		return
-	}
-	w.stopped = true
-	w.stopChMu.Unlock()
-	close(w.stopCh)
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+	})
 	w.wg.Wait()
 }
 

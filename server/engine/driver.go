@@ -125,6 +125,7 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 		pending, _ := d.store.PendingCount(run.ID)
 		slots := d.scheduler.PendingSlots(claimed, pending)
 		if slots <= 0 {
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 

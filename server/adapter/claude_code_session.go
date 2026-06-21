@@ -22,6 +22,8 @@ const (
 	defaultClaudeReadyTimeout   = 30 * time.Second
 	claudeReadyDebounce         = 500 * time.Millisecond
 	claudeShutdownTimeout       = 3 * time.Second
+	claudeSendLockTimeout       = 5 * time.Second
+	claudeSendLockPollInterval  = 10 * time.Millisecond
 )
 
 var (
@@ -39,17 +41,16 @@ type ClaudeCodeConfig struct {
 }
 
 type ClaudeCodeSession struct {
-	id      string
-	workDir string
-	cmd     *exec.Cmd
-	pty     *os.File
-	reader  *PTYReader
-	ready   bool
-	closed  bool
-	sendMu  sync.Mutex
-	stateMu sync.Mutex
-	done    chan error
-	doneErr error
+	id       string
+	workDir  string
+	cmd      *exec.Cmd
+	pty      *os.File
+	reader   *PTYReader
+	closed   bool
+	sendMu   sync.Mutex
+	stateMu  sync.Mutex
+	waitDone chan struct{}
+	doneErr  error
 }
 
 type ClaudeCodeSessionManager struct {
@@ -121,12 +122,12 @@ func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir str
 	_ = disablePTYEcho(tty)
 
 	session := &ClaudeCodeSession{
-		id:      uuid.NewString(),
-		workDir: workDir,
-		cmd:     cmd,
-		pty:     tty,
-		reader:  NewPTYReader(tty),
-		done:    make(chan error, 1),
+		id:       uuid.NewString(),
+		workDir:  workDir,
+		cmd:      cmd,
+		pty:      tty,
+		reader:   NewPTYReader(tty),
+		waitDone: make(chan struct{}),
 	}
 	go session.reader.ReadLoop()
 	go func() {
@@ -135,7 +136,7 @@ func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir str
 		session.closed = true
 		session.doneErr = err
 		session.stateMu.Unlock()
-		session.done <- err
+		close(session.waitDone)
 		session.reader.Close()
 	}()
 
@@ -157,13 +158,16 @@ func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir str
 				return nil, claudeAuthError()
 			}
 			return nil, fmt.Errorf("claude-code session was not ready before timeout")
-		case err := <-session.done:
+		case <-session.waitDone:
 			output, _ := session.reader.Snapshot()
 			session.Close()
 			cancel()
 			if claudeAuthPattern.MatchString(output) {
 				return nil, claudeAuthError()
 			}
+			session.stateMu.Lock()
+			err := session.doneErr
+			session.stateMu.Unlock()
 			if err != nil {
 				return nil, fmt.Errorf("claude-code exited during startup: %w", err)
 			}
@@ -188,7 +192,6 @@ func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir str
 					readyAt = time.Now()
 				}
 				if time.Since(readyAt) >= claudeReadyDebounce {
-					session.ready = true
 					cancel()
 					return session, nil
 				}
@@ -198,7 +201,9 @@ func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir str
 }
 
 func (s *ClaudeCodeSession) SendPrompt(ctx context.Context, prompt string) (string, error) {
-	s.sendMu.Lock()
+	if err := s.lockSend(ctx); err != nil {
+		return "", err
+	}
 	defer s.sendMu.Unlock()
 
 	if s.isClosed() {
@@ -220,8 +225,8 @@ func (s *ClaudeCodeSession) SendPrompt(ctx context.Context, prompt string) (stri
 		return "", fmt.Errorf("send completion sentinel to claude-code: %w", err)
 	}
 
-	match := s.reader.WaitFor(ctx, regexp.QuoteMeta(sentinel), since)
-	if match < 0 {
+	response, ok := s.reader.WaitFor(ctx, regexp.QuoteMeta(sentinel), since)
+	if !ok {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("claude-code invocation timed out: %w", ctx.Err())
 		}
@@ -235,10 +240,31 @@ func (s *ClaudeCodeSession) SendPrompt(ctx context.Context, prompt string) (stri
 		return "", fmt.Errorf("claude-code session closed before completion sentinel: %s", strings.TrimSpace(output))
 	}
 
-	after, _ := s.reader.Snapshot()
-	output := strings.TrimSpace(after[since:match])
+	output := strings.TrimSpace(response)
 	output = stripPromptEcho(output, sentinelPrompt)
 	return output, nil
+}
+
+func (s *ClaudeCodeSession) lockSend(ctx context.Context) error {
+	if s.sendMu.TryLock() {
+		return nil
+	}
+	timer := time.NewTimer(claudeSendLockTimeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(claudeSendLockPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("acquire claude-code send lock: %w", ctx.Err())
+		case <-timer.C:
+			return errors.New("acquire claude-code send lock: timed out")
+		case <-ticker.C:
+			if s.sendMu.TryLock() {
+				return nil
+			}
+		}
+	}
 }
 
 func (s *ClaudeCodeSession) Close() {
@@ -259,11 +285,11 @@ func (s *ClaudeCodeSession) Close() {
 		}
 		_ = s.cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-s.done:
+		case <-s.waitDone:
 		case <-time.After(claudeShutdownTimeout):
 			_ = s.cmd.Process.Kill()
 			select {
-			case <-s.done:
+			case <-s.waitDone:
 			case <-time.After(100 * time.Millisecond):
 			}
 		}

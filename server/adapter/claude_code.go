@@ -2,6 +2,9 @@ package adapter
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -17,8 +20,7 @@ type ClaudeCodeAdapter struct {
 func (a ClaudeCodeAdapter) Key() string { return "claude-code" }
 
 var (
-	claudeCodeManagerOnce sync.Once
-	claudeCodeManager     *ClaudeCodeSessionManager
+	claudeCodeManagers sync.Map
 )
 
 func (a ClaudeCodeAdapter) Invoke(req AgentRequest) (*AgentResult, error) {
@@ -71,10 +73,26 @@ func (a ClaudeCodeAdapter) manager(command string) *ClaudeCodeSessionManager {
 		InvokeTimeout: effectiveTimeout(a.Timeout),
 	}
 	if a.Command != "" {
-		return NewClaudeCodeSessionManager(config)
+		manager, _ := claudeCodeManagers.LoadOrStore(claudeCodeManagerKey(config), NewClaudeCodeSessionManager(config))
+		return manager.(*ClaudeCodeSessionManager)
 	}
-	claudeCodeManagerOnce.Do(func() {
-		claudeCodeManager = NewClaudeCodeSessionManager(config)
+	manager, _ := claudeCodeManagers.LoadOrStore(claudeCodeManagerKey(config), NewClaudeCodeSessionManager(config))
+	return manager.(*ClaudeCodeSessionManager)
+}
+
+func claudeCodeManagerKey(config ClaudeCodeConfig) string {
+	normalized := NewClaudeCodeSessionManager(config).config
+	raw, _ := json.Marshal(struct {
+		Command        string `json:"command"`
+		InvokeTimeout  string `json:"invoke_timeout"`
+		StartupTimeout string `json:"startup_timeout"`
+		ReadyTimeout   string `json:"ready_timeout"`
+	}{
+		Command:        normalized.Command,
+		InvokeTimeout:  normalized.InvokeTimeout.String(),
+		StartupTimeout: normalized.StartupTimeout.String(),
+		ReadyTimeout:   normalized.ReadyTimeout.String(),
 	})
-	return claudeCodeManager
+	sum := sha256.Sum256(raw)
+	return normalized.Command + ":" + hex.EncodeToString(sum[:])
 }

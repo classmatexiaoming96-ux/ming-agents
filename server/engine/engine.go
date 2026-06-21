@@ -74,6 +74,7 @@ func (e *Engine) Compile(wdlSrc string) (*CompileResult, error) {
 	}
 
 	// Create steps.
+	steps := make([]*domain.Step, 0, len(wdl.Steps))
 	for _, ws := range wdl.Steps {
 		st := &domain.Step{
 			ID:         uuid.New(),
@@ -103,9 +104,10 @@ func (e *Engine) Compile(wdlSrc string) (*CompileResult, error) {
 		if err := e.store.CreateStep(st); err != nil {
 			return nil, fmt.Errorf("create step: %w", err)
 		}
+		steps = append(steps, st)
 	}
 
-	return &CompileResult{Run: run, DAG: dag}, nil
+	return &CompileResult{Run: run, Steps: steps, DAG: dag}, nil
 }
 
 // Context holds the shared execution context (step outputs for binding).
