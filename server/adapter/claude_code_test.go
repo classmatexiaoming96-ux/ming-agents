@@ -1,93 +1,121 @@
 package adapter
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestClaudeCodeAdapterInvokeRunsACPStdioWithPromptOnStdin(t *testing.T) {
+func TestClaudeCodeSessionAutoRepliesToTrustPrompt(t *testing.T) {
 	workDir := t.TempDir()
-	inputPath := filepath.Join(workDir, "stdin.txt")
+	replyPath := filepath.Join(workDir, "trust-reply.txt")
 	cmd := writeTestCommand(t, `#!/bin/sh
-if [ "$1" != "--acp" ]; then
-  echo "unexpected arg1: $1" >&2
-  exit 21
-fi
-if [ "$2" != "--stdio" ]; then
-  echo "unexpected arg2: $2" >&2
-  exit 22
-fi
-cat > stdin.txt
-printf 'cwd=%s\ninput=%s\n' "$(pwd)" "$(cat stdin.txt)"
+printf 'Claude Code\n'
+printf 'Do you trust this workspace? (y/n) '
+IFS= read -r reply
+printf '%s' "$reply" > trust-reply.txt
+printf '\nHow can I help?\n'
+while IFS= read -r line; do
+  case "$line" in
+    *MING_AGENTS_DONE:*) printf 'accepted\n%s\n' "$line";;
+  esac
+done
 `)
 
-	result, err := (ClaudeCodeAdapter{
-		Command: cmd,
-		WorkDir: workDir,
-		Timeout: time.Second,
-	}).Invoke(AgentRequest{Prompt: "repair via stdin"})
-	if err != nil {
-		t.Fatalf("Invoke() error = %v", err)
-	}
+	session := startTestClaudeSession(t, cmd, workDir)
+	defer session.Close()
 
-	stdinBytes, err := os.ReadFile(inputPath)
+	reply, err := os.ReadFile(replyPath)
 	if err != nil {
-		t.Fatalf("read stdin capture: %v", err)
+		t.Fatalf("read trust reply: %v", err)
 	}
-	if string(stdinBytes) != "repair via stdin" {
-		t.Fatalf("stdin = %q, want prompt", string(stdinBytes))
-	}
-
-	want := "cwd=" + workDir + "\ninput=repair via stdin\n"
-	if result.Output != want {
-		t.Fatalf("Output = %q, want %q", result.Output, want)
-	}
-	if got := decodeExitCode(t, result.RawJSON); got != 0 {
-		t.Fatalf("exit_code = %d, want 0", got)
+	if string(reply) != "y" {
+		t.Fatalf("trust reply = %q, want y", string(reply))
 	}
 }
 
-func TestClaudeCodeAdapterInvokeReturnsExitCodeAndOutputOnFailure(t *testing.T) {
+func TestClaudeCodeSessionBracketedPasteSendsMultilinePrompt(t *testing.T) {
+	workDir := t.TempDir()
+	capturePath := filepath.Join(workDir, "capture.txt")
 	cmd := writeTestCommand(t, `#!/bin/sh
-cat >/dev/null
-echo "claude output"
-echo "claude failure" >&2
-exit 9
+printf 'Claude Code ready\n'
+buf=''
+while IFS= read -r line; do
+  case "$line" in
+    *'[200~'*)
+      line=${line#*'[200~'}
+      ;;
+  esac
+  case "$line" in
+    *'[201~'*)
+      line=${line%%'[201~'*}
+      ;;
+  esac
+  printf '%s\n' "$line" >> capture.txt
+  case "$line" in
+    *MING_AGENTS_DONE:*) printf 'done\n%s\n' "$line";;
+  esac
+done
 `)
 
-	result, err := (ClaudeCodeAdapter{
-		Command: cmd,
-		Timeout: time.Second,
-	}).Invoke(AgentRequest{Prompt: "fail"})
-	if err == nil {
-		t.Fatal("Invoke() error = nil, want non-nil")
+	session := startTestClaudeSession(t, cmd, workDir)
+	defer session.Close()
+
+	if _, err := session.SendPrompt(testCtx(t, time.Second), "line one\nline two"); err != nil {
+		t.Fatalf("SendPrompt() error = %v", err)
 	}
-	if result == nil {
-		t.Fatal("Invoke() result = nil, want structured result")
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
 	}
-	if result.Output != "claude output\n" {
-		t.Fatalf("Output = %q, want stdout", result.Output)
-	}
-	if got := decodeExitCode(t, result.RawJSON); got != 9 {
-		t.Fatalf("exit_code = %d, want 9", got)
-	}
-	if result.Error == "" {
-		t.Fatal("Error is empty, want stderr or process error")
+	if !strings.Contains(string(captured), "line one\nline two\n") {
+		t.Fatalf("captured input = %q, want multiline prompt", string(captured))
 	}
 }
 
-func TestClaudeCodeAdapterInvokeTimesOut(t *testing.T) {
+func TestClaudeCodeSessionSentinelCompletionExtractsOnlyResponse(t *testing.T) {
+	workDir := t.TempDir()
 	cmd := writeTestCommand(t, `#!/bin/sh
-cat >/dev/null
-sleep 1
+printf 'How can I help?\n'
+while IFS= read -r line; do
+  case "$line" in
+    *MING_AGENTS_DONE:*)
+      printf 'first line\n'
+      printf 'second line\n'
+      printf '%s\n' "$line"
+      printf 'noise after sentinel\n'
+      ;;
+  esac
+done
+`)
+
+	session := startTestClaudeSession(t, cmd, workDir)
+	defer session.Close()
+
+	output, err := session.SendPrompt(testCtx(t, time.Second), "answer me")
+	if err != nil {
+		t.Fatalf("SendPrompt() error = %v", err)
+	}
+	if output != "first line\nsecond line" {
+		t.Fatalf("output = %q, want response before sentinel only", output)
+	}
+}
+
+func TestClaudeCodeAdapterInvokeTimeoutReturnsStructuredError(t *testing.T) {
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf 'Claude Code ready\n'
+while IFS= read -r line; do
+  :
+done
 `)
 
 	result, err := (ClaudeCodeAdapter{
 		Command: cmd,
-		Timeout: 10 * time.Millisecond,
-	}).Invoke(AgentRequest{Prompt: "slow"})
+		Timeout: 20 * time.Millisecond,
+	}).Invoke(AgentRequest{Prompt: "never completes"})
 	if err == nil {
 		t.Fatal("Invoke() error = nil, want timeout error")
 	}
@@ -95,9 +123,85 @@ sleep 1
 		t.Fatal("Invoke() result = nil, want structured timeout result")
 	}
 	if got := decodeExitCode(t, result.RawJSON); got != -1 {
-		t.Fatalf("exit_code = %d, want -1 for timeout", got)
+		t.Fatalf("exit_code = %d, want -1", got)
 	}
-	if result.Error == "" {
-		t.Fatal("Error is empty, want timeout description")
+	if !strings.Contains(strings.ToLower(result.Error), "timed out") {
+		t.Fatalf("Error = %q, want timeout message", result.Error)
 	}
+}
+
+func TestClaudeCodeAdapterAuthRequiredReturnsActionableError(t *testing.T) {
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf 'Authentication required. Please log in.\n'
+sleep 1
+`)
+
+	result, err := (ClaudeCodeAdapter{
+		Command: cmd,
+		Timeout: time.Second,
+	}).Invoke(AgentRequest{Prompt: "hello"})
+	if err == nil {
+		t.Fatal("Invoke() error = nil, want auth error")
+	}
+	if result == nil {
+		t.Fatal("Invoke() result = nil, want structured auth result")
+	}
+	if !strings.Contains(result.Error, "claude --setup-token") {
+		t.Fatalf("Error = %q, want setup-token guidance", result.Error)
+	}
+}
+
+func TestClaudeCodeAdapterNeverCallsForbiddenModes(t *testing.T) {
+	workDir := t.TempDir()
+	argsPath := filepath.Join(workDir, "args.txt")
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf '%s\n' "$@" > args.txt
+printf 'Claude Code ready\n'
+while IFS= read -r line; do
+  case "$line" in
+    *MING_AGENTS_DONE:*) printf 'ok\n%s\n' "$line";;
+  esac
+done
+`)
+
+	result, err := (ClaudeCodeAdapter{
+		Command: cmd,
+		WorkDir: workDir,
+		Timeout: time.Second,
+	}).Invoke(AgentRequest{Prompt: "inspect args"})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v; result=%+v", err, result)
+	}
+
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	for _, forbidden := range []string{"-" + "p", "--" + "print", "--" + "acp", "--" + "stdio"} {
+		if strings.Contains(string(args), forbidden) {
+			t.Fatalf("args contain forbidden mode %q: %q", forbidden, string(args))
+		}
+	}
+}
+
+func startTestClaudeSession(t *testing.T, command, workDir string) *ClaudeCodeSession {
+	t.Helper()
+	manager := NewClaudeCodeSessionManager(ClaudeCodeConfig{
+		Command:        command,
+		InvokeTimeout:  time.Second,
+		StartupTimeout: time.Second,
+		ReadyTimeout:   time.Second,
+	})
+	session, err := manager.StartSession(testCtx(t, time.Second), workDir)
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	return session
+}
+
+func testCtx(t *testing.T, timeout time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+	return ctx
 }
