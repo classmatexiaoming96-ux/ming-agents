@@ -18,11 +18,18 @@ type TaskCallback interface {
 	OnTaskCompleted(taskID uuid.UUID) error
 }
 
+// AdapterExecutor is the worker-facing adapter boundary.
+type AdapterExecutor interface {
+	Key() string
+	Invoke(req adapter.AgentRequest, execCtx ...adapter.ExecutionContext) (*adapter.AgentResult, error)
+}
+
 // Worker consumes tasks from agent_task_queue, invokes adapters, and writes results.
 // Epic 4.1: 队列消费 worker — 消费 agent_task_queue → 调 Adapter → 回写.
 type Worker struct {
 	store        *store.Store
 	registry     *adapter.Registry
+	executor     AdapterExecutor
 	callback     TaskCallback
 	pollInterval time.Duration
 	stopCh       chan struct{}
@@ -38,6 +45,20 @@ func NewWorker(s *store.Store, r *adapter.Registry, callback TaskCallback, pollI
 	return &Worker{
 		store:        s,
 		registry:     r,
+		callback:     callback,
+		pollInterval: pollInterval,
+		stopCh:       make(chan struct{}),
+	}
+}
+
+// NewAdapterWorker creates a queue consumer bound to a single adapter executor.
+func NewAdapterWorker(s *store.Store, executor AdapterExecutor, callback TaskCallback, pollInterval time.Duration) *Worker {
+	if pollInterval == 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+	return &Worker{
+		store:        s,
+		executor:     executor,
 		callback:     callback,
 		pollInterval: pollInterval,
 		stopCh:       make(chan struct{}),
@@ -71,7 +92,7 @@ func (w *Worker) run() {
 }
 
 func (w *Worker) processOne() {
-	task, err := w.store.ClaimTask()
+	task, err := w.claimTask()
 	if err != nil {
 		// sql.ErrNoRows means no pending tasks — not an error.
 		return
@@ -80,7 +101,7 @@ func (w *Worker) processOne() {
 	log.Printf("[worker] processing task %s (step %s)", task.ID, task.StepID)
 
 	// Get adapter.
-	a, err := w.registry.Get(task.AdapterKey)
+	a, err := w.executorForTask(task)
 	if err != nil {
 		w.failTask(task, fmt.Sprintf("adapter not found: %s", task.AdapterKey))
 		return
@@ -102,6 +123,20 @@ func (w *Worker) processOne() {
 
 	// Record result.
 	w.completeTask(task, result)
+}
+
+func (w *Worker) claimTask() (*domain.Task, error) {
+	if w.executor != nil {
+		return w.store.ClaimTaskForAdapter(w.executor.Key())
+	}
+	return w.store.ClaimTask()
+}
+
+func (w *Worker) executorForTask(task *domain.Task) (AdapterExecutor, error) {
+	if w.executor != nil {
+		return w.executor, nil
+	}
+	return w.registry.Get(task.AdapterKey)
 }
 
 func (w *Worker) completeTask(task *domain.Task, result *adapter.AgentResult) {
@@ -158,11 +193,26 @@ func NewPool(n int, s *store.Store, r *adapter.Registry, pollInterval time.Durat
 	return pool
 }
 
+// NewAdapterPool creates one worker per adapter executor.
+func NewAdapterPool(executors []AdapterExecutor, s *store.Store, callback TaskCallback, pollInterval time.Duration) *Pool {
+	pool := &Pool{workers: make([]*Worker, len(executors))}
+	for i, executor := range executors {
+		pool.workers[i] = NewAdapterWorker(s, executor, callback, pollInterval)
+	}
+	return pool
+}
+
 // Start starts all workers in the pool.
 func (p *Pool) Start() {
+	var wg sync.WaitGroup
+	wg.Add(len(p.workers))
 	for _, w := range p.workers {
-		w.Start()
+		go func(w *Worker) {
+			defer wg.Done()
+			w.Start()
+		}(w)
 	}
+	wg.Wait()
 }
 
 // Stop stops all workers in the pool.

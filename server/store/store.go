@@ -101,6 +101,12 @@ func (s *Store) ClaimTask() (*domain.Task, error) {
 	return taskRepo{s}.Claim()
 }
 
+// ClaimTaskForAdapter atomically claims a pending task for a specific adapter.
+// Returns the claimed task or sql.ErrNoRows if none available.
+func (s *Store) ClaimTaskForAdapter(adapterKey string) (*domain.Task, error) {
+	return taskRepo{s}.ClaimForAdapter(adapterKey)
+}
+
 // GetTasksByRun returns all tasks for a run.
 func (s *Store) GetTasksByRun(runID uuid.UUID) ([]*domain.Task, error) {
 	return taskRepo{s}.ByRun(runID)
