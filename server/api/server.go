@@ -22,13 +22,19 @@ import (
 type Server struct {
 	store      *store.Store
 	engine     *engine.Engine
-	driver     *engine.RunDriver
+	driver     RunDriver
 	pm         *engine.PersistenceManager
 	adapterReg *adapter.Registry
 	evalReg    *eval.Registry
 	mux        *http.ServeMux
 	graph      *codegraph.RepoGraph
 	pgxPool    *pgxpool.Pool
+}
+
+// RunDriver is the run lifecycle dependency used by HTTP handlers.
+type RunDriver interface {
+	Launch(runID uuid.UUID) error
+	ResumeRun(runID uuid.UUID) (*engine.RecoveryResult, error)
 }
 
 // Option configures optional API modules.
@@ -42,13 +48,18 @@ func WithCodeGraph(graph *codegraph.RepoGraph, pool *pgxpool.Pool) Option {
 	}
 }
 
+// WithRunDriver injects the run lifecycle driver used by start/resume routes.
+func WithRunDriver(driver RunDriver) Option {
+	return func(s *Server) {
+		s.driver = driver
+	}
+}
+
 // NewServer creates a new API server.
 func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eval.Registry, opts ...Option) *Server {
-	driver := engine.NewRunDriver(s, ar, eng)
 	srv := &Server{
 		store:      s,
 		engine:     eng,
-		driver:     driver,
 		pm:         engine.NewPersistenceManager(s),
 		adapterReg: ar,
 		evalReg:    er,
@@ -56,6 +67,9 @@ func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eva
 	}
 	for _, opt := range opts {
 		opt(srv)
+	}
+	if srv.driver == nil {
+		srv.driver = engine.NewRunDriver(s, ar, eng)
 	}
 	srv.routes()
 	return srv
