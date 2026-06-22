@@ -194,8 +194,12 @@ func TestRunDriverOnTaskCompletedIsIdempotent(t *testing.T) {
 	dag := workflow.NewDAG()
 	dag.AddNode(&workflow.Node{ID: "fanout", Name: "fanout"})
 	driver := NewRunDriver(s, nil, NewEngine(s, nil))
-	driver.scheduler = NewScheduler(s, dag, run.MaxParallel)
-	driver.scheduler.InitReadySet()
+	runner, err := driver.createRunner(run.ID)
+	if err != nil {
+		t.Fatalf("createRunner() error = %v", err)
+	}
+	runner.scheduler = NewScheduler(s, dag, run.MaxParallel)
+	runner.scheduler.InitReadySet()
 
 	if err := driver.OnTaskCompleted(tasks[0].ID); err != nil {
 		t.Fatalf("first OnTaskCompleted() error = %v", err)
@@ -210,6 +214,68 @@ func TestRunDriverOnTaskCompletedIsIdempotent(t *testing.T) {
 	}
 	if snapshots != 1 {
 		t.Fatalf("snapshot count = %d, want 1 after duplicate completion callbacks", snapshots)
+	}
+}
+
+func TestRunDriverRoutesTaskCallbacksToPerRunRunners(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	createDriverCallbackSchema(t, db)
+
+	s := store.NewStore(db)
+	driver := NewRunDriver(s, nil, NewEngine(s, nil))
+	for _, name := range []string{"run-a", "run-b"} {
+		run := &domain.Run{
+			Name:        name,
+			WDLVersion:  "1.0",
+			Status:      domain.RunStatusPending,
+			MaxParallel: 1,
+		}
+		if err := s.CreateRun(run); err != nil {
+			t.Fatalf("CreateRun(%s) error = %v", name, err)
+		}
+		step := &domain.Step{
+			RunID:    run.ID,
+			Name:     "step-" + name,
+			StepType: domain.StepTypeTask,
+			Status:   domain.StepStatusRunning,
+			Attempt:  1,
+		}
+		if err := s.CreateStep(step); err != nil {
+			t.Fatalf("CreateStep(%s) error = %v", name, err)
+		}
+		task := &domain.Task{
+			RunID:        run.ID,
+			StepID:       step.ID,
+			Status:       domain.TaskStatusPending,
+			AdapterKey:   "fake",
+			AgentRequest: mustJSON(t, adapter.AgentRequest{Prompt: name}),
+		}
+		if err := s.CreateTask(task); err != nil {
+			t.Fatalf("CreateTask(%s) error = %v", name, err)
+		}
+		if err := s.SetTaskResult(task.ID, mustJSON(t, adapter.AgentResult{Output: name}), "done"); err != nil {
+			t.Fatalf("SetTaskResult(%s) error = %v", name, err)
+		}
+
+		dag := workflow.NewDAG()
+		dag.AddNode(&workflow.Node{ID: step.Name, Name: step.Name})
+		runner, err := driver.createRunner(run.ID)
+		if err != nil {
+			t.Fatalf("createRunner(%s) error = %v", name, err)
+		}
+		runner.scheduler = NewScheduler(s, dag, run.MaxParallel)
+		runner.scheduler.InitReadySet()
+
+		if err := driver.OnTaskCompleted(task.ID); err != nil {
+			t.Fatalf("OnTaskCompleted(%s) error = %v", name, err)
+		}
+		if !runner.completed[step.Name] {
+			t.Fatalf("runner for %s did not complete its own step", name)
+		}
 	}
 }
 

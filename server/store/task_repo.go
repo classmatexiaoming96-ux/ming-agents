@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -81,11 +82,36 @@ func (r taskRepo) Claim() (*domain.Task, error) {
 	q := `UPDATE agent_task_queue SET status='claimed',claimed_at=$1,version=version+1
 	      WHERE id=(SELECT id FROM agent_task_queue WHERE status='pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
 	      RETURNING id,run_id,step_id,iteration,attempt,status,adapter_key,agent_request,agent_result,result_summary,claimed_at,completed_at,created_at,version`
+	fallback := `UPDATE agent_task_queue SET status='claimed',claimed_at=$1,version=version+1
+	      WHERE id=(SELECT id FROM agent_task_queue WHERE status='pending' ORDER BY created_at ASC LIMIT 1)
+	      RETURNING id,run_id,step_id,iteration,attempt,status,adapter_key,agent_request,agent_result,result_summary,claimed_at,completed_at,created_at,version`
+	return r.claimWithQuery(q, fallback, now)
+}
+
+// ClaimForAdapter atomically claims one pending task for a specific adapter.
+func (r taskRepo) ClaimForAdapter(adapterKey string) (*domain.Task, error) {
+	now := time.Now().UTC()
+	q := `UPDATE agent_task_queue SET status='claimed',claimed_at=$1,version=version+1
+	      WHERE id=(SELECT id FROM agent_task_queue WHERE status='pending' AND adapter_key=$2 ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+	      RETURNING id,run_id,step_id,iteration,attempt,status,adapter_key,agent_request,agent_result,result_summary,claimed_at,completed_at,created_at,version`
+	fallback := `UPDATE agent_task_queue SET status='claimed',claimed_at=$1,version=version+1
+	      WHERE id=(SELECT id FROM agent_task_queue WHERE status='pending' AND adapter_key=$2 ORDER BY created_at ASC LIMIT 1)
+	      RETURNING id,run_id,step_id,iteration,attempt,status,adapter_key,agent_request,agent_result,result_summary,claimed_at,completed_at,created_at,version`
+	return r.claimWithQuery(q, fallback, now, adapterKey)
+}
+
+func (r taskRepo) claimWithQuery(q, fallback string, args ...any) (*domain.Task, error) {
 	var t domain.Task
-	err := r.s.db.QueryRow(q, now).Scan(
+	err := r.s.db.QueryRow(q, args...).Scan(
 		&t.ID, &t.RunID, &t.StepID, &t.Iteration, &t.Attempt, &t.Status,
 		&t.AdapterKey, &t.AgentRequest, &t.AgentResult, &t.ResultSummary,
 		&t.ClaimedAt, &t.CompletedAt, &t.CreatedAt, &t.Version)
+	if err != nil && strings.Contains(err.Error(), `near "FOR"`) {
+		err = r.s.db.QueryRow(fallback, args...).Scan(
+			&t.ID, &t.RunID, &t.StepID, &t.Iteration, &t.Attempt, &t.Status,
+			&t.AdapterKey, &t.AgentRequest, &t.AgentResult, &t.ResultSummary,
+			&t.ClaimedAt, &t.CompletedAt, &t.CreatedAt, &t.Version)
+	}
 	if err == sql.ErrNoRows {
 		return nil, sql.ErrNoRows
 	}

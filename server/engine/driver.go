@@ -21,6 +21,26 @@ import (
 // Epic 2.13: DegradationReporter captures parameter fallbacks for alerting.
 // Epic 2.14: CriticallyReporter validates run completeness.
 type RunDriver struct {
+	store            *store.Store
+	registry         *adapter.Registry
+	engine           *Engine
+	recordStore      RunRecordStore
+	degradationStore DegradationStore // Epic 2.13
+	mu               sync.RWMutex
+	runners          map[uuid.UUID]*runExecution
+}
+
+// Runner drives a single run instance.
+type Runner interface {
+	Launch(runID uuid.UUID) error
+	ResumeRun(runID uuid.UUID) (*RecoveryResult, error)
+	OnTaskCompleted(taskID uuid.UUID) error
+	EnqueueTasks(tasks []*domain.Task) error
+}
+
+type runExecution struct {
+	driver             *RunDriver
+	runID              uuid.UUID
 	store              *store.Store
 	registry           *adapter.Registry
 	translator         *Translator
@@ -39,31 +59,125 @@ type RunDriver struct {
 // NewRunDriver creates a new run driver.
 func NewRunDriver(s *store.Store, r *adapter.Registry, e *Engine) *RunDriver {
 	return &RunDriver{
-		store:              s,
-		registry:           r,
-		translator:         NewTranslator(s, r),
-		ctx:                NewContext(),
-		pm:                 NewPersistenceManager(s),
-		engine:             e,
-		completed:          make(map[string]bool),
-		criticallyReporter: NewCriticallyReporter(),
+		store:    s,
+		registry: r,
+		engine:   e,
+		runners:  make(map[uuid.UUID]*runExecution),
 	}
 }
 
 // SetRecordStore sets the record store for capturing run decisions.
 func (d *RunDriver) SetRecordStore(rs RunRecordStore) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.recordStore = rs
 }
 
 // SetDegradationStore sets the degradation store for capturing parameter fallbacks.
 // Epic 2.13
 func (d *RunDriver) SetDegradationStore(ds DegradationStore) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.degradationStore = ds
+}
+
+func (d *RunDriver) newRunner(runID uuid.UUID) *runExecution {
+	return &runExecution{
+		driver:             d,
+		runID:              runID,
+		store:              d.store,
+		registry:           d.registry,
+		translator:         NewTranslator(d.store, d.registry),
+		ctx:                NewContext(),
+		pm:                 NewPersistenceManager(d.store),
+		engine:             d.engine,
+		completed:          make(map[string]bool),
+		recordStore:        d.recordStore,
+		degradationStore:   d.degradationStore,
+		criticallyReporter: NewCriticallyReporter(),
+	}
+}
+
+func (d *RunDriver) createRunner(runID uuid.UUID) (*runExecution, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.runners[runID]; ok {
+		return nil, fmt.Errorf("runner already exists for run %s", runID)
+	}
+	runner := d.newRunner(runID)
+	d.runners[runID] = runner
+	return runner, nil
+}
+
+func (d *RunDriver) removeRunner(runID uuid.UUID, runner *runExecution) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.runners[runID] == runner {
+		delete(d.runners, runID)
+	}
 }
 
 // Launch kicks off execution of a run asynchronously.
 // Tasks are dispatched to agent_task_queue.
 func (d *RunDriver) Launch(runID uuid.UUID) error {
+	runner, err := d.createRunner(runID)
+	if err != nil {
+		return err
+	}
+	if err := runner.Launch(runID); err != nil {
+		d.removeRunner(runID, runner)
+		return err
+	}
+	return nil
+}
+
+// OnTaskCompleted routes task completion callbacks to the runner that owns the task's run.
+func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	task, err := d.store.GetTask(taskID)
+	if err != nil {
+		return fmt.Errorf("get task: %w", err)
+	}
+	runner := d.runners[task.RunID]
+	if runner == nil {
+		return fmt.Errorf("runner not found for run %s", task.RunID)
+	}
+	return runner.OnTaskCompleted(taskID)
+}
+
+// ResumeRun recovers and resumes a crashed run.
+func (d *RunDriver) ResumeRun(runID uuid.UUID) (*RecoveryResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, ok := d.runners[runID]; ok {
+		return nil, fmt.Errorf("runner already exists for run %s", runID)
+	}
+	runner := d.newRunner(runID)
+	d.runners[runID] = runner
+	result, err := runner.ResumeRun(runID)
+	if err != nil {
+		if d.runners[runID] == runner {
+			delete(d.runners, runID)
+		}
+	}
+	return result, err
+}
+
+// EnqueueTasks enqueues tasks to the store.
+func (d *RunDriver) EnqueueTasks(tasks []*domain.Task) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.store.CreateTasks(tasks); err != nil {
+		return fmt.Errorf("enqueue task: %w", err)
+	}
+	return nil
+}
+
+func (d *runExecution) Launch(runID uuid.UUID) error {
 	run, err := d.store.GetRun(runID)
 	if err != nil {
 		return fmt.Errorf("get run: %w", err)
@@ -109,7 +223,7 @@ func (d *RunDriver) Launch(runID uuid.UUID) error {
 	return nil
 }
 
-func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
+func (d *runExecution) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 	stepMap := make(map[string]*domain.Step)
 	for _, s := range allSteps {
 		stepMap[s.Name] = s
@@ -118,6 +232,7 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 	for {
 		if d.isRunComplete(run.ID) {
 			d.finalizeRun(run, allSteps)
+			d.removeFromDriver()
 			return
 		}
 
@@ -197,8 +312,14 @@ func (d *RunDriver) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 	}
 }
 
+func (d *runExecution) removeFromDriver() {
+	if d.driver != nil {
+		d.driver.removeRunner(d.runID, d)
+	}
+}
+
 // OnTaskCompleted is called when a task completes (by the worker callback).
-func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
+func (d *runExecution) OnTaskCompleted(taskID uuid.UUID) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -260,17 +381,17 @@ func (d *RunDriver) OnTaskCompleted(taskID uuid.UUID) error {
 	return nil
 }
 
-func (d *RunDriver) markCompletedLocked(stepName string) {
+func (d *runExecution) markCompletedLocked(stepName string) {
 	d.completed[stepName] = true
 }
 
-func (d *RunDriver) completeStep(stepName string, outputs map[string]any) {
+func (d *runExecution) completeStep(stepName string, outputs map[string]any) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.completeStepLocked(stepName, outputs)
 }
 
-func (d *RunDriver) completeStepLocked(stepName string, outputs map[string]any) {
+func (d *runExecution) completeStepLocked(stepName string, outputs map[string]any) {
 	d.markCompletedLocked(stepName)
 	d.scheduler.StepCompleted(stepName)
 	if outputs != nil {
@@ -278,7 +399,7 @@ func (d *RunDriver) completeStepLocked(stepName string, outputs map[string]any) 
 	}
 }
 
-func (d *RunDriver) completedSnapshotLocked() map[string]bool {
+func (d *runExecution) completedSnapshotLocked() map[string]bool {
 	out := make(map[string]bool, len(d.completed))
 	for k, v := range d.completed {
 		out[k] = v
@@ -335,7 +456,7 @@ func taskOutputMap(step *domain.Step, task *domain.Task) map[string]any {
 	return (&ContextPropagator{}).extractOutputs(step, &result, task.ResultSummary.String)
 }
 
-func (d *RunDriver) isRunComplete(runID uuid.UUID) bool {
+func (d *runExecution) isRunComplete(runID uuid.UUID) bool {
 	steps, err := d.store.GetStepsByRun(runID)
 	if err != nil {
 		return false
@@ -348,7 +469,7 @@ func (d *RunDriver) isRunComplete(runID uuid.UUID) bool {
 	return true
 }
 
-func (d *RunDriver) finalizeRun(run *domain.Run, steps []*domain.Step) {
+func (d *runExecution) finalizeRun(run *domain.Run, steps []*domain.Step) {
 	anyFailed := false
 	for _, s := range steps {
 		if s.Status == domain.StepStatusFailed {
@@ -391,7 +512,7 @@ func (d *RunDriver) finalizeRun(run *domain.Run, steps []*domain.Step) {
 }
 
 // ResumeRun recovers and resumes a crashed run.
-func (d *RunDriver) ResumeRun(runID uuid.UUID) (*RecoveryResult, error) {
+func (d *runExecution) ResumeRun(runID uuid.UUID) (*RecoveryResult, error) {
 	result, err := d.pm.RecoverRun(runID)
 	if err != nil {
 		return nil, fmt.Errorf("recover run: %w", err)
@@ -442,7 +563,7 @@ func (d *RunDriver) ResumeRun(runID uuid.UUID) (*RecoveryResult, error) {
 }
 
 // EnqueueTasks enqueues tasks to the store.
-func (d *RunDriver) EnqueueTasks(tasks []*domain.Task) error {
+func (d *runExecution) EnqueueTasks(tasks []*domain.Task) error {
 	if err := d.store.CreateTasks(tasks); err != nil {
 		return fmt.Errorf("enqueue task: %w", err)
 	}
