@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -36,6 +38,7 @@ type Server struct {
 type RunDriver interface {
 	Launch(runID uuid.UUID) error
 	ResumeRun(runID uuid.UUID) (*engine.RecoveryResult, error)
+	Pause(ctx context.Context, runID uuid.UUID) error
 }
 
 // Option configures optional API modules.
@@ -77,6 +80,7 @@ func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eva
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("POST /runs", s.handleCreateRun)
 	s.mux.HandleFunc("GET /runs", s.handleListRuns)
 	s.mux.HandleFunc("GET /runs/{id}", s.handleGetRun)
@@ -133,6 +137,10 @@ type taskResp struct {
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
 
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	var req createRunReq
@@ -408,5 +416,27 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 
 // Listen starts the HTTP server.
 func (s *Server) Listen(addr string) error {
-	return http.ListenAndServe(addr, s.mux)
+	return s.ListenContext(context.Background(), addr)
+}
+
+// ListenContext starts the HTTP server and gracefully shuts down when ctx is done.
+func (s *Server) ListenContext(ctx context.Context, addr string) error {
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Addr: addr, Handler: s.mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

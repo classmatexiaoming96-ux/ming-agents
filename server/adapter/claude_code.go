@@ -12,16 +12,23 @@ import (
 
 // ClaudeCodeAdapter invokes Claude Code in interactive PTY mode.
 type ClaudeCodeAdapter struct {
-	Command string
-	WorkDir string
-	Timeout time.Duration
+	Command      string
+	WorkDir      string
+	Timeout      time.Duration
+	SessionStore *ClaudeCodeSessionStore
 }
 
 func (a ClaudeCodeAdapter) Key() string { return "claude-code" }
 
-var (
-	claudeCodeManagers sync.Map
-)
+type ClaudeCodeSessionStore struct {
+	managers sync.Map
+}
+
+func NewClaudeCodeSessionStore() *ClaudeCodeSessionStore {
+	return &ClaudeCodeSessionStore{}
+}
+
+var defaultClaudeCodeSessionStore = NewClaudeCodeSessionStore()
 
 func (a ClaudeCodeAdapter) Invoke(req AgentRequest, execCtx ...ExecutionContext) (*AgentResult, error) {
 	effective := mergeExecutionContext(a.WorkDir, a.Command, a.Timeout, execCtx, req)
@@ -73,11 +80,11 @@ func (a ClaudeCodeAdapter) manager(command string) *ClaudeCodeSessionManager {
 		Command:       command,
 		InvokeTimeout: effectiveTimeout(a.Timeout),
 	}
-	if a.Command != "" {
-		manager, _ := claudeCodeManagers.LoadOrStore(claudeCodeManagerKey(config), NewClaudeCodeSessionManager(config))
-		return manager.(*ClaudeCodeSessionManager)
+	store := a.SessionStore
+	if store == nil {
+		store = defaultClaudeCodeSessionStore
 	}
-	manager, _ := claudeCodeManagers.LoadOrStore(claudeCodeManagerKey(config), NewClaudeCodeSessionManager(config))
+	manager, _ := store.managers.LoadOrStore(claudeCodeManagerKey(config), NewClaudeCodeSessionManager(config))
 	return manager.(*ClaudeCodeSessionManager)
 }
 

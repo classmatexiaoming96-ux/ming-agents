@@ -62,22 +62,10 @@ type runExecution struct {
 // NewRunDriver creates a new run driver.
 func NewRunDriver(s *store.Store, r *adapter.Registry, e *Engine) *RunDriver {
 	return &RunDriver{
-<<<<<<< HEAD
 		store:    s,
 		registry: r,
 		engine:   e,
 		runners:  make(map[uuid.UUID]*runExecution),
-=======
-		store:              s,
-		registry:           r,
-		translator:         NewTranslator(s, r),
-		ctx:                NewContext(),
-		pm:                 NewPersistenceManager(s),
-		engine:             e,
-		completed:          make(map[string]bool),
-		runs:               make(map[uuid.UUID]domain.RunStatus),
-		criticallyReporter: NewCriticallyReporter(),
->>>>>>> 7a81241 (fix: add pause timeout and fix shared map data races)
 	}
 }
 
@@ -107,6 +95,7 @@ func (d *RunDriver) newRunner(runID uuid.UUID) *runExecution {
 		pm:                 NewPersistenceManager(d.store),
 		engine:             d.engine,
 		completed:          make(map[string]bool),
+		runs:               make(map[uuid.UUID]domain.RunStatus),
 		recordStore:        d.recordStore,
 		degradationStore:   d.degradationStore,
 		criticallyReporter: NewCriticallyReporter(),
@@ -129,6 +118,15 @@ func (d *RunDriver) removeRunner(runID uuid.UUID, runner *runExecution) {
 	defer d.mu.Unlock()
 	if d.runners[runID] == runner {
 		delete(d.runners, runID)
+	}
+}
+
+func (d *RunDriver) setRunnerState(runID uuid.UUID, status domain.RunStatus) {
+	d.mu.RLock()
+	runner := d.runners[runID]
+	d.mu.RUnlock()
+	if runner != nil {
+		runner.setRunState(runID, status)
 	}
 }
 
@@ -251,11 +249,8 @@ func (d *runExecution) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 		}
 		if d.isRunComplete(run.ID) {
 			d.finalizeRun(run, allSteps)
-<<<<<<< HEAD
-			d.removeFromDriver()
-=======
 			d.deleteRunState(run.ID)
->>>>>>> 7a81241 (fix: add pause timeout and fix shared map data races)
+			d.removeFromDriver()
 			return
 		}
 
@@ -492,9 +487,6 @@ func (d *runExecution) isRunComplete(runID uuid.UUID) bool {
 	return true
 }
 
-<<<<<<< HEAD
-func (d *runExecution) finalizeRun(run *domain.Run, steps []*domain.Step) {
-=======
 // Pause marks a running run as paused and waits for claimed tasks to drain.
 // The caller controls the circuit breaker by passing a context with deadline.
 func (d *RunDriver) Pause(ctx context.Context, runID uuid.UUID) error {
@@ -506,7 +498,7 @@ func (d *RunDriver) Pause(ctx context.Context, runID uuid.UUID) error {
 		return fmt.Errorf("get run: %w", err)
 	}
 	if run.Status == domain.RunStatusPaused {
-		d.setRunState(runID, domain.RunStatusPaused)
+		d.setRunnerState(runID, domain.RunStatusPaused)
 		return nil
 	}
 	if run.Status != domain.RunStatusRunning {
@@ -517,7 +509,7 @@ func (d *RunDriver) Pause(ctx context.Context, runID uuid.UUID) error {
 	if err := d.store.UpdateRun(run); err != nil {
 		return fmt.Errorf("pause run: %w", err)
 	}
-	d.setRunState(runID, domain.RunStatusPaused)
+	d.setRunnerState(runID, domain.RunStatusPaused)
 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -544,26 +536,25 @@ func (d *RunDriver) PauseWithTimeout(runID uuid.UUID, timeout time.Duration) err
 	return d.Pause(ctx, runID)
 }
 
-func (d *RunDriver) runState(runID uuid.UUID) domain.RunStatus {
+func (d *runExecution) runState(runID uuid.UUID) domain.RunStatus {
 	d.runsMu.RLock()
 	defer d.runsMu.RUnlock()
 	return d.runs[runID]
 }
 
-func (d *RunDriver) setRunState(runID uuid.UUID, status domain.RunStatus) {
+func (d *runExecution) setRunState(runID uuid.UUID, status domain.RunStatus) {
 	d.runsMu.Lock()
 	defer d.runsMu.Unlock()
 	d.runs[runID] = status
 }
 
-func (d *RunDriver) deleteRunState(runID uuid.UUID) {
+func (d *runExecution) deleteRunState(runID uuid.UUID) {
 	d.runsMu.Lock()
 	defer d.runsMu.Unlock()
 	delete(d.runs, runID)
 }
 
-func (d *RunDriver) finalizeRun(run *domain.Run, steps []*domain.Step) {
->>>>>>> 7a81241 (fix: add pause timeout and fix shared map data races)
+func (d *runExecution) finalizeRun(run *domain.Run, steps []*domain.Step) {
 	anyFailed := false
 	for _, s := range steps {
 		if s.Status == domain.StepStatusFailed {
