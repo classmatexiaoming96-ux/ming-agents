@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -50,6 +51,8 @@ type runExecution struct {
 	engine             *Engine
 	completed          map[string]bool // stepName → completed
 	mu                 sync.Mutex
+	runs               map[uuid.UUID]domain.RunStatus
+	runsMu             sync.RWMutex
 	recordStore        RunRecordStore
 	degradationStore   DegradationStore // Epic 2.13
 	recorder           *RunRecorder
@@ -59,10 +62,22 @@ type runExecution struct {
 // NewRunDriver creates a new run driver.
 func NewRunDriver(s *store.Store, r *adapter.Registry, e *Engine) *RunDriver {
 	return &RunDriver{
+<<<<<<< HEAD
 		store:    s,
 		registry: r,
 		engine:   e,
 		runners:  make(map[uuid.UUID]*runExecution),
+=======
+		store:              s,
+		registry:           r,
+		translator:         NewTranslator(s, r),
+		ctx:                NewContext(),
+		pm:                 NewPersistenceManager(s),
+		engine:             e,
+		completed:          make(map[string]bool),
+		runs:               make(map[uuid.UUID]domain.RunStatus),
+		criticallyReporter: NewCriticallyReporter(),
+>>>>>>> 7a81241 (fix: add pause timeout and fix shared map data races)
 	}
 }
 
@@ -190,6 +205,7 @@ func (d *runExecution) Launch(runID uuid.UUID) error {
 	if err := d.store.UpdateRun(run); err != nil {
 		return fmt.Errorf("start run: %w", err)
 	}
+	d.setRunState(runID, domain.RunStatusRunning)
 
 	steps, err := d.store.GetStepsByRun(runID)
 	if err != nil {
@@ -230,9 +246,16 @@ func (d *runExecution) dispatchLoop(run *domain.Run, allSteps []*domain.Step) {
 	}
 
 	for {
+		if d.runState(run.ID) == domain.RunStatusPaused {
+			return
+		}
 		if d.isRunComplete(run.ID) {
 			d.finalizeRun(run, allSteps)
+<<<<<<< HEAD
 			d.removeFromDriver()
+=======
+			d.deleteRunState(run.ID)
+>>>>>>> 7a81241 (fix: add pause timeout and fix shared map data races)
 			return
 		}
 
@@ -469,7 +492,78 @@ func (d *runExecution) isRunComplete(runID uuid.UUID) bool {
 	return true
 }
 
+<<<<<<< HEAD
 func (d *runExecution) finalizeRun(run *domain.Run, steps []*domain.Step) {
+=======
+// Pause marks a running run as paused and waits for claimed tasks to drain.
+// The caller controls the circuit breaker by passing a context with deadline.
+func (d *RunDriver) Pause(ctx context.Context, runID uuid.UUID) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	run, err := d.store.GetRun(runID)
+	if err != nil {
+		return fmt.Errorf("get run: %w", err)
+	}
+	if run.Status == domain.RunStatusPaused {
+		d.setRunState(runID, domain.RunStatusPaused)
+		return nil
+	}
+	if run.Status != domain.RunStatusRunning {
+		return fmt.Errorf("run %s cannot pause (status=%s)", run.ID, run.Status)
+	}
+
+	run.Status = domain.RunStatusPaused
+	if err := d.store.UpdateRun(run); err != nil {
+		return fmt.Errorf("pause run: %w", err)
+	}
+	d.setRunState(runID, domain.RunStatusPaused)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		claimed, err := d.store.ClaimedCount(runID)
+		if err != nil {
+			return fmt.Errorf("count claimed tasks: %w", err)
+		}
+		if claimed == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("pause run %s: workers did not stop before timeout: %w", runID, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// PauseWithTimeout pauses a run using a bounded timeout.
+func (d *RunDriver) PauseWithTimeout(runID uuid.UUID, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return d.Pause(ctx, runID)
+}
+
+func (d *RunDriver) runState(runID uuid.UUID) domain.RunStatus {
+	d.runsMu.RLock()
+	defer d.runsMu.RUnlock()
+	return d.runs[runID]
+}
+
+func (d *RunDriver) setRunState(runID uuid.UUID, status domain.RunStatus) {
+	d.runsMu.Lock()
+	defer d.runsMu.Unlock()
+	d.runs[runID] = status
+}
+
+func (d *RunDriver) deleteRunState(runID uuid.UUID) {
+	d.runsMu.Lock()
+	defer d.runsMu.Unlock()
+	delete(d.runs, runID)
+}
+
+func (d *RunDriver) finalizeRun(run *domain.Run, steps []*domain.Step) {
+>>>>>>> 7a81241 (fix: add pause timeout and fix shared map data races)
 	anyFailed := false
 	for _, s := range steps {
 		if s.Status == domain.StepStatusFailed {
@@ -556,6 +650,7 @@ func (d *runExecution) ResumeRun(runID uuid.UUID) (*RecoveryResult, error) {
 	// Resume run.
 	result.Run.Status = domain.RunStatusRunning
 	_ = d.store.UpdateRun(result.Run)
+	d.setRunState(runID, domain.RunStatusRunning)
 
 	go d.dispatchLoop(result.Run, result.Steps)
 
