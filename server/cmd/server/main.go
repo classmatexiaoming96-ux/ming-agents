@@ -6,6 +6,8 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ming-agents/server/adapter"
@@ -19,6 +21,9 @@ import (
 )
 
 func main() {
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	addr := flag.String("addr", ":8080", "HTTP address")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "Postgres DSN")
 	cleanup := flag.Bool("cleanup", false, "run retention cleanup once and exit")
@@ -84,15 +89,13 @@ func main() {
 	// terminal runs older than the retention period. Tied to the process
 	// lifetime; cancelled on shutdown.
 	if *cleanupInterval > 0 {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 		cfg := store.CleanupConfig{Retention: time.Duration(*retentionDays) * 24 * time.Hour}
 		log.Printf("background cleanup enabled: interval=%s retention=%dd", *cleanupInterval, *retentionDays)
 		go s.RunPeriodicCleanup(ctx, cfg, *cleanupInterval)
 	}
 
 	log.Printf("Loop Engineering server listening on %s", *addr)
-	if err := srv.Listen(*addr); err != nil {
+	if err := srv.ListenContext(ctx, *addr); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
 }

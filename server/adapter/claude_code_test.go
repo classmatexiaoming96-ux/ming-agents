@@ -171,6 +171,24 @@ func TestClaudeCodeAdapterManagersAreKeyedByCommand(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeAdapterAcceptsInjectedSessionStore(t *testing.T) {
+	store := NewClaudeCodeSessionStore()
+	first := ClaudeCodeAdapter{
+		Command:      "/tmp/first-claude",
+		Timeout:      time.Second,
+		SessionStore: store,
+	}.manager("/tmp/first-claude")
+	second := ClaudeCodeAdapter{
+		Command:      "/tmp/first-claude",
+		Timeout:      time.Second,
+		SessionStore: NewClaudeCodeSessionStore(),
+	}.manager("/tmp/first-claude")
+
+	if first == second {
+		t.Fatal("manager() shared state across distinct injected session stores")
+	}
+}
+
 func TestClaudeCodeSessionManagerSharesConcurrentStartupForWorkDir(t *testing.T) {
 	workDir := t.TempDir()
 	startsPath := filepath.Join(workDir, "starts.txt")
