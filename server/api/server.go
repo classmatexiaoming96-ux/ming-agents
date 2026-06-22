@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -80,6 +81,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs", s.handleListRuns)
 	s.mux.HandleFunc("GET /runs/{id}", s.handleGetRun)
 	s.mux.HandleFunc("POST /runs/{id}/start", s.handleStartRun)
+	s.mux.HandleFunc("POST /runs/{id}/pause", s.handlePauseRun)
 	s.mux.HandleFunc("POST /runs/{id}/cancel", s.handleCancelRun)
 	s.mux.HandleFunc("POST /runs/{id}/resume", s.handleResumeRun)
 	s.mux.HandleFunc("GET /runs/{id}/steps", s.handleListSteps)
@@ -228,6 +230,27 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+func (s *Server) handlePauseRun(w http.ResponseWriter, r *http.Request) {
+	id := parseUUID(r, "id")
+	timeout := 30 * time.Second
+	if v := r.URL.Query().Get("timeout_ms"); v != "" {
+		ms, err := strconv.Atoi(v)
+		if err != nil || ms <= 0 {
+			writeError(w, http.StatusBadRequest, "timeout_ms must be a positive integer")
+			return
+		}
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	if err := s.driver.Pause(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "paused"})
 }
 
 func (s *Server) handleListSteps(w http.ResponseWriter, r *http.Request) {

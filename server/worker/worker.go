@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -73,10 +74,25 @@ func (w *Worker) Start() {
 
 // Stop gracefully stops the worker.
 func (w *Worker) Stop() {
+	_ = w.StopContext(context.Background())
+}
+
+// StopContext gracefully stops the worker, returning if ctx expires first.
+func (w *Worker) StopContext(ctx context.Context) error {
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
 	})
-	w.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (w *Worker) run() {
@@ -220,4 +236,14 @@ func (p *Pool) Stop() {
 	for _, w := range p.workers {
 		w.Stop()
 	}
+}
+
+// StopContext stops all workers, returning if ctx expires before they all stop.
+func (p *Pool) StopContext(ctx context.Context) error {
+	for _, w := range p.workers {
+		if err := w.StopContext(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
