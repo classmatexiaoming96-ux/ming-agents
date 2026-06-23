@@ -14,6 +14,7 @@ type PTYReader struct {
 	pty *os.File
 
 	mu         sync.Mutex
+	rawHandler func([]byte)
 	updateCh   chan struct{}
 	done       chan struct{}
 	closeOnce  sync.Once
@@ -35,6 +36,9 @@ func (r *PTYReader) ReadLoop() {
 	for {
 		n, err := r.pty.Read(buf)
 		if n > 0 {
+			if r.rawHandler != nil {
+				r.rawHandler(buf[:n])
+			}
 			normalized := StripANSI(buf[:n])
 			r.mu.Lock()
 			r.normalized.WriteString(normalized)
@@ -50,6 +54,10 @@ func (r *PTYReader) ReadLoop() {
 			return
 		}
 	}
+}
+
+func (r *PTYReader) SetRawHandler(handler func([]byte)) {
+	r.rawHandler = handler
 }
 
 func (r *PTYReader) WaitFor(ctx context.Context, pattern string, sinceOffset int) (string, bool) {
