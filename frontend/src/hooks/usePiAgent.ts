@@ -4,6 +4,30 @@ import { mingAgentTools } from '../lib/pi-agent';
 import { buildSystemPrompt } from '../prompts/systemPrompt';
 import { useWorkflowStore } from '../stores/workflowStore';
 
+function createSessionId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    const value = char === 'x' ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+function getOrCreateSessionId(runId: string) {
+  const key = `ming-agents:session:${runId}`;
+  const existing = localStorage.getItem(key);
+  if (existing) {
+    return existing;
+  }
+
+  const sessionId = createSessionId();
+  localStorage.setItem(key, sessionId);
+  return sessionId;
+}
+
 interface UsePiAgentConfig {
   runId: string;
   onEvent?: (event: AgentEvent) => void;
@@ -33,6 +57,7 @@ export function usePiAgent(config: UsePiAgentConfig) {
   // Initialize agent
   useEffect(() => {
     if (!runId) return;
+    const sessionId = getOrCreateSessionId(runId);
 
     const agent = new Agent({
       initialState: {
@@ -52,7 +77,10 @@ export function usePiAgent(config: UsePiAgentConfig) {
         // Use BFF proxy for LLM calls
         const response = await fetch('/api/llm/stream', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-session-id': sessionId,
+          },
           body: JSON.stringify({ model, messages: context, options }),
         });
 
