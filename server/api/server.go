@@ -93,6 +93,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}/timeline", s.handleTimeline)
 	s.mux.HandleFunc("GET /runs/{id}/snapshot", s.handleGetSnapshot)
 	s.mux.HandleFunc("POST /admin/cleanup", s.handleCleanup)
+	s.mux.HandleFunc("GET /runs/{id}/status", s.handleGetRunStatus)
+	s.mux.HandleFunc("GET /runs/{run_id}/nodes/{node}/artifact", s.handleGetNodeArtifact)
+	s.mux.HandleFunc("POST /runs/{run_id}/nodes/{node}/feedback", s.handleNodeFeedback)
+	s.mux.HandleFunc("POST /runs/{run_id}/nodes/{node}/approve", s.handleNodeApprove)
+	s.mux.HandleFunc("POST /runs/{run_id}/nodes/{node}/retry", s.handleNodeRetry)
+	s.mux.HandleFunc("GET /runs/{run_id}/nodes/{node}/history", s.handleNodeHistory)
 	s.registerMemoryRoutes()
 	if s.graph != nil && s.pgxPool != nil {
 		NewGraphHandler(s.pgxPool, s.graph).RegisterRoutes(s.mux)
@@ -392,6 +398,377 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// ─── Phase 0: WAITING_USER_INPUT Handlers ─────────────────────────────────────
+
+type nodeStatusResp struct {
+	RunID       string        `json:"run_id"`
+	Status      string        `json:"status"`
+	CurrentNode string        `json:"current_node"`
+	Nodes       []nodeInfo    `json:"nodes"`
+}
+
+type nodeInfo struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Artifact string `json:"artifact,omitempty"`
+}
+
+type artifactResp struct {
+	NodeID      string `json:"node_id"`
+	Content     string `json:"content"`
+	ArtifactType string `json:"artifact_type"`
+}
+
+type nodeFeedbackReq struct {
+	Feedback   string `json:"feedback"`
+	FeedbackType string `json:"feedback_type"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+}
+
+type feedbackResp struct {
+	FeedbackID string `json:"feedback_id"`
+	NodeID     string `json:"node_id"`
+	Success    bool   `json:"success"`
+}
+
+type approveReq struct {
+	Comment    string `json:"comment,omitempty"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+}
+
+type approveResp struct {
+	NodeID     string `json:"node_id"`
+	NextNodeID string `json:"next_node_id,omitempty"`
+	RunStatus  string `json:"run_status"`
+	Success    bool   `json:"success"`
+}
+
+type retryReq struct {
+	Reason     string `json:"reason,omitempty"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+}
+
+type retryResp struct {
+	NodeID  string `json:"node_id"`
+	JobID   string `json:"job_id,omitempty"`
+	Status  string `json:"status"`
+	Success bool   `json:"success"`
+}
+
+type historyResp struct {
+	NodeID string         `json:"node_id"`
+	Runs   []historyEntry `json:"runs"`
+}
+
+type historyEntry struct {
+	RunID      string     `json:"run_id"`
+	Status     string     `json:"status"`
+	StartedAt  string     `json:"started_at"`
+	CompletedAt string    `json:"completed_at,omitempty"`
+	Feedback   []feedback `json:"feedback,omitempty"`
+}
+
+type feedback struct {
+	ID         string `json:"id"`
+	Content    string `json:"content"`
+	SubmittedAt string `json:"submitted_at"`
+}
+
+func (s *Server) handleGetRunStatus(w http.ResponseWriter, r *http.Request) {
+	id := parseUUID(r, "id")
+	run, err := s.store.GetRun(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	steps, err := s.store.GetStepsByRun(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	nodes := make([]nodeInfo, len(steps))
+	currentNode := ""
+	for i, st := range steps {
+		nodeID := fmt.Sprintf("node_%d", i+1)
+		if st.Status == domain.StepStatusWaitingUserInput || st.Status == domain.StepStatusRunning {
+			currentNode = nodeID
+		}
+		status := string(st.Status)
+		if st.Status == domain.StepStatusCompleted {
+			status = "COMPLETED"
+		}
+		nodes[i] = nodeInfo{
+			ID:     nodeID,
+			Name:   st.Name,
+			Status: status,
+		}
+	}
+
+	resp := nodeStatusResp{
+		RunID:       run.ID.String(),
+		Status:      string(run.Status),
+		CurrentNode: currentNode,
+		Nodes:       nodes,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleGetNodeArtifact(w http.ResponseWriter, r *http.Request) {
+	runIDStr := r.PathValue("run_id")
+	nodeIDStr := r.PathValue("node")
+
+	runID, err := uuid.Parse(runIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return
+	}
+
+	// Parse node number from node_1, node_2, etc.
+	nodeNum := 1
+	if _, err := fmt.Sscanf(nodeIDStr, "node_%d", &nodeNum); err != nil {
+		// Try direct parse
+		nodeNum, _ = strconv.Atoi(nodeIDStr)
+	}
+
+	steps, err := s.store.GetStepsByRun(runID)
+	if err != nil || nodeNum < 1 || nodeNum > len(steps) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+
+	step := steps[nodeNum-1]
+	artifacts, err := s.store.GetArtifactsByRun(runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Find artifact for this step
+	var content string
+	artifactType := "text"
+	for _, a := range artifacts {
+		if a.StepID == step.ID {
+			content = a.Content
+			artifactType = a.Type
+			break
+		}
+	}
+
+	resp := artifactResp{
+		NodeID:       nodeIDStr,
+		Content:      content,
+		ArtifactType: artifactType,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleNodeFeedback(w http.ResponseWriter, r *http.Request) {
+	runIDStr := r.PathValue("run_id")
+	nodeIDStr := r.PathValue("node")
+
+	runID, err := uuid.Parse(runIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return
+	}
+
+	nodeNum := 1
+	if _, err := fmt.Sscanf(nodeIDStr, "node_%d", &nodeNum); err != nil {
+		nodeNum, _ = strconv.Atoi(nodeIDStr)
+	}
+
+	steps, err := s.store.GetStepsByRun(runID)
+	if err != nil || nodeNum < 1 || nodeNum > len(steps) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+
+	var req nodeFeedbackReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.FeedbackType == "" {
+		req.FeedbackType = "correction"
+	}
+
+	// Create feedback artifact
+	feedbackUUID := uuid.New()
+	artifact := &store.Artifact{
+		ID:      feedbackUUID,
+		RunID:   runID,
+		StepID:  steps[nodeNum-1].ID,
+		Name:    "feedback",
+		Type:    "json",
+		Content: fmt.Sprintf(`{"feedback":"%s","type":"%s","submitted_at":"%s"}`,
+			req.Feedback, req.FeedbackType, time.Now().Format(time.RFC3339)),
+	}
+
+	if err := s.store.CreateArtifact(artifact); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	resp := feedbackResp{
+		FeedbackID: feedbackUUID.String(),
+		NodeID:     nodeIDStr,
+		Success:    true,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleNodeApprove(w http.ResponseWriter, r *http.Request) {
+	runIDStr := r.PathValue("run_id")
+	nodeIDStr := r.PathValue("node")
+
+	runID, err := uuid.Parse(runIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return
+	}
+
+	nodeNum := 1
+	if _, err := fmt.Sscanf(nodeIDStr, "node_%d", &nodeNum); err != nil {
+		nodeNum, _ = strconv.Atoi(nodeIDStr)
+	}
+
+	steps, err := s.store.GetStepsByRun(runID)
+	if err != nil || nodeNum < 1 || nodeNum > len(steps) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+
+	// Update step status to completed
+	step := steps[nodeNum-1]
+	step.Status = domain.StepStatusCompleted
+	if err := s.store.UpdateStep(step); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Find next node
+	nextNodeID := ""
+	if nodeNum < len(steps) {
+		nextNodeID = fmt.Sprintf("node_%d", nodeNum+1)
+		// Start the next node
+		nextStep := steps[nodeNum]
+		nextStep.Status = domain.StepStatusRunning
+		if err := s.store.UpdateStep(nextStep); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	resp := approveResp{
+		NodeID:     nodeIDStr,
+		NextNodeID: nextNodeID,
+		RunStatus:  "running",
+		Success:    true,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleNodeRetry(w http.ResponseWriter, r *http.Request) {
+	runIDStr := r.PathValue("run_id")
+	nodeIDStr := r.PathValue("node")
+
+	runID, err := uuid.Parse(runIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return
+	}
+
+	nodeNum := 1
+	if _, err := fmt.Sscanf(nodeIDStr, "node_%d", &nodeNum); err != nil {
+		nodeNum, _ = strconv.Atoi(nodeIDStr)
+	}
+
+	steps, err := s.store.GetStepsByRun(runID)
+	if err != nil || nodeNum < 1 || nodeNum > len(steps) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+
+	// Update step status to running (retry)
+	step := steps[nodeNum-1]
+	step.Status = domain.StepStatusRunning
+	step.Attempt++
+	if err := s.store.UpdateStep(step); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jobID := uuid.New().String()
+	resp := retryResp{
+		NodeID:  nodeIDStr,
+		JobID:   jobID,
+		Status:  "RETRYING",
+		Success: true,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleNodeHistory(w http.ResponseWriter, r *http.Request) {
+	runIDStr := r.PathValue("run_id")
+	nodeIDStr := r.PathValue("node")
+
+	runID, err := uuid.Parse(runIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return
+	}
+
+	nodeNum := 1
+	if _, err := fmt.Sscanf(nodeIDStr, "node_%d", &nodeNum); err != nil {
+		nodeNum, _ = strconv.Atoi(nodeIDStr)
+	}
+
+	steps, err := s.store.GetStepsByRun(runID)
+	if err != nil || nodeNum < 1 || nodeNum > len(steps) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+
+	step := steps[nodeNum-1]
+	artifacts, err := s.store.GetArtifactsByRun(runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Build history from artifacts
+	var entries []historyEntry
+	var fbList []feedback
+	for _, a := range artifacts {
+		if a.StepID == step.ID {
+			if a.Name == "feedback" {
+				fbList = append(fbList, feedback{
+					ID:         a.ID.String(),
+					Content:    a.Content,
+					SubmittedAt: a.CreatedAt.Format(time.RFC3339),
+				})
+			}
+		}
+	}
+
+	entries = append(entries, historyEntry{
+		RunID:       fmt.Sprintf("attempt_%d", step.Attempt),
+		Status:      string(step.Status),
+		StartedAt:   step.CreatedAt.Format(time.RFC3339),
+		CompletedAt: step.UpdatedAt.Format(time.RFC3339),
+		Feedback:    fbList,
+	})
+
+	resp := historyResp{
+		NodeID: nodeIDStr,
+		Runs:   entries,
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────

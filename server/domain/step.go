@@ -12,11 +12,12 @@ import (
 type StepStatus string
 
 const (
-	StepStatusPending   StepStatus = "pending"
-	StepStatusRunning   StepStatus = "running"
-	StepStatusCompleted StepStatus = "completed"
-	StepStatusSkipped   StepStatus = "skipped"
-	StepStatusFailed    StepStatus = "failed"
+	StepStatusPending          StepStatus = "pending"
+	StepStatusRunning          StepStatus = "running"
+	StepStatusCompleted       StepStatus = "completed"
+	StepStatusSkipped          StepStatus = "skipped"
+	StepStatusFailed           StepStatus = "failed"
+	StepStatusWaitingUserInput StepStatus = "waiting_user_input"
 )
 
 // StepType represents the type of a step.
