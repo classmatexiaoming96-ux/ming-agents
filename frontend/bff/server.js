@@ -4,6 +4,12 @@ import fetch from 'node-fetch';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  compact,
+  DEFAULT_COMPACTION_SETTINGS,
+  estimateContextTokens,
+  prepareCompaction,
+} from '@earendil-works/pi-agent-core/base';
 
 const PORT = 3001;
 const SESSION_DIR = '/tmp/ming-agents/sessions';
@@ -13,6 +19,12 @@ const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 // Minimax API configuration
 const MINIMAX_API_URL = 'https://api.minimax.chat/v1/text/chatcompletion_v2';
 const MINIMAX_MODEL = 'MiniMax-Text-01';
+const COMPACTION_MODEL = {
+  provider: 'minimax',
+  id: MINIMAX_MODEL,
+  maxTokens: 4096,
+  reasoning: false,
+};
 
 // Get API key from environment
 const API_KEY = process.env.MINIMAX_API_KEY || '';
@@ -60,51 +72,154 @@ export function appendSessionMessage(sessionDir, sessionId, message) {
     role: message.role,
     content: message.content || '',
     toolCalls: message.toolCalls || [],
-    created_at: new Date().toISOString(),
+    created_at: message.created_at || new Date().toISOString(),
   };
+  if (message.role === 'compactionSummary') {
+    entry.firstKeptEntryId = message.firstKeptEntryId;
+    entry.tokensBefore = message.tokensBefore;
+    entry.details = message.details;
+  }
 
   fs.appendFileSync(file, `${JSON.stringify(entry)}\n`);
   const now = new Date();
   fs.utimesSync(dir, now, now);
 }
 
-function estimateTokens(messages) {
-  return messages.reduce((sum, m) => sum + Math.ceil((m.content || '').length / 4), 0);
+function contentBlocks(content) {
+  if (Array.isArray(content)) {
+    return content;
+  }
+  return [{ type: 'text', text: content || '' }];
 }
 
-async function runCompaction(sessionDir, sessionId, apiKey, fetchImpl) {
-  const messages = loadSessionMessages(sessionDir, sessionId);
-  if (estimateTokens(messages) < 20000) return;
-
-  const historyText = messages
-    .filter(m => m.role !== 'compactionSummary')
-    .map(m => `${m.role}: ${m.content}`)
-    .join('\n');
-
-  const summaryPrompt = `You are a context summarization assistant. Create a structured summary of this conversation for a developer. Use this EXACT format:\n\n## Goal\n[What is the user trying to accomplish?]\n\n## Progress\n### Done\n- [x] [Completed tasks]\n\n### In Progress\n- [ ] [Current work]\n\n## Key Decisions\n- [Any decisions made]\n\n## Next Steps\n1. [What should happen next]\n\n## Critical Context\n- [Important file paths, error messages, etc.]\n\nConversation to summarize:\n${historyText}`;
-
-  try {
-    const resp = await fetchImpl(MINIMAX_API_URL, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: MINIMAX_MODEL, messages: [{ role: 'user', content: summaryPrompt }], stream: false }),
-    });
-    const data = await resp.json();
-    const summary = data.choices?.[0]?.message?.content || '';
-
-    // Replace all messages with a single compactionSummary entry
-    const file = messagesPath(sessionDir, sessionId);
-    const compactionEntry = {
-      id: `compact-${Date.now()}`,
+function messageToAgentMessage(message) {
+  const timestamp = new Date(message.created_at || Date.now()).getTime();
+  if (message.role === 'compactionSummary') {
+    return {
       role: 'compactionSummary',
-      content: summary,
-      created_at: new Date().toISOString(),
+      summary: message.content || message.summary || '',
+      tokensBefore: message.tokensBefore || 0,
+      timestamp,
     };
-    fs.writeFileSync(file, JSON.stringify(compactionEntry) + '\n');
-    console.log(`Compaction completed for session ${sessionId}, summary length: ${summary.length}`);
-  } catch (err) {
-    console.error('Compaction failed:', err.message);
   }
+
+  return {
+    role: message.role,
+    content: contentBlocks(message.content),
+    timestamp,
+  };
+}
+
+export function messagesToEntries(messages) {
+  return messages.map((message) => {
+    const timestamp = new Date(message.created_at || Date.now()).toISOString();
+
+    if (message.role === 'compactionSummary') {
+      return {
+        id: message.id,
+        type: 'compaction',
+        summary: message.content || message.summary || '',
+        firstKeptEntryId: message.firstKeptEntryId || '',
+        tokensBefore: message.tokensBefore || 0,
+        details: message.details,
+        timestamp,
+      };
+    }
+
+    return {
+      id: message.id,
+      type: 'message',
+      message: messageToAgentMessage(message),
+      timestamp,
+    };
+  });
+}
+
+export function shouldCompact(messages, settings = DEFAULT_COMPACTION_SETTINGS) {
+  if (!settings.enabled) {
+    return false;
+  }
+
+  const context = estimateContextTokens(messages.map(messageToAgentMessage));
+  return context.tokens > settings.keepRecentTokens;
+}
+
+function retainedMessagesAfterCompaction(messages, firstKeptEntryId) {
+  const firstKeptIndex = messages.findIndex((message) => message.id === firstKeptEntryId);
+  return firstKeptIndex >= 0 ? messages.slice(firstKeptIndex) : [];
+}
+
+export function entriesToMessages(compactResult, retainedMessages = []) {
+  return [
+    {
+      id: `compaction-${Date.now()}`,
+      role: 'compactionSummary',
+      content: compactResult.summary,
+      firstKeptEntryId: compactResult.firstKeptEntryId,
+      tokensBefore: compactResult.tokensBefore,
+      details: compactResult.details,
+      created_at: new Date().toISOString(),
+    },
+    ...retainedMessages,
+  ];
+}
+
+function writeSessionMessages(sessionDir, sessionId, messages) {
+  const dir = sessionPath(sessionDir, sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'messages.jsonl');
+  fs.writeFileSync(file, '');
+  for (const message of messages) {
+    appendSessionMessage(sessionDir, sessionId, message);
+  }
+}
+
+export async function runCompaction(sessionDir, sessionId, options = {}) {
+  const {
+    settings = DEFAULT_COMPACTION_SETTINGS,
+    model = COMPACTION_MODEL,
+    apiKey = API_KEY,
+    headers,
+    compactImpl = compact,
+  } = options;
+  const messages = loadSessionMessages(sessionDir, sessionId);
+  const prep = prepareCompaction(messagesToEntries(messages), settings);
+
+  if (!prep.ok) {
+    console.error('Compaction failed:', prep.error.message);
+    return false;
+  }
+  if (!prep.value) {
+    return false;
+  }
+
+  const result = await compactImpl(prep.value, model, apiKey, headers);
+  if (!result.ok) {
+    console.error('Compaction failed:', result.error.message);
+    return false;
+  }
+
+  const retainedMessages = retainedMessagesAfterCompaction(messages, result.value.firstKeptEntryId);
+  writeSessionMessages(sessionDir, sessionId, entriesToMessages(result.value, retainedMessages));
+  console.log(`Compaction completed for session ${sessionId}, summary length: ${result.value.summary.length}`);
+  return true;
+}
+
+export async function appendSessionMessagesWithCompaction(sessionDir, sessionId, userMessage, assistantMessage, options = {}) {
+  const settings = options.settings || DEFAULT_COMPACTION_SETTINGS;
+  const messages = loadSessionMessages(sessionDir, sessionId);
+  const nextMessages = [...messages, userMessage, assistantMessage];
+
+  if (shouldCompact(nextMessages, settings)) {
+    try {
+      await runCompaction(sessionDir, sessionId, options);
+    } catch (err) {
+      console.error('Compaction failed:', err.message);
+    }
+  }
+
+  appendSessionMessage(sessionDir, sessionId, userMessage);
+  appendSessionMessage(sessionDir, sessionId, assistantMessage);
 }
 
 export function cleanupOldSessions(sessionDir = SESSION_DIR) {
@@ -184,6 +299,10 @@ export function createApp({
   apiKey = API_KEY,
   fetchImpl = fetch,
   sessionDir = SESSION_DIR,
+  compactionSettings = DEFAULT_COMPACTION_SETTINGS,
+  compactionModel = COMPACTION_MODEL,
+  compactImpl = compact,
+  compactionHeaders,
 } = {}) {
   const app = express();
 
@@ -242,18 +361,22 @@ export function createApp({
         collectAssistantDelta(chunk, assistantState);
         res.write(chunk);
       });
-      upstreamResponse.body.on('end', () => {
+      upstreamResponse.body.on('end', async () => {
         finishAssistantDelta(assistantState);
         if (sessionId && currentUserMessage) {
-          appendSessionMessage(sessionDir, sessionId, currentUserMessage);
-          appendSessionMessage(sessionDir, sessionId, {
+          const assistantMessage = {
             id: `assistant-${Date.now()}`,
             role: 'assistant',
             content: assistantState.content,
             toolCalls: [],
+          };
+          await appendSessionMessagesWithCompaction(sessionDir, sessionId, currentUserMessage, assistantMessage, {
+            settings: compactionSettings,
+            model: compactionModel,
+            apiKey,
+            headers: compactionHeaders,
+            compactImpl,
           });
-          // Trigger compaction after appending (fire-and-forget)
-          runCompaction(sessionDir, sessionId, apiKey, fetchImpl);
         }
         res.end();
       });

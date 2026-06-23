@@ -137,6 +137,87 @@ test('stream endpoint sends persisted history plus latest user and persists assi
   }
 });
 
+test('stream endpoint compacts persisted history before appending the latest turn when over threshold', async () => {
+  const sessionDir = await mkdtemp(path.join(tmpdir(), 'ming-agent-session-'));
+
+  appendSessionMessage(sessionDir, SESSION_ID, {
+    id: 'old-user',
+    role: 'user',
+    content: 'previous question with enough text to cross the tiny test threshold',
+  });
+  appendSessionMessage(sessionDir, SESSION_ID, {
+    id: 'old-assistant',
+    role: 'assistant',
+    content: 'previous answer with enough text to cross the tiny test threshold',
+  });
+
+  const app = createApp({
+    apiKey: 'test-key',
+    sessionDir,
+    compactionSettings: {
+      enabled: true,
+      reserveTokens: 0,
+      keepRecentTokens: 1,
+    },
+    compactionModel: {
+      provider: 'minimax',
+      id: 'MiniMax-Text-01',
+      maxTokens: 4096,
+      reasoning: false,
+    },
+    compactImpl: async () => ({
+      ok: true,
+      value: {
+        summary: '## Goal\nSummarized prior work',
+        firstKeptEntryId: 'old-assistant',
+        tokensBefore: 42,
+        details: { readFiles: [], modifiedFiles: [] },
+      },
+    }),
+    fetchImpl: async () => ({
+      ok: true,
+      body: Readable.from([
+        'data: {"choices":[{"delta":{"content":"new answer"}}]}\n\n',
+        'data: [DONE]\n\n',
+      ]),
+    }),
+  });
+  const server = app.listen(0);
+
+  try {
+    const { port } = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/api/llm/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': SESSION_ID,
+      },
+      body: JSON.stringify({
+        messages: [
+          { id: 'new-user', role: 'user', content: 'new question' },
+        ],
+      }),
+    });
+
+    await response.text();
+
+    const stored = loadSessionMessages(sessionDir, SESSION_ID);
+    assert.deepEqual(
+      stored.map((message) => [message.role, message.content]),
+      [
+        ['compactionSummary', '## Goal\nSummarized prior work'],
+        ['assistant', 'previous answer with enough text to cross the tiny test threshold'],
+        ['user', 'new question'],
+        ['assistant', 'new answer'],
+      ]
+    );
+    assert.match(stored[0].id, /^compaction-/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(sessionDir, { recursive: true, force: true });
+  }
+});
+
 test('rejects session ids that could escape the session directory', async () => {
   assert.throws(() => loadSessionMessages('/tmp/ming-agents/sessions', '../bad'), /Invalid sessionId/);
 });
