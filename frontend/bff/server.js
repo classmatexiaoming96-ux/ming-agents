@@ -68,6 +68,45 @@ export function appendSessionMessage(sessionDir, sessionId, message) {
   fs.utimesSync(dir, now, now);
 }
 
+function estimateTokens(messages) {
+  return messages.reduce((sum, m) => sum + Math.ceil((m.content || '').length / 4), 0);
+}
+
+async function runCompaction(sessionDir, sessionId, apiKey, fetchImpl) {
+  const messages = loadSessionMessages(sessionDir, sessionId);
+  if (estimateTokens(messages) < 20000) return;
+
+  const historyText = messages
+    .filter(m => m.role !== 'compactionSummary')
+    .map(m => `${m.role}: ${m.content}`)
+    .join('\n');
+
+  const summaryPrompt = `You are a context summarization assistant. Create a structured summary of this conversation for a developer. Use this EXACT format:\n\n## Goal\n[What is the user trying to accomplish?]\n\n## Progress\n### Done\n- [x] [Completed tasks]\n\n### In Progress\n- [ ] [Current work]\n\n## Key Decisions\n- [Any decisions made]\n\n## Next Steps\n1. [What should happen next]\n\n## Critical Context\n- [Important file paths, error messages, etc.]\n\nConversation to summarize:\n${historyText}`;
+
+  try {
+    const resp = await fetchImpl(MINIMAX_API_URL, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: MINIMAX_MODEL, messages: [{ role: 'user', content: summaryPrompt }], stream: false }),
+    });
+    const data = await resp.json();
+    const summary = data.choices?.[0]?.message?.content || '';
+
+    // Replace all messages with a single compactionSummary entry
+    const file = messagesPath(sessionDir, sessionId);
+    const compactionEntry = {
+      id: `compact-${Date.now()}`,
+      role: 'compactionSummary',
+      content: summary,
+      created_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(file, JSON.stringify(compactionEntry) + '\n');
+    console.log(`Compaction completed for session ${sessionId}, summary length: ${summary.length}`);
+  } catch (err) {
+    console.error('Compaction failed:', err.message);
+  }
+}
+
 export function cleanupOldSessions(sessionDir = SESSION_DIR) {
   const now = Date.now();
   if (!fs.existsSync(sessionDir)) {
@@ -213,6 +252,8 @@ export function createApp({
             content: assistantState.content,
             toolCalls: [],
           });
+          // Trigger compaction after appending (fire-and-forget)
+          runCompaction(sessionDir, sessionId, apiKey, fetchImpl);
         }
         res.end();
       });
