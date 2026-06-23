@@ -1,7 +1,7 @@
 import { useWorkflowStore } from '../stores/workflowStore';
 
 export function WorkflowStatusBar() {
-  const { runId, runStatus, currentNodeId, currentNodeStatus, wsConnected } = useWorkflowStore();
+  const { runId, currentNodeId, currentNodeStatus, wsConnected } = useWorkflowStore();
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -25,7 +25,7 @@ export function WorkflowStatusBar() {
       <div className="status-right">
         {runId && <span className="run-id">Run: {runId}</span>}
         <span className={`ws-indicator ${wsConnected ? 'connected' : ''}`}>
-          {wsConnected ? '🟢 Connected' : '🔴 Disconnected'}
+          {wsConnected ? 'SSE Connected' : 'SSE Disconnected'}
         </span>
       </div>
     </header>

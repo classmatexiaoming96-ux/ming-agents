@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { Agent, type AgentEvent } from '@earendil-works/pi-agent-core';
+import { Agent, type AgentEvent } from '../lib/pi-agent-core';
 import { mingAgentTools } from '../lib/pi-agent';
 import { buildSystemPrompt } from '../prompts/systemPrompt';
 import { useWorkflowStore } from '../stores/workflowStore';

@@ -20,7 +20,7 @@ func (d *recordingRunDriver) Launch(runID uuid.UUID) error {
 	return nil
 }
 
-func (d *recordingRunDriver) PauseContext(context.Context, uuid.UUID) error {
+func (d *recordingRunDriver) Pause(context.Context, uuid.UUID) error {
 	return nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -32,6 +33,8 @@ type Server struct {
 	mux        *http.ServeMux
 	graph      *codegraph.RepoGraph
 	pgxPool    *pgxpool.Pool
+	sse        *SSEManager
+	feishu     feishuNotifier
 }
 
 // RunDriver is the run lifecycle dependency used by HTTP handlers.
@@ -59,6 +62,13 @@ func WithRunDriver(driver RunDriver) Option {
 	}
 }
 
+// WithFeishuNotifier injects a notification sender for waiting-user-input alerts.
+func WithFeishuNotifier(notifier feishuNotifier) Option {
+	return func(s *Server) {
+		s.feishu = notifier
+	}
+}
+
 // NewServer creates a new API server.
 func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eval.Registry, opts ...Option) *Server {
 	srv := &Server{
@@ -68,12 +78,22 @@ func NewServer(s *store.Store, eng *engine.Engine, ar *adapter.Registry, er *eva
 		adapterReg: ar,
 		evalReg:    er,
 		mux:        http.NewServeMux(),
+		sse:        NewSSEManager(),
+		feishu:     newBytedcliFeishuNotifier(),
 	}
 	for _, opt := range opts {
 		opt(srv)
 	}
 	if srv.driver == nil {
 		srv.driver = engine.NewRunDriver(s, ar, eng)
+	}
+	if srv.store != nil {
+		frontendBase := firstNonEmpty(os.Getenv("FRONTEND_BASE_URL"), "http://localhost:5173")
+		srv.store.SetStepStatusNotifier(&serverStepNotifier{
+			sse:          srv.sse,
+			feishu:       srv.feishu,
+			frontendBase: frontendBase,
+		})
 	}
 	srv.routes()
 	return srv
@@ -88,6 +108,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /runs/{id}/pause", s.handlePauseRun)
 	s.mux.HandleFunc("POST /runs/{id}/cancel", s.handleCancelRun)
 	s.mux.HandleFunc("POST /runs/{id}/resume", s.handleResumeRun)
+	s.mux.HandleFunc("GET /runs/{run_id}/events", s.handleSSEEvents)
 	s.mux.HandleFunc("GET /runs/{id}/steps", s.handleListSteps)
 	s.mux.HandleFunc("GET /runs/{id}/tasks", s.handleListTasks)
 	s.mux.HandleFunc("GET /runs/{id}/timeline", s.handleTimeline)
@@ -124,6 +145,17 @@ type runResp struct {
 	Status      string `json:"status"`
 	MaxParallel int    `json:"max_parallel"`
 	CreatedAt   string `json:"created_at"`
+}
+
+type runSummaryResp struct {
+	RunID       string `json:"run_id"`
+	Status      string `json:"status"`
+	CurrentNode string `json:"current_node"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type listRunsResp struct {
+	Runs []runSummaryResp `json:"runs"`
 }
 
 type stepResp struct {
@@ -189,6 +221,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	statusFilter := r.URL.Query().Get("status")
 	if limit <= 0 {
 		limit = 50
 	}
@@ -199,17 +232,42 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := make([]runResp, len(runs))
-	for i, run := range runs {
-		out[i] = runResp{
-			ID:          run.ID.String(),
-			Name:        run.Name,
+	out := make([]runSummaryResp, 0, len(runs))
+	for _, run := range runs {
+		if statusFilter != "" && string(run.Status) != statusFilter {
+			continue
+		}
+		currentNode, err := s.currentNodeName(run.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out = append(out, runSummaryResp{
+			RunID:       run.ID.String(),
 			Status:      string(run.Status),
-			MaxParallel: run.MaxParallel,
+			CurrentNode: currentNode,
 			CreatedAt:   run.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	writeJSON(w, http.StatusOK, listRunsResp{Runs: out})
+}
+
+func (s *Server) currentNodeName(runID uuid.UUID) (string, error) {
+	steps, err := s.store.GetStepsByRun(runID)
+	if err != nil {
+		return "", err
+	}
+	for _, st := range steps {
+		if st.Status == domain.StepStatusWaitingUserInput {
+			return st.Name, nil
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	for _, st := range steps {
+		if st.Status == domain.StepStatusRunning {
+			return st.Name, nil
+		}
+	}
+	return "", nil
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
@@ -403,10 +461,10 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 // ─── Phase 0: WAITING_USER_INPUT Handlers ─────────────────────────────────────
 
 type nodeStatusResp struct {
-	RunID       string        `json:"run_id"`
-	Status      string        `json:"status"`
-	CurrentNode string        `json:"current_node"`
-	Nodes       []nodeInfo    `json:"nodes"`
+	RunID       string     `json:"run_id"`
+	Status      string     `json:"status"`
+	CurrentNode string     `json:"current_node"`
+	Nodes       []nodeInfo `json:"nodes"`
 }
 
 type nodeInfo struct {
@@ -417,15 +475,15 @@ type nodeInfo struct {
 }
 
 type artifactResp struct {
-	NodeID      string `json:"node_id"`
-	Content     string `json:"content"`
+	NodeID       string `json:"node_id"`
+	Content      string `json:"content"`
 	ArtifactType string `json:"artifact_type"`
 }
 
 type nodeFeedbackReq struct {
-	Feedback   string `json:"feedback"`
+	Feedback     string `json:"feedback"`
 	FeedbackType string `json:"feedback_type"`
-	ToolCallID string `json:"toolCallId,omitempty"`
+	ToolCallID   string `json:"toolCallId,omitempty"`
 }
 
 type feedbackResp struct {
@@ -464,16 +522,16 @@ type historyResp struct {
 }
 
 type historyEntry struct {
-	RunID      string     `json:"run_id"`
-	Status     string     `json:"status"`
-	StartedAt  string     `json:"started_at"`
-	CompletedAt string    `json:"completed_at,omitempty"`
-	Feedback   []feedback `json:"feedback,omitempty"`
+	RunID       string     `json:"run_id"`
+	Status      string     `json:"status"`
+	StartedAt   string     `json:"started_at"`
+	CompletedAt string     `json:"completed_at,omitempty"`
+	Feedback    []feedback `json:"feedback,omitempty"`
 }
 
 type feedback struct {
-	ID         string `json:"id"`
-	Content    string `json:"content"`
+	ID          string `json:"id"`
+	Content     string `json:"content"`
 	SubmittedAt string `json:"submitted_at"`
 }
 
@@ -600,11 +658,11 @@ func (s *Server) handleNodeFeedback(w http.ResponseWriter, r *http.Request) {
 	// Create feedback artifact
 	feedbackUUID := uuid.New()
 	artifact := &store.Artifact{
-		ID:      feedbackUUID,
-		RunID:   runID,
-		StepID:  steps[nodeNum-1].ID,
-		Name:    "feedback",
-		Type:    "json",
+		ID:     feedbackUUID,
+		RunID:  runID,
+		StepID: steps[nodeNum-1].ID,
+		Name:   "feedback",
+		Type:   "json",
 		Content: fmt.Sprintf(`{"feedback":"%s","type":"%s","submitted_at":"%s"}`,
 			req.Feedback, req.FeedbackType, time.Now().Format(time.RFC3339)),
 	}
@@ -748,8 +806,8 @@ func (s *Server) handleNodeHistory(w http.ResponseWriter, r *http.Request) {
 		if a.StepID == step.ID {
 			if a.Name == "feedback" {
 				fbList = append(fbList, feedback{
-					ID:         a.ID.String(),
-					Content:    a.Content,
+					ID:          a.ID.String(),
+					Content:     a.Content,
 					SubmittedAt: a.CreatedAt.Format(time.RFC3339),
 				})
 			}

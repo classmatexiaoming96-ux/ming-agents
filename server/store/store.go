@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,7 +14,9 @@ import (
 
 // Store manages all persistence operations.
 type Store struct {
-	db *sql.DB
+	db         *sql.DB
+	notifierMu sync.RWMutex
+	notifier   StepStatusNotifier
 }
 
 // NewStore creates a new Store backed by the given DB.
@@ -28,6 +31,22 @@ func (s *Store) BeginTx() (*sql.Tx, error) {
 
 // DB returns the underlying *sql.DB.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// SetStepStatusNotifier registers a listener for persisted step transitions.
+func (s *Store) SetStepStatusNotifier(notifier StepStatusNotifier) {
+	s.notifierMu.Lock()
+	defer s.notifierMu.Unlock()
+	s.notifier = notifier
+}
+
+func (s *Store) notifyStepStatusChanged(change StepStatusChange) {
+	s.notifierMu.RLock()
+	notifier := s.notifier
+	s.notifierMu.RUnlock()
+	if notifier != nil {
+		notifier.OnStepStatusChanged(change)
+	}
+}
 
 // ─── Run CRUD ────────────────────────────────────────────────────────────────
 
@@ -65,7 +84,24 @@ func (s *Store) GetStep(id uuid.UUID) (*domain.Step, error) {
 
 // UpdateStep updates a step.
 func (s *Store) UpdateStep(step *domain.Step) error {
-	return stepRepo{s}.Update(step)
+	var from domain.StepStatus
+	if existing, err := s.GetStep(step.ID); err == nil {
+		from = existing.Status
+	}
+	if err := (stepRepo{s}).Update(step); err != nil {
+		return err
+	}
+	if from != "" && from != step.Status {
+		s.notifyStepStatusChanged(StepStatusChange{
+			RunID:     step.RunID,
+			StepID:    step.ID,
+			StepName:  step.Name,
+			From:      from,
+			To:        step.Status,
+			Timestamp: Now(),
+		})
+	}
+	return nil
 }
 
 // GetStepsByRun returns all steps for a run.
@@ -182,7 +218,25 @@ func (s *Store) UpdateRunStatus(id uuid.UUID, from, to domain.RunStatus, version
 // Does NOT use optimistic locking — use UpdateStep for full updates.
 // TODO: implement using stepRepo{}.UpdateStatus
 func (s *Store) UpdateStepStatus(id uuid.UUID, to domain.StepStatus) error {
-	return stepRepo{s}.UpdateStatus(id, to)
+	step, err := s.GetStep(id)
+	if err != nil {
+		return err
+	}
+	from := step.Status
+	if err := (stepRepo{s}).UpdateStatus(id, to); err != nil {
+		return err
+	}
+	if from != to {
+		s.notifyStepStatusChanged(StepStatusChange{
+			RunID:     step.RunID,
+			StepID:    step.ID,
+			StepName:  step.Name,
+			From:      from,
+			To:        to,
+			Timestamp: Now(),
+		})
+	}
+	return nil
 }
 
 // ─── LoopIteration CRUD ──────────────────────────────────────────────────────

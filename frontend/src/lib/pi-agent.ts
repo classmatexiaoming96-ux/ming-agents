@@ -1,4 +1,4 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core';
+import type { AgentTool } from './pi-agent-core';
 import { useWorkflowStore } from '../stores/workflowStore';
 
 // API base URL
@@ -38,7 +38,7 @@ export const getRunStatusTool: AgentTool = {
     },
     required: ['runId'],
   },
-  execute: async (toolCallId, params) => {
+  execute: async (_toolCallId, params) => {
     const { runId } = params as { runId: string };
     const store = useWorkflowStore.getState();
 
@@ -105,7 +105,7 @@ export const readNodeArtifactTool: AgentTool = {
     },
     required: ['runId', 'nodeId'],
   },
-  execute: async (toolCallId, params) => {
+  execute: async (_toolCallId, params) => {
     const { runId, nodeId } = params as { runId: string; nodeId: string };
 
     try {
@@ -387,7 +387,7 @@ export const getNodeHistoryTool: AgentTool = {
     },
     required: ['runId', 'nodeId'],
   },
-  execute: async (toolCallId, params) => {
+  execute: async (_toolCallId, params) => {
     const { runId, nodeId } = params as { runId: string; nodeId: string };
 
     try {
