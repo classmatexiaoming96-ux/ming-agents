@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,21 +14,29 @@ import (
 )
 
 type clarificationRun struct {
-	AgentType  string
-	SessionID  string
-	Prompt     string
-	PromptFile string
-	OutFile    string
-	ExitFile   string
+	AgentType   string
+	SessionID   string
+	Prompt      string
+	PromptFile  string
+	OutFile     string
+	ExitFile    string
+	HistoryFile string
+	Session     AgentSession
 }
 
 type clarificationOutput struct {
-	AgentType string
-	SessionID string
-	Status    string
-	ExitCode  int
-	Output    string
-	Err       error
+	AgentType   string
+	SessionID   string
+	Status      string
+	ExitCode    int
+	Output      string
+	Err         error
+	PromptFile  string
+	OutFile     string
+	ExitFile    string
+	RepoRoot    string
+	HistoryFile string
+	Session     AgentSession
 }
 
 func RunClarification(ctx context.Context, repoRoot, userInput string) (string, error) {
@@ -49,6 +58,20 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 		newClarificationRun(runID, nodeDir, "codex", userInput, 1),
 		newClarificationRun(runID, nodeDir, "claude-code", userInput, 2),
 	}
+
+	// 注册每个 agent session，以便 WaitForApproval 能找到对应 session
+	for i := range runs {
+		session := AgentSession{
+			ID:          runs[i].SessionID,
+			AgentType:   runs[i].AgentType,
+			Status:      AgentSessionPending,
+			HistoryFile: filepath.Join(nodeDir, runs[i].AgentType+".messages.jsonl"),
+		}
+		RegisterAgentSession(session)
+		runs[i].HistoryFile = session.HistoryFile
+		runs[i].Session = session
+	}
+
 	for _, run := range runs {
 		if err := writeTextAtomic(run.PromptFile, run.Prompt); err != nil {
 			_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: NotificationFailed})
@@ -62,10 +85,19 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			outputs[i] = executeClarificationAgent(ctx, repoRoot, runs[i])
+			outputs[i] = executeClarificationAgentWithSession(ctx, repoRoot, runs[i])
 		}(i)
 	}
 	wg.Wait()
+
+	// 每个 agent 独立通过审批门，被拒则重跑（最多3次）
+	for i := range outputs {
+		agentNodeName := "node1:" + outputs[i].AgentType
+		if err := waitForAgentApproval(ctx, repoRoot, &outputs[i], agentNodeName); err != nil {
+			_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: NotificationFailed})
+			return "", err
+		}
+	}
 
 	merged := mergeClarificationOutputs(runID, outputs)
 	target := filepath.Join(repoRoot, "docs", "requirements-clarity.md")
@@ -115,10 +147,14 @@ func executeClarificationAgent(ctx context.Context, repoRoot string, run clarifi
 	defer cancel()
 
 	out := clarificationOutput{
-		AgentType: run.AgentType,
-		SessionID: run.SessionID,
-		Status:    "completed",
-		ExitCode:  0,
+		AgentType:  run.AgentType,
+		SessionID:  run.SessionID,
+		Status:     "completed",
+		ExitCode:   0,
+		PromptFile: run.PromptFile,
+		OutFile:    run.OutFile,
+		ExitFile:   run.ExitFile,
+		RepoRoot:   repoRoot,
 	}
 	var output string
 	var err error
@@ -161,6 +197,71 @@ func executeClarificationAgent(ctx context.Context, repoRoot string, run clarifi
 		out.Output = waitedOutput
 	}
 	return out
+}
+
+// executeClarificationAgentWithSession 在执行后填充 HistoryFile 和 Session
+func executeClarificationAgentWithSession(ctx context.Context, repoRoot string, run clarificationRun) clarificationOutput {
+	out := executeClarificationAgent(ctx, repoRoot, run)
+	out.HistoryFile = run.HistoryFile
+	out.Session = run.Session
+	return out
+}
+
+// waitForAgentApproval 实现单个 agent 的审批门：等待通过，被拒时重跑（最多3次）
+func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificationOutput, agentNodeName string) error {
+	const maxRetries = 3
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// 通知完成
+		_ = EmitNodeNotification(out.SessionID, NodeNotification{
+			RunID:    runIDFromSessionID(out.SessionID),
+			NodeName: agentNodeName,
+			Status:   NotificationCompleted,
+		})
+
+		approvalErr := WaitForApproval(ctx, out.SessionID, agentNodeName)
+		if approvalErr == nil {
+			return nil // 通过
+		}
+		if !errors.Is(approvalErr, ErrApprovalRejected) {
+			return approvalErr // 其他错误（非 rejection）
+		}
+
+		// 被拒绝：读取修订指令，追加到 session，重新执行
+		decision, ok, _ := LatestReviewDecision(out.SessionID, agentNodeName)
+		revision := "Please revise your previous output."
+		if ok && !decision.Approved && decision.Reason != "" {
+			revision = decision.Reason
+		}
+		_ = AppendAgentMessage(&SubtaskAgent{Session: out.Session}, AgentMessage{
+			Role:    "user",
+			Content: revision,
+		})
+
+		// 通知进入重跑
+		_ = EmitNodeNotification(out.SessionID, NodeNotification{
+			RunID:    runIDFromSessionID(out.SessionID),
+			NodeName: agentNodeName,
+			Status:   NotificationStarted,
+		})
+
+		// 重新执行该 agent（带修订指令追加到 prompt）
+		extraPrompt := fmt.Sprintf("\n# Revision Request\nPlease revise your previous clarification based on this feedback: %s", revision)
+		newPrompt := out.Session.ID + extraPrompt
+		newRun := clarificationRun{
+			AgentType:   out.AgentType,
+			SessionID:   out.SessionID,
+			Prompt:      newPrompt,
+			PromptFile:  out.PromptFile,
+			OutFile:     out.OutFile,
+			ExitFile:    out.ExitFile,
+			HistoryFile: out.HistoryFile,
+			Session:     out.Session,
+		}
+		*out = executeClarificationAgentWithSession(ctx, repoRoot, newRun)
+	}
+
+	return fmt.Errorf("agent %s exceeded max revision attempts", out.AgentType)
 }
 
 func renderClarificationPrompt(agentType, userInput string) string {

@@ -17,6 +17,8 @@ var agentSessionRegistry = struct {
 	sessions map[string]AgentSession
 }{sessions: map[string]AgentSession{}}
 
+var ErrApprovalRejected = errors.New("approval rejected")
+
 func BuildSubtaskAgents(repoRoot, nodeDir string, plan *Plan) ([]SubtaskAgent, error) {
 	if err := validatePlan(plan); err != nil {
 		return nil, err
@@ -194,10 +196,15 @@ func WaitForApproval(ctx context.Context, sessionID, nodeName string) error {
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if approved, err := historyHasApproval(session.HistoryFile, nodeName); err != nil {
+		decision, ok, err := latestReviewDecision(session.HistoryFile, sessionID, nodeName)
+		if err != nil {
 			return err
-		} else if approved {
-			return nil
+		}
+		if ok {
+			if decision.Approved {
+				return nil
+			}
+			return ErrApprovalRejected
 		}
 		select {
 		case <-ctx.Done():
@@ -205,6 +212,32 @@ func WaitForApproval(ctx context.Context, sessionID, nodeName string) error {
 		case <-tick.C:
 		}
 	}
+}
+
+func RejectSession(sessionID, nodeName string, decision ReviewDecision) error {
+	session, err := registeredAgentSession(sessionID)
+	if err != nil {
+		return err
+	}
+	decision.Approved = false
+	if decision.SessionID == "" {
+		decision.SessionID = sessionID
+	}
+	if decision.NodeName == "" {
+		decision.NodeName = nodeName
+	}
+	if decision.Timestamp == "" {
+		decision.Timestamp = time.Now().Format(time.RFC3339)
+	}
+	data, err := json.Marshal(decision)
+	if err != nil {
+		return err
+	}
+	agent := &SubtaskAgent{Session: session}
+	return AppendAgentMessage(agent, AgentMessage{
+		Role:    "rejection",
+		Content: string(data),
+	})
 }
 
 func ApproveSession(sessionID, nodeName, message string) error {
@@ -232,6 +265,14 @@ func ApproveSession(sessionID, nodeName, message string) error {
 	})
 }
 
+func LatestReviewDecision(sessionID, nodeName string) (ReviewDecision, bool, error) {
+	session, err := registeredAgentSession(sessionID)
+	if err != nil {
+		return ReviewDecision{}, false, err
+	}
+	return latestReviewDecision(session.HistoryFile, sessionID, nodeName)
+}
+
 func registeredAgentSession(sessionID string) (AgentSession, error) {
 	agentSessionRegistry.RLock()
 	defer agentSessionRegistry.RUnlock()
@@ -243,13 +284,24 @@ func registeredAgentSession(sessionID string) (AgentSession, error) {
 }
 
 func historyHasApproval(path, nodeName string) (bool, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
+	decision, ok, err := latestReviewDecision(path, "", nodeName)
 	if err != nil {
 		return false, err
 	}
+	return ok && decision.Approved, nil
+}
+
+func latestReviewDecision(path, sessionID, nodeName string) (ReviewDecision, bool, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return ReviewDecision{}, false, nil
+	}
+	if err != nil {
+		return ReviewDecision{}, false, err
+	}
+	var decision ReviewDecision
+	var hasDecision bool
+	var waitingForNode bool
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -258,11 +310,72 @@ func historyHasApproval(path, nodeName string) (bool, error) {
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue
 		}
-		if msg.Role == "approval" && strings.Contains(msg.Content, `"node_name":"`+nodeName+`"`) {
-			return true, nil
+		if msg.Role == "approval_request" && messageReferencesReviewTarget(msg.Content, sessionID, nodeName) {
+			waitingForNode = true
+			hasDecision = false
+			decision = ReviewDecision{}
+			continue
+		}
+		if !waitingForNode {
+			continue
+		}
+		switch msg.Role {
+		case "approval":
+			if messageReferencesReviewTarget(msg.Content, sessionID, nodeName) {
+				decision = ReviewDecision{
+					Approved:   true,
+					SessionID:  sessionID,
+					NodeName:   nodeName,
+					Timestamp:  msg.Timestamp,
+					Reason:     strings.TrimSpace(msg.Content),
+					RejectType: "",
+				}
+				hasDecision = true
+			}
+		case "rejection":
+			var rejected ReviewDecision
+			if err := json.Unmarshal([]byte(msg.Content), &rejected); err != nil {
+				continue
+			}
+			if rejected.NodeName == nodeName && decisionReferencesSession(rejected.SessionID, sessionID) {
+				if rejected.Timestamp == "" {
+					rejected.Timestamp = msg.Timestamp
+				}
+				decision = rejected
+				hasDecision = true
+			}
 		}
 	}
-	return false, nil
+	return decision, hasDecision, nil
+}
+
+func messageReferencesReviewTarget(content, sessionID, nodeName string) bool {
+	if request, ok := parseApprovalRequest(content); ok {
+		return request.NodeName == nodeName && decisionReferencesSession(request.SessionID, sessionID)
+	}
+	if !strings.Contains(content, `"node_name":"`+nodeName+`"`) {
+		return false
+	}
+	return sessionID == "" || !strings.Contains(content, `"session_id":`) || strings.Contains(content, `"session_id":"`+sessionID+`"`)
+}
+
+func parseApprovalRequest(content string) (ApprovalRequest, bool) {
+	var request ApprovalRequest
+	if err := json.Unmarshal([]byte(content), &request); err == nil {
+		return request, true
+	}
+	firstLine := content
+	if idx := strings.IndexByte(content, '\n'); idx >= 0 {
+		firstLine = content[:idx]
+	}
+	if err := json.Unmarshal([]byte(firstLine), &request); err == nil {
+		return request, true
+	}
+	return ApprovalRequest{}, false
+}
+
+func decisionReferencesSession(decisionSessionID, targetSessionID string) bool {
+	return targetSessionID == "" || decisionSessionID == "" || decisionSessionID == targetSessionID
 }
 
 func runIDFromSessionID(sessionID string) string {

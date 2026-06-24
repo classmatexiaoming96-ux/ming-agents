@@ -58,10 +58,13 @@ type RunState struct {
 type AgentSessionStatus string
 
 const (
-	AgentSessionPending   AgentSessionStatus = "PENDING"
-	AgentSessionRunning   AgentSessionStatus = "RUNNING"
-	AgentSessionCompleted AgentSessionStatus = "COMPLETED"
-	AgentSessionFailed    AgentSessionStatus = "FAILED"
+	AgentSessionPending     AgentSessionStatus = "PENDING"
+	AgentSessionRunning     AgentSessionStatus = "RUNNING"
+	AgentSessionCompleted   AgentSessionStatus = "COMPLETED"
+	AgentSessionFailed      AgentSessionStatus = "FAILED"
+	AgentWaitingApproval    AgentSessionStatus = "WAITING_APPROVAL"
+	AgentWaitingRevision    AgentSessionStatus = "WAITING_REVISION"
+	AgentRevisionInProgress AgentSessionStatus = "REVISION_IN_PROGRESS"
 )
 
 type AgentMessage struct {
@@ -115,4 +118,20 @@ type ApprovalRequest struct {
 	NodeName  string `json:"node_name"`
 	Status    string `json:"status"`
 	Timestamp string `json:"timestamp"`
+}
+
+const (
+	RejectTypeReplan        = "replan"
+	RejectTypeResubtask     = "resubtask"
+	RejectTypeReviseSubtask = "revise_subtask"
+)
+
+type ReviewDecision struct {
+	Approved    bool   `json:"approved"`
+	Reason      string `json:"reason"`
+	RejectType  string `json:"reject_type"`
+	ResumePoint string `json:"resume_point"`
+	SessionID   string `json:"session_id"`
+	NodeName    string `json:"node_name"`
+	Timestamp   string `json:"timestamp"`
 }

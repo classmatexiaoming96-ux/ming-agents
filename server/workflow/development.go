@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -148,52 +149,103 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 		agent.Session.Status = AgentSessionRunning
 		_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationStarted})
 	}
-	prompt := renderDevelopmentPrompt(repoRoot, st, sessionID, plan, issues)
-	_ = writeTextAtomic(promptFile, prompt)
-	if agent != nil {
-		_ = AppendAgentMessage(agent, AgentMessage{Role: "system", Content: prompt})
-	}
 
 	result := &SubtaskResult{Subtask: st, SessionID: sessionID, Agent: agent, OutFile: outFile, ExitFile: exitFile, Status: "completed"}
-	runCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, "codex", "exec", prompt)
-	cmd.Dir = workDir
-	output, err := cmd.CombinedOutput()
-	result.Output = string(output)
-	result.Err = err
-	if err != nil {
-		result.Status = "failed"
-		result.ExitCode = 1
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
+	execute := func(currentPromptFile, currentOutFile, currentExitFile string, currentIssues []ReviewIssue) {
+		prompt := renderDevelopmentPrompt(repoRoot, st, sessionID, plan, currentIssues)
+		_ = writeTextAtomic(currentPromptFile, prompt)
+		if agent != nil {
+			agent.Session.Status = AgentSessionRunning
+			_ = AppendAgentMessage(agent, AgentMessage{Role: "system", Content: prompt})
 		}
-	} else {
-		result.ExitCode = 0
-	}
-	if runCtx.Err() != nil {
-		result.Status = "failed"
-		result.Err = runCtx.Err()
-		result.ExitCode = 1
-	}
-	if agent != nil {
-		if result.Status == "failed" {
-			agent.Session.Status = AgentSessionFailed
-			_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationFailed})
+
+		runCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(runCtx, "codex", "exec", prompt)
+		cmd.Dir = workDir
+		output, err := cmd.CombinedOutput()
+		result.Output = string(output)
+		result.Err = err
+		result.Status = "completed"
+		if err != nil {
+			result.Status = "failed"
+			result.ExitCode = 1
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				result.ExitCode = exitErr.ExitCode()
+			}
 		} else {
-			agent.Session.Status = AgentSessionCompleted
-			_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationCompleted})
+			result.ExitCode = 0
 		}
-		_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: result.Output})
-		if approvalErr := WaitForApproval(ctx, sessionID, "subtask:"+st.ID); approvalErr != nil {
+		if runCtx.Err() != nil {
+			result.Status = "failed"
+			result.Err = runCtx.Err()
+			result.ExitCode = 1
+		}
+		if agent != nil {
+			if result.Status == "failed" {
+				agent.Session.Status = AgentSessionFailed
+				_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationFailed})
+			} else {
+				agent.Session.Status = AgentSessionCompleted
+				_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationCompleted})
+			}
+			_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: result.Output})
+		}
+		_ = os.WriteFile(currentOutFile, output, 0644)
+		_ = os.WriteFile(currentExitFile, []byte(fmt.Sprintf("%d\n", result.ExitCode)), 0644)
+	}
+
+	execute(promptFile, outFile, exitFile, issues)
+	if agent != nil {
+		approvalErr := waitForSubtaskApproval(ctx, agent, sessionID, "subtask:"+st.ID)
+		if errors.Is(approvalErr, ErrApprovalRejected) {
+			result.Err = nil
+			revisionIssues := append([]ReviewIssue{}, issues...)
+			revision := "Revision requested by reviewer."
+			if decision, ok, err := LatestReviewDecision(sessionID, "subtask:"+st.ID); err == nil && ok {
+				if reason := strings.TrimSpace(decision.Reason); reason != "" {
+					revision = reason
+				}
+			}
+			_ = AppendAgentMessage(agent, AgentMessage{Role: "user", Content: revision})
+			revisionIssues = append(revisionIssues, ReviewIssue{
+				SubtaskID:     st.ID,
+				SessionID:     sessionID,
+				Severity:      "blocking",
+				Description:   revision,
+				RequiredFixes: []string{revision},
+			})
+			agent.Session.Status = AgentRevisionInProgress
+			_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationStarted})
+			revisionSuffix := suffix + "-revision"
+			execute(
+				filepath.Join(nodeDir, revisionSuffix+".prompt.md"),
+				filepath.Join(nodeDir, revisionSuffix+".out.md"),
+				filepath.Join(nodeDir, revisionSuffix+".exit"),
+				revisionIssues,
+			)
+			approvalErr = waitForSubtaskApproval(ctx, agent, sessionID, "subtask:"+st.ID)
+		}
+		if approvalErr != nil {
 			result.Status = "failed"
 			result.Err = approvalErr
 			result.ExitCode = 1
 		}
 	}
-	_ = os.WriteFile(outFile, output, 0644)
-	_ = os.WriteFile(exitFile, []byte(fmt.Sprintf("%d\n", result.ExitCode)), 0644)
 	return result
+}
+
+func waitForSubtaskApproval(ctx context.Context, agent *SubtaskAgent, sessionID, nodeName string) error {
+	if agent != nil {
+		agent.Session.Status = AgentWaitingApproval
+	}
+	if err := WaitForApproval(ctx, sessionID, nodeName); err != nil {
+		if errors.Is(err, ErrApprovalRejected) && agent != nil {
+			agent.Session.Status = AgentWaitingRevision
+		}
+		return err
+	}
+	return nil
 }
 
 func renderDevelopmentPrompt(repoRoot string, st Subtask, sessionID string, plan *Plan, issues []ReviewIssue) string {

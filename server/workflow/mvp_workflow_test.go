@@ -284,6 +284,60 @@ func TestWaitForApprovalWritesRequestAndUnblocksOnApproval(t *testing.T) {
 	}
 }
 
+func TestLatestReviewDecisionIgnoresOtherAgentDecisionsForSameNode(t *testing.T) {
+	dir := t.TempDir()
+	historyOne := filepath.Join(dir, "agent-one.messages.jsonl")
+	historyTwo := filepath.Join(dir, "agent-two.messages.jsonl")
+	RegisterAgentSession(AgentSession{
+		ID:          "agent-one",
+		AgentType:   "codex",
+		Status:      AgentWaitingApproval,
+		HistoryFile: historyOne,
+	})
+	RegisterAgentSession(AgentSession{
+		ID:          "agent-two",
+		AgentType:   "codex",
+		Status:      AgentWaitingApproval,
+		HistoryFile: historyTwo,
+	})
+
+	requestOne, _ := json.Marshal(ApprovalRequest{SessionID: "agent-one", NodeName: "node3", Status: "WAITING"})
+	requestTwo, _ := json.Marshal(ApprovalRequest{SessionID: "agent-two", NodeName: "node3", Status: "WAITING"})
+	rejectOne, _ := json.Marshal(ReviewDecision{
+		Approved:    false,
+		Reason:      "agent one needs revision",
+		RejectType:  RejectTypeReviseSubtask,
+		ResumePoint: "node3:one",
+		SessionID:   "agent-one",
+		NodeName:    "node3",
+	})
+	if err := AppendAgentMessage(&SubtaskAgent{Session: AgentSession{ID: "agent-one", HistoryFile: historyOne}}, AgentMessage{Role: "approval_request", Content: string(requestOne)}); err != nil {
+		t.Fatalf("append request one: %v", err)
+	}
+	if err := AppendAgentMessage(&SubtaskAgent{Session: AgentSession{ID: "agent-one", HistoryFile: historyOne}}, AgentMessage{Role: "rejection", Content: string(rejectOne)}); err != nil {
+		t.Fatalf("append rejection one: %v", err)
+	}
+	if err := AppendAgentMessage(&SubtaskAgent{Session: AgentSession{ID: "agent-two", HistoryFile: historyTwo}}, AgentMessage{Role: "approval_request", Content: string(requestTwo)}); err != nil {
+		t.Fatalf("append request two: %v", err)
+	}
+	if err := AppendAgentMessage(&SubtaskAgent{Session: AgentSession{ID: "agent-two", HistoryFile: historyTwo}}, AgentMessage{Role: "rejection", Content: string(rejectOne)}); err != nil {
+		t.Fatalf("append cross-agent rejection: %v", err)
+	}
+
+	if _, ok, err := LatestReviewDecision("agent-two", "node3"); err != nil {
+		t.Fatalf("LatestReviewDecision(agent-two) error = %v", err)
+	} else if ok {
+		t.Fatal("LatestReviewDecision(agent-two) accepted rejection for agent-one")
+	}
+	decision, ok, err := LatestReviewDecision("agent-one", "node3")
+	if err != nil {
+		t.Fatalf("LatestReviewDecision(agent-one) error = %v", err)
+	}
+	if !ok || decision.SessionID != "agent-one" || decision.Approved {
+		t.Fatalf("LatestReviewDecision(agent-one) = %+v, %v; want rejection for agent-one", decision, ok)
+	}
+}
+
 func readHistoryMessages(t *testing.T, path string) []AgentMessage {
 	t.Helper()
 	data, err := os.ReadFile(path)
