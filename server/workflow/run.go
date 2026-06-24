@@ -18,8 +18,14 @@ func Run(ctx context.Context, repoRoot, userInput string) (runID string, err err
 	if err != nil {
 		return "", err
 	}
+	if err := WaitForApproval(ctx, WorkflowNodeSession(repoRoot, clarRunID, "node1").ID, "node1"); err != nil {
+		return clarRunID, err
+	}
 	plan, err := RunPlanning(ctx, repoRoot, clarFile)
 	if err != nil {
+		return clarRunID, err
+	}
+	if err := WaitForApproval(ctx, WorkflowNodeSession(repoRoot, clarRunID, "node2").ID, "node2"); err != nil {
 		return clarRunID, err
 	}
 	plan.TaskID = clarRunID

@@ -1,11 +1,13 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidatePlanRejectsInvalidPlans(t *testing.T) {
@@ -212,6 +214,121 @@ func TestAppendAgentMessagePersistsHistory(t *testing.T) {
 	if persisted.Role != "user" || persisted.Content != msg.Content {
 		t.Fatalf("persisted = %+v", persisted)
 	}
+}
+
+func TestEmitNodeNotificationPersistsLifecycleEvent(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "session-node1"
+	history := filepath.Join(dir, "node1.messages.jsonl")
+	RegisterAgentSession(AgentSession{
+		ID:          sessionID,
+		AgentType:   "workflow",
+		Status:      AgentSessionRunning,
+		HistoryFile: history,
+	})
+
+	notification := NodeNotification{
+		RunID:    "run-1",
+		NodeName: "node1",
+		Status:   NotificationStarted,
+	}
+	if err := EmitNodeNotification(sessionID, notification); err != nil {
+		t.Fatalf("EmitNodeNotification() error = %v", err)
+	}
+
+	messages := readHistoryMessages(t, history)
+	if len(messages) != 1 {
+		t.Fatalf("len(messages) = %d, want 1", len(messages))
+	}
+	if messages[0].Role != "notification" {
+		t.Fatalf("role = %q, want notification", messages[0].Role)
+	}
+	if !strings.Contains(messages[0].Content, `"status":"STARTED"`) {
+		t.Fatalf("notification content = %s", messages[0].Content)
+	}
+}
+
+func TestWaitForApprovalWritesRequestAndUnblocksOnApproval(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "session-node2"
+	history := filepath.Join(dir, "node2.messages.jsonl")
+	RegisterAgentSession(AgentSession{
+		ID:          sessionID,
+		AgentType:   "workflow",
+		Status:      AgentSessionRunning,
+		HistoryFile: history,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForApproval(ctx, sessionID, "node2")
+	}()
+
+	waitForHistoryRole(t, history, "approval_request")
+	if err := ApproveSession(sessionID, "node2", "approved by test"); err != nil {
+		t.Fatalf("ApproveSession() error = %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForApproval() error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("WaitForApproval() did not unblock")
+	}
+	messages := readHistoryMessages(t, history)
+	if messages[len(messages)-1].Role != "approval" {
+		t.Fatalf("last role = %q, want approval", messages[len(messages)-1].Role)
+	}
+}
+
+func readHistoryMessages(t *testing.T, path string) []AgentMessage {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(history) error = %v", err)
+	}
+	var messages []AgentMessage
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var msg AgentMessage
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("unmarshal history line %q: %v", line, err)
+		}
+		messages = append(messages, msg)
+	}
+	return messages
+}
+
+func waitForHistoryRole(t *testing.T, path, role string) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for history role %q", role)
+		case <-tick.C:
+			for _, msg := range readHistoryMessagesIfExists(t, path) {
+				if msg.Role == role {
+					return
+				}
+			}
+		}
+	}
+}
+
+func readHistoryMessagesIfExists(t *testing.T, path string) []AgentMessage {
+	t.Helper()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	return readHistoryMessages(t, path)
 }
 
 func validSubtask(id string) Subtask {

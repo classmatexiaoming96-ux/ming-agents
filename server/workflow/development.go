@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -23,11 +22,15 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 	if err := os.MkdirAll(nodeDir, 0755); err != nil {
 		return nil, err
 	}
+	nodeSession := WorkflowNodeSession(repoRoot, runID, "node3")
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationStarted})
 	agents, err := BuildSubtaskAgents(repoRoot, nodeDir, plan)
 	if err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return nil, err
 	}
 	if err := WriteSubtaskAgentManifest(filepath.Join(nodeDir, "agents.json"), agents); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return nil, err
 	}
 	agentsBySubtask := subtaskAgentsByID(agents)
@@ -40,6 +43,7 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 	results := runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, nil, 0)
 	report, reviewOut, err := RunReview(ctx, repoRoot, nodeDir, plan, results)
 	if err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return nil, err
 	}
 	if !report.Passed {
@@ -48,12 +52,14 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 			results = append(results, runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, retryTargets, 1)...)
 			report, reviewOut, err = RunReview(ctx, repoRoot, nodeDir, plan, results)
 			if err != nil {
+				_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 				return nil, err
 			}
 		}
 	}
 	agentsPath := filepath.Join(nodeDir, "agents.json")
 	if err := WriteSubtaskAgentManifest(agentsPath, agents); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return nil, err
 	}
 
@@ -76,17 +82,22 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 	}
 	outputPath := filepath.Join(repoRoot, "docs", "output.md")
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return nil, err
 	}
 	if err := writeTextAtomic(outputPath, renderOutputMarkdown(runID, plan, results, report, reviewOut)); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return nil, err
 	}
 	if err := writeJSONAtomic(filepath.Join(repoRoot, ".workflow", "runs", runID, "state.json"), finalState); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return nil, err
 	}
 	if !report.Passed {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return finalState, fmt.Errorf("review found blocking issues")
 	}
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationCompleted})
 	return finalState, nil
 }
 
@@ -110,15 +121,9 @@ func runDevelopmentSubtasks(ctx context.Context, repoRoot, nodeDir string, plan 
 		}
 	}
 	results := make([]*SubtaskResult, len(subtasks))
-	var wg sync.WaitGroup
 	for i, st := range subtasks {
-		wg.Add(1)
-		go func(i int, st Subtask) {
-			defer wg.Done()
-			results[i] = runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agents[st.ID], st, i+1, retry, only[st.ID])
-		}(i, st)
+		results[i] = runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agents[st.ID], st, i+1, retry, only[st.ID])
 	}
-	wg.Wait()
 	return results
 }
 
@@ -141,6 +146,7 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 			exitFile = agent.ExitFile
 		}
 		agent.Session.Status = AgentSessionRunning
+		_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationStarted})
 	}
 	prompt := renderDevelopmentPrompt(repoRoot, st, sessionID, plan, issues)
 	_ = writeTextAtomic(promptFile, prompt)
@@ -173,10 +179,17 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 	if agent != nil {
 		if result.Status == "failed" {
 			agent.Session.Status = AgentSessionFailed
+			_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationFailed})
 		} else {
 			agent.Session.Status = AgentSessionCompleted
+			_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationCompleted})
 		}
 		_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: result.Output})
+		if approvalErr := WaitForApproval(ctx, sessionID, "subtask:"+st.ID); approvalErr != nil {
+			result.Status = "failed"
+			result.Err = approvalErr
+			result.ExitCode = 1
+		}
 	}
 	_ = os.WriteFile(outFile, output, 0644)
 	_ = os.WriteFile(exitFile, []byte(fmt.Sprintf("%d\n", result.ExitCode)), 0644)

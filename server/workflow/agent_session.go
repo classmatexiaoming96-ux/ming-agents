@@ -1,14 +1,21 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
+var agentSessionRegistry = struct {
+	sync.RWMutex
+	sessions map[string]AgentSession
+}{sessions: map[string]AgentSession{}}
 
 func BuildSubtaskAgents(repoRoot, nodeDir string, plan *Plan) ([]SubtaskAgent, error) {
 	if err := validatePlan(plan); err != nil {
@@ -37,6 +44,7 @@ func BuildSubtaskAgents(repoRoot, nodeDir string, plan *Plan) ([]SubtaskAgent, e
 			OutFile:    filepath.Join(nodeDir, base+".out.md"),
 			ExitFile:   filepath.Join(nodeDir, base+".exit"),
 		}
+		RegisterAgentSession(agent.Session)
 		agents = append(agents, agent)
 	}
 	return agents, nil
@@ -119,4 +127,152 @@ func AppendAgentMessage(agent *SubtaskAgent, msg AgentMessage) error {
 	}
 	agent.Session.Messages = append(agent.Session.Messages, msg)
 	return nil
+}
+
+func RegisterAgentSession(session AgentSession) {
+	if session.ID == "" || session.HistoryFile == "" {
+		return
+	}
+	agentSessionRegistry.Lock()
+	defer agentSessionRegistry.Unlock()
+	agentSessionRegistry.sessions[session.ID] = session
+}
+
+func WorkflowNodeSession(repoRoot, runID, nodeName string) AgentSession {
+	session := AgentSession{
+		ID:          NewPTYSessionID(runID, nodeName, "workflow", 0),
+		AgentType:   "workflow",
+		Status:      AgentSessionRunning,
+		HistoryFile: filepath.Join(repoRoot, ".workflow", "runs", runID, nodeName, nodeName+".messages.jsonl"),
+	}
+	RegisterAgentSession(session)
+	return session
+}
+
+func EmitNodeNotification(sessionID string, notification NodeNotification) error {
+	session, err := registeredAgentSession(sessionID)
+	if err != nil {
+		return err
+	}
+	if notification.Timestamp == "" {
+		notification.Timestamp = time.Now().Format(time.RFC3339)
+	}
+	data, err := json.Marshal(notification)
+	if err != nil {
+		return err
+	}
+	agent := &SubtaskAgent{Session: session}
+	return AppendAgentMessage(agent, AgentMessage{
+		Role:    "notification",
+		Content: string(data),
+	})
+}
+
+func WaitForApproval(ctx context.Context, sessionID, nodeName string) error {
+	session, err := registeredAgentSession(sessionID)
+	if err != nil {
+		return err
+	}
+	request := ApprovalRequest{
+		SessionID: sessionID,
+		NodeName:  nodeName,
+		Status:    "WAITING",
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	if runID := runIDFromSessionID(sessionID); runID != "" {
+		request.RunID = runID
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	agent := &SubtaskAgent{Session: session}
+	if err := AppendAgentMessage(agent, AgentMessage{Role: "approval_request", Content: string(data)}); err != nil {
+		return err
+	}
+
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if approved, err := historyHasApproval(session.HistoryFile, nodeName); err != nil {
+			return err
+		} else if approved {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+func ApproveSession(sessionID, nodeName, message string) error {
+	session, err := registeredAgentSession(sessionID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "approved"
+	}
+	data, err := json.Marshal(ApprovalRequest{
+		RunID:     runIDFromSessionID(sessionID),
+		SessionID: sessionID,
+		NodeName:  nodeName,
+		Status:    "APPROVED",
+		Timestamp: time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		return err
+	}
+	agent := &SubtaskAgent{Session: session}
+	return AppendAgentMessage(agent, AgentMessage{
+		Role:    "approval",
+		Content: string(data) + "\n" + message,
+	})
+}
+
+func registeredAgentSession(sessionID string) (AgentSession, error) {
+	agentSessionRegistry.RLock()
+	defer agentSessionRegistry.RUnlock()
+	session, ok := agentSessionRegistry.sessions[sessionID]
+	if !ok {
+		return AgentSession{}, fmt.Errorf("agent session %q is not registered", sessionID)
+	}
+	return session, nil
+}
+
+func historyHasApproval(path, nodeName string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var msg AgentMessage
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			continue
+		}
+		if msg.Role == "approval" && strings.Contains(msg.Content, `"node_name":"`+nodeName+`"`) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func runIDFromSessionID(sessionID string) string {
+	const prefix = "pty-"
+	trimmed := strings.TrimPrefix(sessionID, prefix)
+	if trimmed == sessionID {
+		return ""
+	}
+	if idx := strings.Index(trimmed, "-node"); idx >= 0 {
+		return trimmed[:idx]
+	}
+	return ""
 }

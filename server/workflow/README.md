@@ -23,15 +23,21 @@ user input
   |
   v
 Node 1: clarification
+  emits STARTED/COMPLETED/FAILED
   writes docs/requirements-clarity.md
+  waits for human approval
   |
   v
 Node 2: planning
+  emits STARTED/COMPLETED/FAILED
   writes docs/planning.md
+  waits for human approval
   |
   v
 Node 3: development + review
   creates one subtask agent session per planned subtask
+  emits node and subtask STARTED/COMPLETED/FAILED
+  waits for human approval after each subtask
   writes docs/output.md
 ```
 
@@ -72,19 +78,21 @@ It then calls the public workflow package API:
 runID, err := workflow.Run(ctx, repoRoot, userInput)
 ```
 
-The current `workflow.Run` implementation is synchronous: it returns after clarification, planning, development, and review have finished or after an error stops the run. A chatbot backend can call it synchronously for MVP usage, or run it in a background worker if it wants to acknowledge immediately. The minimum user-visible start or completion response should include:
+The current `workflow.Run` implementation is synchronous and approval-gated: it returns after clarification, planning, development, review, and all required human approvals have completed, or after an error stops the run. A chatbot backend should normally run it in a background worker so the conversation can acknowledge immediately and later write approval messages. The minimum user-visible start response should include:
 
 ```text
 已启动 workflow
 run_id: <run_id>
 ```
 
-The workflow package writes artifacts that the chatbot can read back into conversation responses:
+The workflow package writes artifacts, notifications, and approval requests that the chatbot can read back into conversation responses:
 
 - After Node 1, it can summarize `docs/requirements-clarity.md`: ambiguities, assumptions, risks, and proposed subtasks.
 - After Node 2, it can summarize `docs/planning.md`: task ID, subtask list, repo paths, and acceptance criteria.
 - During or after Node 3, it can answer status questions from `.workflow/runs/<run_id>/state.json`, `node3/agents.json`, per-subtask `*.messages.jsonl` files, and per-session `*.out.md` files.
 - After Node 3, it reports `docs/output.md`: development session results, review status, blocking issues if any, and final output paths.
+- When a node or subtask starts, completes, or fails, it emits a `notification` message to the relevant agent session history.
+- When the workflow needs human approval, it emits an `approval_request` message to the relevant agent session history and blocks until an `approval` message is written.
 
 ### Per-subtask conversation agents
 
@@ -156,16 +164,78 @@ err := workflow.AppendAgentMessage(agent, workflow.AgentMessage{
 
 This package stores the routing/session metadata and history files. The outer chatbot remains responsible for natural-language intent detection, asking disambiguation questions, and deciding whether a routed message should trigger a new development attempt, a status summary, or a plain answer based on that subtask's context.
 
-This MVP workflow does not pause for human approval between nodes. It has an automated review barrier after development and allows one retry pass for blocking review issues. If a future chatbot flow adds human confirmation, that pause/resume behavior belongs in the chatbot or API orchestration layer around this package, not inside `workflow.Run` as currently implemented.
+### Lifecycle notifications
+
+Each workflow node and Node 3 subtask emits lifecycle notifications to its corresponding agent session. The notification is stored as an `AgentMessage` with `role: "notification"` and JSON content:
+
+```go
+type NodeNotification struct {
+    RunID     string
+    NodeName  string
+    Status    NotificationStatus // STARTED, COMPLETED, FAILED
+    Timestamp string
+}
+```
+
+Workflow-level node sessions are stored alongside node artifacts:
+
+```text
+.workflow/runs/<run_id>/node1/node1.messages.jsonl
+.workflow/runs/<run_id>/node2/node2.messages.jsonl
+.workflow/runs/<run_id>/node3/node3.messages.jsonl
+```
+
+Subtask lifecycle notifications are written to the dedicated subtask agent history:
+
+```text
+.workflow/runs/<run_id>/node3/agents/<subtask_id>.messages.jsonl
+```
+
+The chatbot can poll or watch these JSONL files and surface notifications such as `node2 STARTED`, `subtask:api COMPLETED`, or `node3 FAILED` in the user conversation.
+
+### Human approval gates
+
+The MVP now pauses at three boundaries:
+
+- After Node 1 completes, before Node 2 starts.
+- After Node 2 completes, before Node 3 starts.
+- After each Node 3 development subtask completes or fails, before the next subtask or review starts.
+
+The workflow writes an `approval_request` message and blocks through:
+
+```go
+err := workflow.WaitForApproval(ctx, sessionID, nodeName)
+```
+
+The request payload is:
+
+```go
+type ApprovalRequest struct {
+    RunID     string
+    SessionID string
+    NodeName  string
+    Status    string // WAITING or APPROVED
+    Timestamp string
+}
+```
+
+The chatbot should watch for `approval_request` messages, prompt the user to approve or reject the transition, and resume the workflow by writing an approval message:
+
+```go
+err := workflow.ApproveSession(sessionID, nodeName, "approved by user")
+```
+
+For Node 1 and Node 2, `nodeName` is `node1` or `node2`. For Node 3 subtasks, `nodeName` is `subtask:<subtask_id>`. If the user does not approve before the context is canceled, `WaitForApproval` returns the context error and the workflow stops.
 
 For Feishu/Lark usage, the bot can send a notification with the `run_id` and output paths after the workflow finishes, or after a background worker observes a failed state in `.workflow/runs/<run_id>/state.json`. The existing API server has a separate notifier for `WAITING_USER_INPUT` in the older run engine, but this file-backed three-node MVP does not emit that state.
 
 The expected chatbot response model is:
 
-- Start response: confirm that a workflow run has started or completed and show `run_id`.
-- Progress response: if the workflow is run in a background worker, report current node status and point to the relevant artifact.
+- Start response: confirm that a workflow run has started and show `run_id`.
+- Progress response: report lifecycle notifications and point to the relevant artifact.
 - Clarification response: summarize open questions from Node 1.
 - Planning response: show planned subtasks and acceptance criteria from Node 2.
+- Approval response: when an `approval_request` appears, ask the user whether to proceed; on approval, call `ApproveSession`.
 - Completion response: summarize Node 3 review result and link the three stable outputs: `docs/requirements-clarity.md`, `docs/planning.md`, and `docs/output.md`.
 
 ## Node 1: Requirements Clarification
@@ -277,6 +347,7 @@ Node 3 writes per-subtask artifacts under:
 Common artifacts include:
 
 ```text
+node3.messages.jsonl
 agents.json
 agents/<subtask_id>.messages.jsonl
 dev-1.prompt.md
@@ -332,7 +403,11 @@ Durable run metadata and raw agent outputs are stored separately:
     claude-code.prompt.md
     claude-code.out.md
     claude-code.exit
+    node1.messages.jsonl
+  node2/
+    node2.messages.jsonl
   node3/
+    node3.messages.jsonl
     agents.json
     agents/
       <subtask_id>.messages.jsonl

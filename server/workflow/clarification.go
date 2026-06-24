@@ -37,6 +37,8 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 	if err := os.MkdirAll(nodeDir, 0755); err != nil {
 		return "", err
 	}
+	nodeSession := WorkflowNodeSession(repoRoot, runID, "node1")
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: NotificationStarted})
 	_ = writeWorkflowState(repoRoot, runID, map[string]NodeStatus{
 		"node1": NodeRunning,
 		"node2": NodePending,
@@ -49,6 +51,7 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 	}
 	for _, run := range runs {
 		if err := writeTextAtomic(run.PromptFile, run.Prompt); err != nil {
+			_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: NotificationFailed})
 			return "", err
 		}
 	}
@@ -67,9 +70,11 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 	merged := mergeClarificationOutputs(runID, outputs)
 	target := filepath.Join(repoRoot, "docs", "requirements-clarity.md")
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: NotificationFailed})
 		return "", err
 	}
 	if err := writeTextAtomic(target, merged); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: NotificationFailed})
 		return "", err
 	}
 
@@ -79,6 +84,11 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 		state = NodeFailed
 		err = fmt.Errorf("all clarification agents failed")
 	}
+	notifyStatus := NotificationCompleted
+	if err != nil {
+		notifyStatus = NotificationFailed
+	}
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: notifyStatus})
 	_ = writeWorkflowState(repoRoot, runID, map[string]NodeStatus{
 		"node1": state,
 		"node2": NodePending,

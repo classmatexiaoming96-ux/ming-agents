@@ -93,3 +93,26 @@ type SubtaskMessage struct {
 	SessionID string `json:"session_id,omitempty"`
 	Content   string `json:"content"`
 }
+
+type NotificationStatus string
+
+const (
+	NotificationStarted   NotificationStatus = "STARTED"
+	NotificationCompleted NotificationStatus = "COMPLETED"
+	NotificationFailed    NotificationStatus = "FAILED"
+)
+
+type NodeNotification struct {
+	RunID     string             `json:"run_id"`
+	NodeName  string             `json:"node_name"`
+	Status    NotificationStatus `json:"status"`
+	Timestamp string             `json:"timestamp"`
+}
+
+type ApprovalRequest struct {
+	RunID     string `json:"run_id,omitempty"`
+	SessionID string `json:"session_id"`
+	NodeName  string `json:"node_name"`
+	Status    string `json:"status"`
+	Timestamp string `json:"timestamp"`
+}

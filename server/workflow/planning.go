@@ -30,27 +30,35 @@ func RunPlanning(ctx context.Context, repoRoot, clarFile string) (*Plan, error) 
 	if len(clar.AgentSections) == 0 {
 		return nil, fmt.Errorf("no tagged agent sections found in %s", clarFile)
 	}
+	nodeSession := WorkflowNodeSession(repoRoot, clar.RunID, "node2")
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationStarted})
 
 	prompt := renderPlanningPrompt(clar)
 	out, err := runCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
 	if err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
 		return nil, fmt.Errorf("run planning prompt: %w", err)
 	}
 	plan, err := extractPlanJSON(out)
 	if err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
 		return nil, err
 	}
 	if err := validatePlan(plan); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
 		return nil, err
 	}
 
 	target := filepath.Join(repoRoot, "docs", "planning.md")
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
 		return nil, err
 	}
 	if err := writeTextAtomic(target, renderPlanningMarkdown(clar, clarFile, out, plan)); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
 		return nil, fmt.Errorf("write planning file: %w", err)
 	}
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationCompleted})
 	if clar.RunID != "" {
 		_ = writeWorkflowState(repoRoot, clar.RunID, map[string]NodeStatus{
 			"node1": NodeCompleted,
