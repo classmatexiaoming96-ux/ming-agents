@@ -21,6 +21,35 @@ type clarificationContext struct {
 	Raw               string
 }
 
+type planningAgentRun struct {
+	RunID       string
+	AgentID     string
+	AgentType   string
+	SessionID   string
+	Prompt      string
+	PromptFile  string
+	OutFile     string
+	ExitFile    string
+	HistoryFile string
+	Session     AgentSession
+}
+
+type planningAgentOutput struct {
+	AgentType   string
+	SessionID   string
+	Status      string
+	ExitCode    int
+	Output      string
+	Err         error
+	PromptFile  string
+	OutFile     string
+	ExitFile    string
+	HistoryFile string
+	Session     AgentSession
+}
+
+type planningAgentExecutor func(context.Context, string, planningAgentRun) planningAgentOutput
+
 func RunPlanning(ctx context.Context, repoRoot, clarFile string) (*Plan, error) {
 	data, err := os.ReadFile(clarFile)
 	if err != nil {
@@ -30,43 +59,197 @@ func RunPlanning(ctx context.Context, repoRoot, clarFile string) (*Plan, error) 
 	if len(clar.AgentSections) == 0 {
 		return nil, fmt.Errorf("no tagged agent sections found in %s", clarFile)
 	}
-	nodeSession := WorkflowNodeSession(repoRoot, clar.RunID, "node2")
-	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationStarted})
+	runID := clar.RunID
+	if runID == "" {
+		runID = time.Now().Format("20060102-150405")
+		clar.RunID = runID
+	}
+	nodeSession := WorkflowNodeSession(repoRoot, runID, "node2")
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationStarted})
 
 	prompt := renderPlanningPrompt(clar)
-	out, err := runCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
-	if err != nil {
-		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
-		return nil, fmt.Errorf("run planning prompt: %w", err)
+	nodeDir := filepath.Join(repoRoot, ".workflow", "runs", runID, "node2")
+	if err := os.MkdirAll(nodeDir, 0755); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
+		return nil, err
 	}
-	plan, err := extractPlanJSON(out)
+	run := newPlanningAgentRun(runID, nodeDir, "codex", prompt, 1)
+	out := executePlanningAgent(ctx, repoRoot, run)
+	if out.Err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
+		return nil, fmt.Errorf("run planning prompt: %w", out.Err)
+	}
+	if err := waitForPlanningAgentApproval(ctx, repoRoot, &out, run, executePlanningAgent); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
+		return nil, err
+	}
+	if out.Err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
+		return nil, fmt.Errorf("run planning prompt: %w", out.Err)
+	}
+	plan, err := extractPlanJSON(out.Output)
 	if err != nil {
-		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
 		return nil, err
 	}
 	if err := validatePlan(plan); err != nil {
-		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
 		return nil, err
 	}
 
 	target := filepath.Join(repoRoot, "docs", "planning.md")
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
 		return nil, err
 	}
-	if err := writeTextAtomic(target, renderPlanningMarkdown(clar, clarFile, out, plan)); err != nil {
-		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationFailed})
+	if err := writeTextAtomic(target, renderPlanningMarkdown(clar, clarFile, out.Output, plan)); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
 		return nil, fmt.Errorf("write planning file: %w", err)
 	}
-	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: clar.RunID, NodeName: "node2", Status: NotificationCompleted})
-	if clar.RunID != "" {
-		_ = writeWorkflowState(repoRoot, clar.RunID, map[string]NodeStatus{
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationCompleted})
+	if runID != "" {
+		_ = writeWorkflowState(repoRoot, runID, map[string]NodeStatus{
 			"node1": NodeCompleted,
 			"node2": NodeCompleted,
 			"node3": NodePending,
 		}, map[string]any{"planning_file": target})
 	}
 	return plan, nil
+}
+
+func newPlanningAgentRun(runID, nodeDir, agentType, prompt string, index int) planningAgentRun {
+	sessionID := NewPTYSessionID(runID, "node2", agentType, index)
+	agentID := "node2:" + agentType
+	historyFile := filepath.Join(nodeDir, agentType+".messages.jsonl")
+	session := AgentSession{
+		ID:          sessionID,
+		AgentType:   agentType,
+		Status:      AgentSessionPending,
+		HistoryFile: historyFile,
+	}
+	return planningAgentRun{
+		RunID:       runID,
+		AgentID:     agentID,
+		AgentType:   agentType,
+		SessionID:   sessionID,
+		Prompt:      prompt,
+		PromptFile:  filepath.Join(nodeDir, agentType+".prompt.md"),
+		OutFile:     filepath.Join(nodeDir, agentType+".out.md"),
+		ExitFile:    filepath.Join(nodeDir, agentType+".exit"),
+		HistoryFile: historyFile,
+		Session:     session,
+	}
+}
+
+func executePlanningAgent(ctx context.Context, repoRoot string, run planningAgentRun) planningAgentOutput {
+	RegisterAgentSession(run.Session)
+	_ = writeTextAtomic(run.PromptFile, run.Prompt)
+	_ = AppendAgentMessage(&SubtaskAgent{Session: run.Session}, AgentMessage{Role: "system", Content: run.Prompt})
+
+	out := planningAgentOutput{
+		AgentType:   run.AgentType,
+		SessionID:   run.SessionID,
+		Status:      "completed",
+		PromptFile:  run.PromptFile,
+		OutFile:     run.OutFile,
+		ExitFile:    run.ExitFile,
+		HistoryFile: run.HistoryFile,
+		Session:     run.Session,
+	}
+	output, err := runCodexPrompt(ctx, repoRoot, run.Prompt, 30*time.Minute)
+	if err != nil {
+		out.Status = "failed"
+		out.ExitCode = 1
+		out.Err = err
+		if output == "" {
+			output = err.Error()
+		}
+	}
+	out.Output = output
+	_ = os.WriteFile(run.OutFile, []byte(output), 0644)
+	_ = os.WriteFile(run.ExitFile, []byte(fmt.Sprintf("%d\n", out.ExitCode)), 0644)
+	_ = AppendAgentMessage(&SubtaskAgent{Session: run.Session}, AgentMessage{Role: "assistant", Content: output})
+	RegisterAgentSession(AgentSession{
+		ID:          out.SessionID,
+		AgentType:   run.AgentID,
+		Status:      AgentSessionPending,
+		HistoryFile: out.HistoryFile,
+	})
+	return out
+}
+
+func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *planningAgentOutput, run planningAgentRun, execute planningAgentExecutor) error {
+	const maxRevisions = 3
+
+	revisions := 0
+	for {
+		session := out.Session
+		if session.ID == "" {
+			session = run.Session
+		}
+		if session.HistoryFile == "" {
+			session.HistoryFile = run.HistoryFile
+		}
+		session.Status = AgentSessionPending
+		RegisterAgentSession(AgentSession{
+			ID:          out.SessionID,
+			AgentType:   run.AgentID,
+			Status:      AgentSessionPending,
+			HistoryFile: session.HistoryFile,
+		})
+		_ = EmitNodeNotification(out.SessionID, NodeNotification{
+			RunID:    run.RunID,
+			NodeName: run.AgentID,
+			Status:   NotificationCompleted,
+		})
+
+		approvalErr := WaitForApproval(ctx, out.SessionID, run.AgentID)
+		if approvalErr == nil {
+			return nil
+		}
+		if !errors.Is(approvalErr, ErrApprovalRejected) {
+			return approvalErr
+		}
+		if revisions >= maxRevisions {
+			return fmt.Errorf("agent %s exceeded max revision attempts", run.AgentID)
+		}
+
+		decision, ok, _ := LatestReviewDecision(out.SessionID, run.AgentID)
+		revision := "Please revise your previous planning output."
+		if ok && !decision.Approved && strings.TrimSpace(decision.Reason) != "" {
+			revision = strings.TrimSpace(decision.Reason)
+		}
+		_ = AppendAgentMessage(&SubtaskAgent{Session: session}, AgentMessage{
+			Role:    "user",
+			Content: revision,
+		})
+
+		_ = EmitNodeNotification(out.SessionID, NodeNotification{
+			RunID:    run.RunID,
+			NodeName: run.AgentID,
+			Status:   NotificationStarted,
+		})
+
+		nextRun := run
+		nextRun.Prompt = renderPlanningRevisionPrompt(run.Prompt, out.Output, revision)
+		*out = execute(ctx, repoRoot, nextRun)
+		if out.Err != nil {
+			return fmt.Errorf("rerun planning prompt: %w", out.Err)
+		}
+		revisions++
+	}
+}
+
+func renderPlanningRevisionPrompt(originalPrompt, previousOutput, revision string) string {
+	var b strings.Builder
+	b.WriteString(originalPrompt)
+	b.WriteString("\n\n# Previous Planning Output\n")
+	b.WriteString(strings.TrimSpace(previousOutput))
+	b.WriteString("\n\n# Revision Request\n")
+	b.WriteString("Please revise your planning output based on this feedback:\n")
+	b.WriteString(strings.TrimSpace(revision))
+	b.WriteString("\n")
+	return b.String()
 }
 
 func validatePlan(plan *Plan) error {

@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -338,6 +339,102 @@ func TestLatestReviewDecisionIgnoresOtherAgentDecisionsForSameNode(t *testing.T)
 	}
 }
 
+func TestWaitForPlanningAgentApprovalRejectsAndRerunsUntilApproved(t *testing.T) {
+	dir := t.TempDir()
+	run := planningAgentRun{
+		RunID:       "run-planning-revision",
+		AgentID:     "node2:codex",
+		AgentType:   "codex",
+		SessionID:   "planning-agent-session",
+		Prompt:      "initial planning prompt",
+		PromptFile:  filepath.Join(dir, "codex.prompt.md"),
+		OutFile:     filepath.Join(dir, "codex.out.md"),
+		ExitFile:    filepath.Join(dir, "codex.exit"),
+		HistoryFile: filepath.Join(dir, "codex.messages.jsonl"),
+		Session: AgentSession{
+			ID:          "planning-agent-session",
+			AgentType:   "codex",
+			Status:      AgentSessionPending,
+			HistoryFile: filepath.Join(dir, "codex.messages.jsonl"),
+		},
+	}
+	out := planningAgentOutput{
+		AgentType:   run.AgentType,
+		SessionID:   run.SessionID,
+		Status:      "completed",
+		Output:      "first output",
+		PromptFile:  run.PromptFile,
+		OutFile:     run.OutFile,
+		ExitFile:    run.ExitFile,
+		HistoryFile: run.HistoryFile,
+		Session:     run.Session,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	approverDone := make(chan error, 1)
+	go func() {
+		waitForHistoryRoleCount(t, run.HistoryFile, "approval_request", 1)
+		if err := RejectSession(run.SessionID, run.AgentID, ReviewDecision{
+			Reason:     "tighten the plan",
+			RejectType: RejectTypeReplan,
+		}); err != nil {
+			approverDone <- err
+			return
+		}
+		waitForHistoryRoleCount(t, run.HistoryFile, "approval_request", 2)
+		approverDone <- ApproveSession(run.SessionID, run.AgentID, "approved after revision")
+	}()
+
+	executions := 0
+	err := waitForPlanningAgentApproval(ctx, "/repo", &out, run, func(ctx context.Context, repoRoot string, next planningAgentRun) planningAgentOutput {
+		executions++
+		if !strings.Contains(next.Prompt, "tighten the plan") {
+			return planningAgentOutput{Err: errors.New("revision prompt missing reviewer feedback"), Status: "failed"}
+		}
+		next.Session = run.Session
+		return planningAgentOutput{
+			AgentType:   next.AgentType,
+			SessionID:   next.SessionID,
+			Status:      "completed",
+			Output:      "revised output",
+			PromptFile:  next.PromptFile,
+			OutFile:     next.OutFile,
+			ExitFile:    next.ExitFile,
+			HistoryFile: next.HistoryFile,
+			Session:     next.Session,
+		}
+	})
+	if err != nil {
+		t.Fatalf("waitForPlanningAgentApproval() error = %v", err)
+	}
+	if err := <-approverDone; err != nil {
+		t.Fatalf("approval goroutine error = %v", err)
+	}
+	if executions != 1 {
+		t.Fatalf("executions = %d, want 1 revision rerun", executions)
+	}
+	if out.Output != "revised output" {
+		t.Fatalf("out.Output = %q, want revised output", out.Output)
+	}
+	messages := readHistoryMessages(t, run.HistoryFile)
+	var approvals, revisions int
+	for _, msg := range messages {
+		if msg.Role == "approval_request" {
+			approvals++
+		}
+		if msg.Role == "user" && strings.Contains(msg.Content, "tighten the plan") {
+			revisions++
+		}
+	}
+	if approvals != 2 {
+		t.Fatalf("approval requests = %d, want 2", approvals)
+	}
+	if revisions != 1 {
+		t.Fatalf("revision messages = %d, want 1", revisions)
+	}
+}
+
 func readHistoryMessages(t *testing.T, path string) []AgentMessage {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -372,6 +469,29 @@ func waitForHistoryRole(t *testing.T, path, role string) {
 				if msg.Role == role {
 					return
 				}
+			}
+		}
+	}
+}
+
+func waitForHistoryRoleCount(t *testing.T, path, role string, want int) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d history role %q", want, role)
+		case <-tick.C:
+			count := 0
+			for _, msg := range readHistoryMessagesIfExists(t, path) {
+				if msg.Role == role {
+					count++
+				}
+			}
+			if count >= want {
+				return
 			}
 		}
 	}
