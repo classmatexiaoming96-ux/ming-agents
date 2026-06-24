@@ -302,6 +302,9 @@ func latestReviewDecision(path, sessionID, nodeName string) (ReviewDecision, boo
 	var decision ReviewDecision
 	var hasDecision bool
 	var waitingForNode bool
+	var seenRequest bool
+	var preRequestDecision ReviewDecision
+	var hasPreRequestDecision bool
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -312,17 +315,20 @@ func latestReviewDecision(path, sessionID, nodeName string) (ReviewDecision, boo
 		}
 		if msg.Role == "approval_request" && messageReferencesReviewTarget(msg.Content, sessionID, nodeName) {
 			waitingForNode = true
-			hasDecision = false
-			decision = ReviewDecision{}
-			continue
-		}
-		if !waitingForNode {
+			if !seenRequest && hasPreRequestDecision {
+				decision = preRequestDecision
+				hasDecision = true
+			} else {
+				hasDecision = false
+				decision = ReviewDecision{}
+			}
+			seenRequest = true
 			continue
 		}
 		switch msg.Role {
 		case "approval":
 			if messageReferencesReviewTarget(msg.Content, sessionID, nodeName) {
-				decision = ReviewDecision{
+				approved := ReviewDecision{
 					Approved:   true,
 					SessionID:  sessionID,
 					NodeName:   nodeName,
@@ -330,7 +336,13 @@ func latestReviewDecision(path, sessionID, nodeName string) (ReviewDecision, boo
 					Reason:     strings.TrimSpace(msg.Content),
 					RejectType: "",
 				}
-				hasDecision = true
+				if waitingForNode {
+					decision = approved
+					hasDecision = true
+				} else if !seenRequest {
+					preRequestDecision = approved
+					hasPreRequestDecision = true
+				}
 			}
 		case "rejection":
 			var rejected ReviewDecision
@@ -341,8 +353,13 @@ func latestReviewDecision(path, sessionID, nodeName string) (ReviewDecision, boo
 				if rejected.Timestamp == "" {
 					rejected.Timestamp = msg.Timestamp
 				}
-				decision = rejected
-				hasDecision = true
+				if waitingForNode {
+					decision = rejected
+					hasDecision = true
+				} else if !seenRequest {
+					preRequestDecision = rejected
+					hasPreRequestDecision = true
+				}
 			}
 		}
 	}

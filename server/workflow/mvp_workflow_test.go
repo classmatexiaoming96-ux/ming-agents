@@ -285,6 +285,27 @@ func TestWaitForApprovalWritesRequestAndUnblocksOnApproval(t *testing.T) {
 	}
 }
 
+func TestWaitForApprovalAcceptsDecisionWrittenBeforeRequest(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "session-preapproved"
+	history := filepath.Join(dir, "preapproved.messages.jsonl")
+	RegisterAgentSession(AgentSession{
+		ID:          sessionID,
+		AgentType:   "codex",
+		Status:      AgentSessionRunning,
+		HistoryFile: history,
+	})
+	if err := ApproveSession(sessionID, "node2:codex", "approved before request"); err != nil {
+		t.Fatalf("ApproveSession() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := WaitForApproval(ctx, sessionID, "node2:codex"); err != nil {
+		t.Fatalf("WaitForApproval() error = %v", err)
+	}
+}
+
 func TestLatestReviewDecisionIgnoresOtherAgentDecisionsForSameNode(t *testing.T) {
 	dir := t.TempDir()
 	historyOne := filepath.Join(dir, "agent-one.messages.jsonl")
@@ -432,6 +453,267 @@ func TestWaitForPlanningAgentApprovalRejectsAndRerunsUntilApproved(t *testing.T)
 	}
 	if revisions != 1 {
 		t.Fatalf("revision messages = %d, want 1", revisions)
+	}
+}
+
+func TestWaitForPlanningAgentApprovalExceedsMaxRevisions(t *testing.T) {
+	dir := t.TempDir()
+	run := planningAgentRun{
+		RunID:       "run-planning-max-revisions",
+		AgentID:     "node2:codex",
+		AgentType:   "codex",
+		SessionID:   "planning-agent-session-max",
+		Prompt:      "initial planning prompt",
+		PromptFile:  filepath.Join(dir, "codex.prompt.md"),
+		OutFile:     filepath.Join(dir, "codex.out.md"),
+		ExitFile:    filepath.Join(dir, "codex.exit"),
+		HistoryFile: filepath.Join(dir, "codex.messages.jsonl"),
+		Session: AgentSession{
+			ID:          "planning-agent-session-max",
+			AgentType:   "codex",
+			Status:      AgentSessionPending,
+			HistoryFile: filepath.Join(dir, "codex.messages.jsonl"),
+		},
+	}
+	out := planningAgentOutput{
+		AgentType:   run.AgentType,
+		SessionID:   run.SessionID,
+		Status:      "completed",
+		Output:      "first output",
+		PromptFile:  run.PromptFile,
+		OutFile:     run.OutFile,
+		ExitFile:    run.ExitFile,
+		HistoryFile: run.HistoryFile,
+		Session:     run.Session,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	approverDone := make(chan error, 1)
+	go func() {
+		for i := 1; i <= 4; i++ {
+			waitForHistoryRoleCount(t, run.HistoryFile, "approval_request", i)
+			if err := RejectSession(run.SessionID, run.AgentID, ReviewDecision{
+				Reason:     "revise attempt",
+				RejectType: RejectTypeReplan,
+			}); err != nil {
+				approverDone <- err
+				return
+			}
+		}
+		approverDone <- nil
+	}()
+
+	executions := 0
+	err := waitForPlanningAgentApproval(ctx, "/repo", &out, run, func(ctx context.Context, repoRoot string, next planningAgentRun) planningAgentOutput {
+		executions++
+		next.Session = run.Session
+		return planningAgentOutput{
+			AgentType:   next.AgentType,
+			SessionID:   next.SessionID,
+			Status:      "completed",
+			Output:      "revised output",
+			PromptFile:  next.PromptFile,
+			OutFile:     next.OutFile,
+			ExitFile:    next.ExitFile,
+			HistoryFile: next.HistoryFile,
+			Session:     next.Session,
+		}
+	})
+	if err == nil {
+		t.Fatal("waitForPlanningAgentApproval() error = nil, want max revision error")
+	}
+	if !strings.Contains(err.Error(), "exceeded max revision attempts") {
+		t.Fatalf("waitForPlanningAgentApproval() error = %v, want max revision attempts", err)
+	}
+	if err := <-approverDone; err != nil {
+		t.Fatalf("approval goroutine error = %v", err)
+	}
+	if executions != 3 {
+		t.Fatalf("executions = %d, want 3 revisions", executions)
+	}
+}
+
+func TestWaitForAgentApprovalRejectsAndRerunsUntilApproved(t *testing.T) {
+	dir := t.TempDir()
+	run := clarificationRun{
+		AgentType:   "codex",
+		SessionID:   "clarification-agent-session",
+		Prompt:      "initial clarification prompt",
+		PromptFile:  filepath.Join(dir, "codex.prompt.md"),
+		OutFile:     filepath.Join(dir, "codex.out.md"),
+		ExitFile:    filepath.Join(dir, "codex.exit"),
+		HistoryFile: filepath.Join(dir, "codex.messages.jsonl"),
+		Session: AgentSession{
+			ID:          "clarification-agent-session",
+			AgentType:   "codex",
+			Status:      AgentSessionPending,
+			HistoryFile: filepath.Join(dir, "codex.messages.jsonl"),
+		},
+	}
+	RegisterAgentSession(run.Session)
+	out := clarificationOutput{
+		AgentType:   run.AgentType,
+		SessionID:   run.SessionID,
+		Status:      "completed",
+		Output:      "first clarification",
+		PromptFile:  run.PromptFile,
+		OutFile:     run.OutFile,
+		ExitFile:    run.ExitFile,
+		HistoryFile: run.HistoryFile,
+		Session:     run.Session,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	approverDone := make(chan error, 1)
+	agentNodeName := "node1:codex"
+	go func() {
+		waitForHistoryRoleCount(t, run.HistoryFile, "approval_request", 1)
+		if err := RejectSession(run.SessionID, agentNodeName, ReviewDecision{
+			Reason:     "clarify deployment constraints",
+			RejectType: RejectTypeReplan,
+		}); err != nil {
+			approverDone <- err
+			return
+		}
+		waitForHistoryRoleCount(t, run.HistoryFile, "approval_request", 2)
+		approverDone <- ApproveSession(run.SessionID, agentNodeName, "approved after revision")
+	}()
+
+	executions := 0
+	err := waitForAgentApproval(ctx, "/repo", &out, run, agentNodeName, func(ctx context.Context, repoRoot string, next clarificationRun) clarificationOutput {
+		executions++
+		if !strings.Contains(next.Prompt, "initial clarification prompt") {
+			return clarificationOutput{Err: errors.New("revision prompt lost original prompt"), Status: "failed"}
+		}
+		if !strings.Contains(next.Prompt, "clarify deployment constraints") {
+			return clarificationOutput{Err: errors.New("revision prompt missing reviewer feedback"), Status: "failed"}
+		}
+		next.Session = run.Session
+		return clarificationOutput{
+			AgentType:   next.AgentType,
+			SessionID:   next.SessionID,
+			Status:      "completed",
+			Output:      "revised clarification",
+			PromptFile:  next.PromptFile,
+			OutFile:     next.OutFile,
+			ExitFile:    next.ExitFile,
+			HistoryFile: next.HistoryFile,
+			Session:     next.Session,
+		}
+	})
+	if err != nil {
+		t.Fatalf("waitForAgentApproval() error = %v", err)
+	}
+	if err := <-approverDone; err != nil {
+		t.Fatalf("approval goroutine error = %v", err)
+	}
+	if executions != 1 {
+		t.Fatalf("executions = %d, want 1 revision rerun", executions)
+	}
+	if out.Output != "revised clarification" {
+		t.Fatalf("out.Output = %q, want revised clarification", out.Output)
+	}
+	messages := readHistoryMessages(t, run.HistoryFile)
+	var approvals, revisions int
+	for _, msg := range messages {
+		if msg.Role == "approval_request" {
+			approvals++
+		}
+		if msg.Role == "user" && strings.Contains(msg.Content, "clarify deployment constraints") {
+			revisions++
+		}
+	}
+	if approvals != 2 {
+		t.Fatalf("approval requests = %d, want 2", approvals)
+	}
+	if revisions != 1 {
+		t.Fatalf("revision messages = %d, want 1", revisions)
+	}
+}
+
+func TestWaitForSubtaskApprovalRejectsAndRerunsUntilApproved(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "subtask-agent-session"
+	nodeName := "subtask:api"
+	agent := &SubtaskAgent{
+		SubtaskID: "api",
+		Session: AgentSession{
+			ID:          sessionID,
+			AgentType:   "codex",
+			Status:      AgentSessionPending,
+			HistoryFile: filepath.Join(dir, "api.messages.jsonl"),
+		},
+	}
+	RegisterAgentSession(agent.Session)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	approverDone := make(chan error, 1)
+	go func() {
+		waitForHistoryRoleCount(t, agent.Session.HistoryFile, "approval_request", 1)
+		if err := RejectSession(sessionID, nodeName, ReviewDecision{
+			Reason:     "add API validation",
+			RejectType: RejectTypeReviseSubtask,
+		}); err != nil {
+			approverDone <- err
+			return
+		}
+		waitForHistoryRoleCount(t, agent.Session.HistoryFile, "approval_request", 2)
+		if err := RejectSession(sessionID, nodeName, ReviewDecision{
+			Reason:     "cover validation tests",
+			RejectType: RejectTypeReviseSubtask,
+		}); err != nil {
+			approverDone <- err
+			return
+		}
+		waitForHistoryRoleCount(t, agent.Session.HistoryFile, "approval_request", 3)
+		approverDone <- ApproveSession(sessionID, nodeName, "approved after second revision")
+	}()
+
+	executions := 0
+	issues, err := waitForSubtaskApprovalRevisions(ctx, agent, sessionID, nodeName, "api", nil, func(revisionIssues []ReviewIssue, revision int) error {
+		executions++
+		if revision != executions {
+			return errors.New("revision counter did not match execution count")
+		}
+		if len(revisionIssues) != executions {
+			return errors.New("revision issue was not appended")
+		}
+		want := []string{"add API validation", "cover validation tests"}[executions-1]
+		if !strings.Contains(revisionIssues[len(revisionIssues)-1].Description, want) {
+			return errors.New("revision issue missing reviewer feedback")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("waitForSubtaskApprovalRevisions() error = %v", err)
+	}
+	if err := <-approverDone; err != nil {
+		t.Fatalf("approval goroutine error = %v", err)
+	}
+	if executions != 2 {
+		t.Fatalf("executions = %d, want 2 revision reruns", executions)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("len(issues) = %d, want 2", len(issues))
+	}
+	messages := readHistoryMessages(t, agent.Session.HistoryFile)
+	var approvals, revisions int
+	for _, msg := range messages {
+		if msg.Role == "approval_request" {
+			approvals++
+		}
+		if msg.Role == "user" && (strings.Contains(msg.Content, "add API validation") || strings.Contains(msg.Content, "cover validation tests")) {
+			revisions++
+		}
+	}
+	if approvals != 3 {
+		t.Fatalf("approval requests = %d, want 3", approvals)
+	}
+	if revisions != 2 {
+		t.Fatalf("revision messages = %d, want 2", revisions)
 	}
 }
 

@@ -214,7 +214,10 @@ func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *pla
 			return fmt.Errorf("agent %s exceeded max revision attempts", run.AgentID)
 		}
 
-		decision, ok, _ := LatestReviewDecision(out.SessionID, run.AgentID)
+		decision, ok, err := LatestReviewDecision(out.SessionID, run.AgentID)
+		if err != nil {
+			return err
+		}
 		revision := "Please revise your previous planning output."
 		if ok && !decision.Approved && strings.TrimSpace(decision.Reason) != "" {
 			revision = strings.TrimSpace(decision.Reason)

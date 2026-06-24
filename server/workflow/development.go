@@ -197,35 +197,19 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 
 	execute(promptFile, outFile, exitFile, issues)
 	if agent != nil {
-		approvalErr := waitForSubtaskApproval(ctx, agent, sessionID, "subtask:"+st.ID)
-		if errors.Is(approvalErr, ErrApprovalRejected) {
+		_, approvalErr := waitForSubtaskApprovalRevisions(ctx, agent, sessionID, "subtask:"+st.ID, st.ID, issues, func(revisionIssues []ReviewIssue, revision int) error {
 			result.Err = nil
-			revisionIssues := append([]ReviewIssue{}, issues...)
-			revision := "Revision requested by reviewer."
-			if decision, ok, err := LatestReviewDecision(sessionID, "subtask:"+st.ID); err == nil && ok {
-				if reason := strings.TrimSpace(decision.Reason); reason != "" {
-					revision = reason
-				}
-			}
-			_ = AppendAgentMessage(agent, AgentMessage{Role: "user", Content: revision})
-			revisionIssues = append(revisionIssues, ReviewIssue{
-				SubtaskID:     st.ID,
-				SessionID:     sessionID,
-				Severity:      "blocking",
-				Description:   revision,
-				RequiredFixes: []string{revision},
-			})
 			agent.Session.Status = AgentRevisionInProgress
 			_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationStarted})
-			revisionSuffix := suffix + "-revision"
+			revisionSuffix := fmt.Sprintf("%s-revision-%d", suffix, revision)
 			execute(
 				filepath.Join(nodeDir, revisionSuffix+".prompt.md"),
 				filepath.Join(nodeDir, revisionSuffix+".out.md"),
 				filepath.Join(nodeDir, revisionSuffix+".exit"),
 				revisionIssues,
 			)
-			approvalErr = waitForSubtaskApproval(ctx, agent, sessionID, "subtask:"+st.ID)
-		}
+			return nil
+		})
 		if approvalErr != nil {
 			result.Status = "failed"
 			result.Err = approvalErr
@@ -233,6 +217,52 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 		}
 	}
 	return result
+}
+
+type subtaskRevisionExecutor func(revisionIssues []ReviewIssue, revision int) error
+
+func waitForSubtaskApprovalRevisions(ctx context.Context, agent *SubtaskAgent, sessionID, nodeName, subtaskID string, issues []ReviewIssue, executeRevision subtaskRevisionExecutor) ([]ReviewIssue, error) {
+	const maxRevisions = 3
+
+	revisionIssues := append([]ReviewIssue{}, issues...)
+	revisions := 0
+	for {
+		approvalErr := waitForSubtaskApproval(ctx, agent, sessionID, nodeName)
+		if approvalErr == nil {
+			return revisionIssues, nil
+		}
+		if !errors.Is(approvalErr, ErrApprovalRejected) {
+			return revisionIssues, approvalErr
+		}
+		if revisions >= maxRevisions {
+			return revisionIssues, fmt.Errorf("agent %s exceeded max revision attempts", nodeName)
+		}
+
+		revision := "Revision requested by reviewer."
+		decision, ok, err := LatestReviewDecision(sessionID, nodeName)
+		if err != nil {
+			return revisionIssues, err
+		}
+		if ok && !decision.Approved {
+			if reason := strings.TrimSpace(decision.Reason); reason != "" {
+				revision = reason
+			}
+		}
+		if err := AppendAgentMessage(agent, AgentMessage{Role: "user", Content: revision}); err != nil {
+			return revisionIssues, err
+		}
+		revisionIssues = append(revisionIssues, ReviewIssue{
+			SubtaskID:     subtaskID,
+			SessionID:     sessionID,
+			Severity:      "blocking",
+			Description:   revision,
+			RequiredFixes: []string{revision},
+		})
+		revisions++
+		if err := executeRevision(revisionIssues, revisions); err != nil {
+			return revisionIssues, err
+		}
+	}
 }
 
 func waitForSubtaskApproval(ctx context.Context, agent *SubtaskAgent, sessionID, nodeName string) error {

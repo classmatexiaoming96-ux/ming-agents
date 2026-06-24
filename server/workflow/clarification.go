@@ -39,6 +39,8 @@ type clarificationOutput struct {
 	Session     AgentSession
 }
 
+type clarificationAgentExecutor func(context.Context, string, clarificationRun) clarificationOutput
+
 func RunClarification(ctx context.Context, repoRoot, userInput string) (string, error) {
 	runID := time.Now().Format("20060102-150405")
 	runRoot := filepath.Join(repoRoot, ".workflow", "runs", runID)
@@ -93,7 +95,7 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 	// 每个 agent 独立通过审批门，被拒则重跑（最多3次）
 	for i := range outputs {
 		agentNodeName := "node1:" + outputs[i].AgentType
-		if err := waitForAgentApproval(ctx, repoRoot, &outputs[i], agentNodeName); err != nil {
+		if err := waitForAgentApproval(ctx, repoRoot, &outputs[i], runs[i], agentNodeName, executeClarificationAgentWithSession); err != nil {
 			_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node1", Status: NotificationFailed})
 			return "", err
 		}
@@ -208,10 +210,20 @@ func executeClarificationAgentWithSession(ctx context.Context, repoRoot string, 
 }
 
 // waitForAgentApproval 实现单个 agent 的审批门：等待通过，被拒时重跑（最多3次）
-func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificationOutput, agentNodeName string) error {
-	const maxRetries = 3
+func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificationOutput, run clarificationRun, agentNodeName string, execute clarificationAgentExecutor) error {
+	const maxRevisions = 3
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	revisions := 0
+	for {
+		session := out.Session
+		if session.ID == "" {
+			session = run.Session
+		}
+		if session.HistoryFile == "" {
+			session.HistoryFile = run.HistoryFile
+		}
+		session.Status = AgentSessionPending
+		RegisterAgentSession(session)
 		// 通知完成
 		_ = EmitNodeNotification(out.SessionID, NodeNotification{
 			RunID:    runIDFromSessionID(out.SessionID),
@@ -226,17 +238,25 @@ func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificati
 		if !errors.Is(approvalErr, ErrApprovalRejected) {
 			return approvalErr // 其他错误（非 rejection）
 		}
+		if revisions >= maxRevisions {
+			return fmt.Errorf("agent %s exceeded max revision attempts", out.AgentType)
+		}
 
 		// 被拒绝：读取修订指令，追加到 session，重新执行
-		decision, ok, _ := LatestReviewDecision(out.SessionID, agentNodeName)
-		revision := "Please revise your previous output."
-		if ok && !decision.Approved && decision.Reason != "" {
-			revision = decision.Reason
+		decision, ok, err := LatestReviewDecision(out.SessionID, agentNodeName)
+		if err != nil {
+			return err
 		}
-		_ = AppendAgentMessage(&SubtaskAgent{Session: out.Session}, AgentMessage{
+		revision := "Please revise your previous output."
+		if ok && !decision.Approved && strings.TrimSpace(decision.Reason) != "" {
+			revision = strings.TrimSpace(decision.Reason)
+		}
+		if err := AppendAgentMessage(&SubtaskAgent{Session: session}, AgentMessage{
 			Role:    "user",
 			Content: revision,
-		})
+		}); err != nil {
+			return err
+		}
 
 		// 通知进入重跑
 		_ = EmitNodeNotification(out.SessionID, NodeNotification{
@@ -246,22 +266,27 @@ func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificati
 		})
 
 		// 重新执行该 agent（带修订指令追加到 prompt）
-		extraPrompt := fmt.Sprintf("\n# Revision Request\nPlease revise your previous clarification based on this feedback: %s", revision)
-		newPrompt := out.Session.ID + extraPrompt
-		newRun := clarificationRun{
-			AgentType:   out.AgentType,
-			SessionID:   out.SessionID,
-			Prompt:      newPrompt,
-			PromptFile:  out.PromptFile,
-			OutFile:     out.OutFile,
-			ExitFile:    out.ExitFile,
-			HistoryFile: out.HistoryFile,
-			Session:     out.Session,
+		nextRun := run
+		nextRun.Prompt = renderClarificationRevisionPrompt(run.Prompt, out.Output, revision)
+		nextRun.Session = session
+		*out = execute(ctx, repoRoot, nextRun)
+		if out.Err != nil {
+			return fmt.Errorf("rerun clarification prompt: %w", out.Err)
 		}
-		*out = executeClarificationAgentWithSession(ctx, repoRoot, newRun)
+		revisions++
 	}
+}
 
-	return fmt.Errorf("agent %s exceeded max revision attempts", out.AgentType)
+func renderClarificationRevisionPrompt(originalPrompt, previousOutput, revision string) string {
+	var b strings.Builder
+	b.WriteString(originalPrompt)
+	b.WriteString("\n\n# Previous Clarification Output\n")
+	b.WriteString(strings.TrimSpace(previousOutput))
+	b.WriteString("\n\n# Revision Request\n")
+	b.WriteString("Please revise your clarification based on this feedback:\n")
+	b.WriteString(strings.TrimSpace(revision))
+	b.WriteString("\n")
+	return b.String()
 }
 
 func renderClarificationPrompt(agentType, userInput string) string {
