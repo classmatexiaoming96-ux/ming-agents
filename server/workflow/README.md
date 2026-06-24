@@ -31,6 +31,7 @@ Node 2: planning
   |
   v
 Node 3: development + review
+  creates one subtask agent session per planned subtask
   writes docs/output.md
 ```
 
@@ -44,7 +45,7 @@ Node status values are `PENDING`, `RUNNING`, `WAITING_REVIEW`, `COMPLETED`, and 
 
 ## Chatbot Integration
 
-This package provides the workflow execution boundary that the chatbot calls; it does not receive chat messages directly and does not implement message classification. In product use, the chatbot is the user-facing entrypoint: users describe the task in the conversation, and the chatbot layer decides whether to start a new workflow run or answer against an existing run.
+This package provides the workflow execution boundary that the chatbot calls; it does not receive chat messages directly and does not implement top-level message classification. In product use, the chatbot is the user-facing entrypoint: users describe the task in the conversation, and the chatbot layer decides whether to start a new workflow run or answer against an existing run.
 
 The chatbot should treat a message as a new workflow request when it contains an implementation intent rather than a status or feedback intent. Typical trigger messages are:
 
@@ -82,8 +83,78 @@ The workflow package writes artifacts that the chatbot can read back into conver
 
 - After Node 1, it can summarize `docs/requirements-clarity.md`: ambiguities, assumptions, risks, and proposed subtasks.
 - After Node 2, it can summarize `docs/planning.md`: task ID, subtask list, repo paths, and acceptance criteria.
-- During or after Node 3, it can answer status questions from `.workflow/runs/<run_id>/state.json` and per-session `*.out.md` files.
+- During or after Node 3, it can answer status questions from `.workflow/runs/<run_id>/state.json`, `node3/agents.json`, per-subtask `*.messages.jsonl` files, and per-session `*.out.md` files.
 - After Node 3, it reports `docs/output.md`: development session results, review status, blocking issues if any, and final output paths.
+
+### Per-subtask conversation agents
+
+Node 3 creates a dedicated conversation agent record for each planned development subtask before launching development. The records are written to:
+
+```text
+.workflow/runs/<run_id>/node3/agents.json
+```
+
+Each entry is a `SubtaskAgent`:
+
+```go
+type SubtaskAgent struct {
+    SubtaskID  string
+    Session    AgentSession
+    Context    map[string]string
+    WorkDir    string
+    PromptFile string
+    OutFile    string
+    ExitFile   string
+}
+```
+
+The nested `AgentSession` owns the per-subtask conversation state:
+
+```go
+type AgentSession struct {
+    ID          string
+    AgentType   string
+    Status      AgentSessionStatus
+    HistoryFile string
+    Messages    []AgentMessage
+}
+```
+
+History is persisted as JSON Lines so each subtask agent can maintain its own conversation context independently:
+
+```text
+.workflow/runs/<run_id>/node3/agents/<subtask_id>.messages.jsonl
+```
+
+When `RunDevelopment` starts a subtask, it attaches the subtask's dedicated `SubtaskAgent` to the `SubtaskResult`, appends the generated development prompt as a `system` message, runs the Codex development command, then appends the command output as an `assistant` message. Retry attempts reuse the same subtask agent session, so the history remains tied to the subtask rather than to a single process attempt.
+
+The main chatbot orchestrates these agents. It should load `node3/agents.json`, keep the list of `SubtaskAgent` records for the active run, and route user messages with:
+
+```go
+agent, err := workflow.RouteSubtaskMessage(agents, workflow.SubtaskMessage{
+    SubtaskID: "...",    // optional explicit target
+    SessionID: "...",    // optional explicit session target
+    Content:   message,
+})
+```
+
+Routing behavior is deterministic:
+
+- If `SubtaskID` is present, it routes to that subtask's agent.
+- Else if `SessionID` is present, it routes to that agent session.
+- Else it scans the message for a unique subtask ID mention.
+- If no subtask or multiple subtasks match, routing returns an error and the chatbot should ask the user which subtask they mean.
+
+When the chatbot forwards a user message to a subtask agent, it should persist the message with:
+
+```go
+err := workflow.AppendAgentMessage(agent, workflow.AgentMessage{
+    Role:    "user",
+    Content: message,
+})
+```
+
+This package stores the routing/session metadata and history files. The outer chatbot remains responsible for natural-language intent detection, asking disambiguation questions, and deciding whether a routed message should trigger a new development attempt, a status summary, or a plain answer based on that subtask's context.
 
 This MVP workflow does not pause for human approval between nodes. It has an automated review barrier after development and allows one retry pass for blocking review issues. If a future chatbot flow adds human confirmation, that pause/resume behavior belongs in the chatbot or API orchestration layer around this package, not inside `workflow.Run` as currently implemented.
 
@@ -206,6 +277,8 @@ Node 3 writes per-subtask artifacts under:
 Common artifacts include:
 
 ```text
+agents.json
+agents/<subtask_id>.messages.jsonl
 dev-1.prompt.md
 dev-1.out.md
 dev-1.exit
@@ -260,6 +333,9 @@ Durable run metadata and raw agent outputs are stored separately:
     claude-code.out.md
     claude-code.exit
   node3/
+    agents.json
+    agents/
+      <subtask_id>.messages.jsonl
     dev-*.prompt.md
     dev-*.out.md
     dev-*.exit

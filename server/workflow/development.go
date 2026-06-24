@@ -23,13 +23,21 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 	if err := os.MkdirAll(nodeDir, 0755); err != nil {
 		return nil, err
 	}
+	agents, err := BuildSubtaskAgents(repoRoot, nodeDir, plan)
+	if err != nil {
+		return nil, err
+	}
+	if err := WriteSubtaskAgentManifest(filepath.Join(nodeDir, "agents.json"), agents); err != nil {
+		return nil, err
+	}
+	agentsBySubtask := subtaskAgentsByID(agents)
 	_ = writeWorkflowState(repoRoot, runID, map[string]NodeStatus{
 		"node1": NodeCompleted,
 		"node2": NodeCompleted,
 		"node3": NodeRunning,
-	}, nil)
+	}, map[string]any{"subtask_agents": filepath.Join(nodeDir, "agents.json")})
 
-	results := runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, nil, 0)
+	results := runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, nil, 0)
 	report, reviewOut, err := RunReview(ctx, repoRoot, nodeDir, plan, results)
 	if err != nil {
 		return nil, err
@@ -37,12 +45,16 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 	if !report.Passed {
 		retryTargets := blockingRetryTargets(report, results)
 		if len(retryTargets) > 0 {
-			results = append(results, runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, retryTargets, 1)...)
+			results = append(results, runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, retryTargets, 1)...)
 			report, reviewOut, err = RunReview(ctx, repoRoot, nodeDir, plan, results)
 			if err != nil {
 				return nil, err
 			}
 		}
+	}
+	agentsPath := filepath.Join(nodeDir, "agents.json")
+	if err := WriteSubtaskAgentManifest(agentsPath, agents); err != nil {
+		return nil, err
 	}
 
 	stateStatus := NodeCompleted
@@ -57,8 +69,9 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 			"node3": stateStatus,
 		},
 		Details: map[string]any{
-			"review_passed": report.Passed,
-			"issue_count":   len(report.Issues),
+			"review_passed":  report.Passed,
+			"issue_count":    len(report.Issues),
+			"subtask_agents": agentsPath,
 		},
 	}
 	outputPath := filepath.Join(repoRoot, "docs", "output.md")
@@ -77,7 +90,15 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 	return finalState, nil
 }
 
-func runDevelopmentSubtasks(ctx context.Context, repoRoot, nodeDir string, plan *Plan, only map[string][]ReviewIssue, retry int) []*SubtaskResult {
+func subtaskAgentsByID(agents []SubtaskAgent) map[string]*SubtaskAgent {
+	byID := make(map[string]*SubtaskAgent, len(agents))
+	for i := range agents {
+		byID[agents[i].SubtaskID] = &agents[i]
+	}
+	return byID
+}
+
+func runDevelopmentSubtasks(ctx context.Context, repoRoot, nodeDir string, plan *Plan, agents map[string]*SubtaskAgent, only map[string][]ReviewIssue, retry int) []*SubtaskResult {
 	var subtasks []Subtask
 	for _, st := range plan.Subtasks {
 		if only == nil {
@@ -94,30 +115,40 @@ func runDevelopmentSubtasks(ctx context.Context, repoRoot, nodeDir string, plan 
 		wg.Add(1)
 		go func(i int, st Subtask) {
 			defer wg.Done()
-			results[i] = runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, st, i+1, retry, only[st.ID])
+			results[i] = runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agents[st.ID], st, i+1, retry, only[st.ID])
 		}(i, st)
 	}
 	wg.Wait()
 	return results
 }
 
-func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *Plan, st Subtask, index, retry int, issues []ReviewIssue) *SubtaskResult {
+func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *Plan, agent *SubtaskAgent, st Subtask, index, retry int, issues []ReviewIssue) *SubtaskResult {
 	suffix := fmt.Sprintf("dev-%d", index)
 	if retry > 0 {
 		suffix = fmt.Sprintf("dev-%d-r%d", index, retry)
 	}
 	sessionID := NewPTYSessionID(plan.TaskID, "node3", "codex", index)
-	if retry > 0 {
-		sessionID = fmt.Sprintf("%s-r%d", sessionID, retry)
-	}
-	prompt := renderDevelopmentPrompt(repoRoot, st, sessionID, plan, issues)
 	promptFile := filepath.Join(nodeDir, suffix+".prompt.md")
 	outFile := filepath.Join(nodeDir, suffix+".out.md")
 	exitFile := filepath.Join(nodeDir, suffix+".exit")
-	_ = writeTextAtomic(promptFile, prompt)
-
 	workDir := filepath.Join(repoRoot, filepath.Clean(st.RepoPath))
-	result := &SubtaskResult{Subtask: st, SessionID: sessionID, OutFile: outFile, ExitFile: exitFile, Status: "completed"}
+	if agent != nil {
+		sessionID = agent.Session.ID
+		workDir = agent.WorkDir
+		if retry == 0 {
+			promptFile = agent.PromptFile
+			outFile = agent.OutFile
+			exitFile = agent.ExitFile
+		}
+		agent.Session.Status = AgentSessionRunning
+	}
+	prompt := renderDevelopmentPrompt(repoRoot, st, sessionID, plan, issues)
+	_ = writeTextAtomic(promptFile, prompt)
+	if agent != nil {
+		_ = AppendAgentMessage(agent, AgentMessage{Role: "system", Content: prompt})
+	}
+
+	result := &SubtaskResult{Subtask: st, SessionID: sessionID, Agent: agent, OutFile: outFile, ExitFile: exitFile, Status: "completed"}
 	runCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, "codex", "exec", prompt)
@@ -138,6 +169,14 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 		result.Status = "failed"
 		result.Err = runCtx.Err()
 		result.ExitCode = 1
+	}
+	if agent != nil {
+		if result.Status == "failed" {
+			agent.Session.Status = AgentSessionFailed
+		} else {
+			agent.Session.Status = AgentSessionCompleted
+		}
+		_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: result.Output})
 	}
 	_ = os.WriteFile(outFile, output, 0644)
 	_ = os.WriteFile(exitFile, []byte(fmt.Sprintf("%d\n", result.ExitCode)), 0644)
