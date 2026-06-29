@@ -104,6 +104,10 @@ func parseReviewIssueField(issue *ReviewIssue, line string) {
 		issue.SubtaskID = value
 	case "session_id", "session":
 		issue.SessionID = value
+	case "failure_class", "failure class":
+		issue.FailureClass = value
+	case "evidence_refs", "evidence refs", "evidence":
+		issue.EvidenceRefs = splitReviewCSV(value)
 	case "description":
 		issue.Description = value
 	case "required_fix", "required fixes", "required_fixes":
@@ -111,6 +115,17 @@ func parseReviewIssueField(issue *ReviewIssue, line string) {
 			issue.RequiredFixes = append(issue.RequiredFixes, value)
 		}
 	}
+}
+
+func splitReviewCSV(value string) []string {
+	var refs []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			refs = append(refs, part)
+		}
+	}
+	return refs
 }
 
 func normalizeSeverity(severity string) string {
@@ -143,18 +158,20 @@ func renderReviewPrompt(plan *Plan, results []*SubtaskResult, diffFile string) s
 		}
 		fmt.Fprintf(&b, "## %s\n", result.Subtask.ID)
 		fmt.Fprintf(&b, "session_id: %s\nstatus: %s\nexit_code: %d\nout_file: %s\n\n", result.SessionID, result.Status, result.ExitCode, result.OutFile)
-		if strings.TrimSpace(result.Output) != "" {
-			b.WriteString("```text\n")
-			b.WriteString(result.Output)
-			if !strings.HasSuffix(result.Output, "\n") {
-				b.WriteString("\n")
+		if len(result.Subtask.AcceptanceCriteria) > 0 {
+			b.WriteString("acceptance_criteria:\n")
+			for _, criterion := range result.Subtask.AcceptanceCriteria {
+				fmt.Fprintf(&b, "- %s\n", criterion)
 			}
-			b.WriteString("```\n\n")
+			b.WriteString("\n")
 		}
 	}
 	b.WriteString("# Diff Snapshot\n")
 	b.WriteString("Review the repository diff at: ")
 	b.WriteString(diffFile)
+	b.WriteString("\n\n# Artifact Review Instructions\n")
+	b.WriteString("Read the artifact file paths above and the diff snapshot. Do not rely on development session history or embedded development output.\n")
+	b.WriteString("The expected final output document is docs/output.md.\n")
 	b.WriteString("\n\n# Review Checklist\n")
 	b.WriteString("- Plan coverage: every subtask acceptance criterion is satisfied or explicitly marked blocked.\n")
 	b.WriteString("- Scope control: changes are limited to planned repo paths unless justified.\n")

@@ -25,12 +25,17 @@ type AdapterExecutor interface {
 	Invoke(req adapter.AgentRequest, execCtx ...adapter.ExecutionContext) (*adapter.AgentResult, error)
 }
 
+type lifecycleExecutor interface {
+	ProcessOne()
+}
+
 // Worker consumes tasks from agent_task_queue, invokes adapters, and writes results.
 // Epic 4.1: 队列消费 worker — 消费 agent_task_queue → 调 Adapter → 回写.
 type Worker struct {
 	store        *store.Store
 	registry     *adapter.Registry
 	executor     AdapterExecutor
+	lifecycle    lifecycleExecutor
 	callback     TaskCallback
 	pollInterval time.Duration
 	stopCh       chan struct{}
@@ -47,6 +52,18 @@ func NewWorker(s *store.Store, r *adapter.Registry, callback TaskCallback, pollI
 		store:        s,
 		registry:     r,
 		callback:     callback,
+		pollInterval: pollInterval,
+		stopCh:       make(chan struct{}),
+	}
+}
+
+// NewWorkerWithExecutor creates a worker that delegates each tick to a lifecycle executor.
+func NewWorkerWithExecutor(executor lifecycleExecutor, pollInterval time.Duration) *Worker {
+	if pollInterval == 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+	return &Worker{
+		lifecycle:    executor,
 		pollInterval: pollInterval,
 		stopCh:       make(chan struct{}),
 	}
@@ -108,6 +125,11 @@ func (w *Worker) run() {
 }
 
 func (w *Worker) processOne() {
+	if w.lifecycle != nil {
+		w.lifecycle.ProcessOne()
+		return
+	}
+
 	task, err := w.claimTask()
 	if err != nil {
 		// sql.ErrNoRows means no pending tasks — not an error.

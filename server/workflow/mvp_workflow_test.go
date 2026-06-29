@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ming-agents/server/adapter"
 )
 
 func TestValidatePlanRejectsInvalidPlans(t *testing.T) {
@@ -80,6 +82,8 @@ Two criteria are not satisfied yet.
 - severity: blocking
   subtask_id: one
   session_id: pty-run-node3-codex-1
+  failure_class: product_defect
+  evidence_refs: test.log, build.log
   description: Missing retry output in docs/output.md.
   required_fixes:
   - Add the retry summary.
@@ -102,6 +106,12 @@ Two criteria are not satisfied yet.
 	}
 	if len(report.Issues[0].RequiredFixes) != 1 {
 		t.Fatalf("first issue fixes = %#v", report.Issues[0].RequiredFixes)
+	}
+	if report.Issues[0].FailureClass != "product_defect" {
+		t.Fatalf("first issue failure class = %q", report.Issues[0].FailureClass)
+	}
+	if got := report.Issues[0].EvidenceRefs; len(got) != 2 || got[0] != "test.log" || got[1] != "build.log" {
+		t.Fatalf("first issue evidence refs = %#v", got)
 	}
 }
 
@@ -714,6 +724,72 @@ func TestWaitForSubtaskApprovalRejectsAndRerunsUntilApproved(t *testing.T) {
 	}
 	if revisions != 2 {
 		t.Fatalf("revision messages = %d, want 2", revisions)
+	}
+}
+
+func TestRunDevelopmentSubtaskUsesPTYSessionAndRegistersIt(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoRoot, "workflow"), 0755); err != nil {
+		t.Fatalf("mkdir workflow dir: %v", err)
+	}
+	commandDir := t.TempDir()
+	codexPath := filepath.Join(commandDir, "codex")
+	if err := os.WriteFile(codexPath, []byte(`#!/bin/sh
+if [ "$1" = "exec" ]; then
+  printf 'exec mode not allowed\n'
+  exit 42
+fi
+printf 'OpenAI Codex\n› '
+while IFS= read -r line; do
+  case "$line" in
+    *MING_AGENTS_DONE:*)
+      marker=$(printf '%s' "$line" | tr -d '"' | sed 's/ + //g')
+      printf 'development done\n'
+      printf '%s\n' "$marker"
+      ;;
+  esac
+done
+`), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", commandDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldRegistry := adapter.DefaultPTYSessionRegistry
+	adapter.DefaultPTYSessionRegistry = adapter.NewPTYSessionRegistry()
+	t.Cleanup(func() { adapter.DefaultPTYSessionRegistry = oldRegistry })
+
+	plan := &Plan{TaskID: "run-dev-pty", Subtasks: []Subtask{validSubtask("api")}}
+	nodeDir := filepath.Join(repoRoot, ".workflow", "runs", plan.TaskID, "node3")
+	agents, err := BuildSubtaskAgents(repoRoot, nodeDir, plan)
+	if err != nil {
+		t.Fatalf("BuildSubtaskAgents() error = %v", err)
+	}
+	agent := &agents[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	approvalDone := make(chan error, 1)
+	go func() {
+		waitForHistoryRoleCount(t, agent.Session.HistoryFile, "approval_request", 1)
+		approvalDone <- ApproveSession(agent.Session.ID, "subtask:api", "approved")
+	}()
+
+	result := runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agent, plan.Subtasks[0], 1, 0, nil)
+	if err := <-approvalDone; err != nil {
+		t.Fatalf("approval error = %v", err)
+	}
+	if result.Err != nil {
+		t.Fatalf("runDevelopmentSubtask() error = %v, output=%q", result.Err, result.Output)
+	}
+	if result.Output != "development done" {
+		t.Fatalf("output = %q, want development done", result.Output)
+	}
+	sessions := adapter.DefaultPTYSessionRegistry.ListByRun(plan.TaskID)
+	if len(sessions) != 1 {
+		t.Fatalf("registry sessions = %+v, want one session for run", sessions)
+	}
+	if sessions[0].SessionID != agent.Session.ID || sessions[0].SubtaskID != "api" || sessions[0].AgentType != "codex" {
+		t.Fatalf("registered session = %+v, want subtask codex session", sessions[0])
 	}
 }
 

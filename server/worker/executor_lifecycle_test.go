@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ming-agents/server/adapter"
 )
 
 type countingExecutor struct {
@@ -21,6 +23,10 @@ func (e *countingExecutor) Count() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.count
+}
+
+func (e *countingExecutor) Invoke(req adapter.AgentRequest, execCtx ...adapter.ExecutionContext) (*adapter.AgentResult, error) {
+	return &adapter.AgentResult{}, nil
 }
 
 func TestWorkerDelegatesTaskProcessingToExecutor(t *testing.T) {

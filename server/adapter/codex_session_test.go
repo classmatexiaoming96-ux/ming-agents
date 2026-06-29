@@ -202,6 +202,65 @@ func TestCodexSessionSendPromptHonorsContextWhenSendLocked(t *testing.T) {
 	}
 }
 
+func TestCodexSessionWriteInputIsIndependentFromSendLock(t *testing.T) {
+	workDir := t.TempDir()
+	capturePath := filepath.Join(workDir, "manual-input.txt")
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf 'OpenAI Codex\n› '
+IFS= read -r line
+printf '%s' "$line" > manual-input.txt
+while IFS= read -r line; do
+  :
+done
+`)
+	session := startTestCodexSession(t, cmd, workDir)
+	defer session.Close()
+
+	session.sendMu.Lock()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- session.WriteInput([]byte("manual approval\n"))
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("WriteInput() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WriteInput() blocked while sendMu was held")
+	}
+	session.sendMu.Unlock()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		data, err := os.ReadFile(capturePath)
+		if err == nil && string(data) == "manual approval" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("manual input file = %q, err = %v; want manual approval", string(data), err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCodexSessionResizeUpdatesPTYSize(t *testing.T) {
+	workDir := t.TempDir()
+	cmd := writeTestCommand(t, `#!/bin/sh
+printf 'OpenAI Codex\n› '
+while IFS= read -r line; do
+  :
+done
+`)
+	session := startTestCodexSession(t, cmd, workDir)
+	defer session.Close()
+
+	if err := session.Resize(100, 40); err != nil {
+		t.Fatalf("Resize() error = %v", err)
+	}
+}
+
 func startTestCodexSession(t *testing.T, command, workDir string) *CodexSession {
 	t.Helper()
 	manager := NewCodexSessionManager(CodexConfig{

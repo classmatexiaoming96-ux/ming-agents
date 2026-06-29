@@ -38,16 +38,17 @@ type CodexConfig struct {
 }
 
 type CodexSession struct {
-	id       string
-	workDir  string
-	cmd      *exec.Cmd
-	pty      *os.File
-	reader   *PTYReader
-	closed   bool
-	sendMu   sync.Mutex
-	stateMu  sync.Mutex
-	waitDone chan struct{}
-	doneErr  error
+	id         string
+	workDir    string
+	cmd        *exec.Cmd
+	pty        *os.File
+	reader     *PTYReader
+	closed     bool
+	sendMu     sync.Mutex
+	ptyInputMu sync.Mutex
+	stateMu    sync.Mutex
+	waitDone   chan struct{}
+	doneErr    error
 }
 
 type CodexSessionManager struct {
@@ -245,6 +246,43 @@ func (s *CodexSession) SendPrompt(ctx context.Context, prompt string) (string, e
 	output := strings.TrimSpace(response)
 	output = stripPromptEcho(output, sentinelPrompt)
 	return output, nil
+}
+
+func (s *CodexSession) WriteInput(data []byte) error {
+	if s == nil || s.pty == nil {
+		return errors.New("codex session PTY is not available")
+	}
+	if s.isClosed() {
+		return errors.New("codex session is closed")
+	}
+	s.ptyInputMu.Lock()
+	defer s.ptyInputMu.Unlock()
+	_, err := s.pty.Write(data)
+	return err
+}
+
+func (s *CodexSession) ID() string {
+	if s == nil {
+		return ""
+	}
+	return s.id
+}
+
+func (s *CodexSession) Reader() *PTYReader {
+	if s == nil {
+		return nil
+	}
+	return s.reader
+}
+
+func (s *CodexSession) Resize(cols, rows int) error {
+	if s == nil || s.pty == nil {
+		return errors.New("codex session PTY is not available")
+	}
+	if cols <= 0 || rows <= 0 {
+		return errors.New("codex session resize requires positive cols and rows")
+	}
+	return pty.Setsize(s.pty, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
 func (s *CodexSession) lockSend(ctx context.Context) error {

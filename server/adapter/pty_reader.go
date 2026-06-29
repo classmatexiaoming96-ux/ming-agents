@@ -13,14 +13,17 @@ const ptyReaderRingLimit = 64 * 1024
 type PTYReader struct {
 	pty *os.File
 
-	mu         sync.Mutex
-	rawHandler func([]byte)
-	updateCh   chan struct{}
-	done       chan struct{}
-	closeOnce  sync.Once
-	normalized strings.Builder
-	ring       string
-	closed     bool
+	mu          sync.Mutex
+	rawHandler  func([]byte)
+	updateCh    chan struct{}
+	done        chan struct{}
+	closeOnce   sync.Once
+	normalized  strings.Builder
+	ring        string
+	rawRing     []byte
+	rawOffset   uint64
+	subscribers []chan []byte
+	closed      bool
 }
 
 func NewPTYReader(pty *os.File) *PTYReader {
@@ -36,15 +39,23 @@ func (r *PTYReader) ReadLoop() {
 	for {
 		n, err := r.pty.Read(buf)
 		if n > 0 {
+			raw := append([]byte(nil), buf[:n]...)
 			if r.rawHandler != nil {
-				r.rawHandler(buf[:n])
+				r.rawHandler(raw)
 			}
-			normalized := StripANSI(buf[:n])
+			normalized := StripANSI(raw)
 			r.mu.Lock()
+			r.appendRawLocked(raw)
 			r.normalized.WriteString(normalized)
 			r.ring += normalized
 			if len(r.ring) > ptyReaderRingLimit {
 				r.ring = r.ring[len(r.ring)-ptyReaderRingLimit:]
+			}
+			for _, subscriber := range r.subscribers {
+				select {
+				case subscriber <- raw:
+				default:
+				}
 			}
 			r.notifyLocked()
 			r.mu.Unlock()
@@ -58,6 +69,34 @@ func (r *PTYReader) ReadLoop() {
 
 func (r *PTYReader) SetRawHandler(handler func([]byte)) {
 	r.rawHandler = handler
+}
+
+func (r *PTYReader) Subscribe() (<-chan []byte, func()) {
+	ch := make(chan []byte, 256)
+	r.mu.Lock()
+	if r.closed {
+		close(ch)
+		r.mu.Unlock()
+		return ch, func() {}
+	}
+	r.subscribers = append(r.subscribers, ch)
+	r.mu.Unlock()
+
+	var once sync.Once
+	unsubscribe := func() {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			for i, subscriber := range r.subscribers {
+				if subscriber == ch {
+					r.subscribers = append(r.subscribers[:i], r.subscribers[i+1:]...)
+					close(ch)
+					return
+				}
+			}
+		})
+	}
+	return ch, unsubscribe
 }
 
 func (r *PTYReader) WaitFor(ctx context.Context, pattern string, sinceOffset int) (string, bool) {
@@ -102,15 +141,34 @@ func (r *PTYReader) Snapshot() (string, int) {
 	return text, len(text)
 }
 
+func (r *PTYReader) RawSnapshot() ([]byte, uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw := append([]byte(nil), r.rawRing...)
+	return raw, r.rawOffset
+}
+
 func (r *PTYReader) Close() {
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		r.closed = true
 		_ = r.pty.Close()
 		close(r.done)
+		for _, subscriber := range r.subscribers {
+			close(subscriber)
+		}
+		r.subscribers = nil
 		r.notifyLocked()
 		r.mu.Unlock()
 	})
+}
+
+func (r *PTYReader) appendRawLocked(data []byte) {
+	r.rawOffset += uint64(len(data))
+	r.rawRing = append(r.rawRing, data...)
+	if len(r.rawRing) > ptyReaderRingLimit {
+		r.rawRing = r.rawRing[len(r.rawRing)-ptyReaderRingLimit:]
+	}
 }
 
 func (r *PTYReader) notifyLocked() {

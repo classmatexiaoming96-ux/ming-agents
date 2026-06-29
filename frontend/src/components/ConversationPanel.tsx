@@ -5,14 +5,21 @@ interface ConversationPanelProps {
   onSendMessage: (message: string) => void;
   disabled?: boolean;
   isStreaming?: boolean;
+  messages?: ConversationMessage[];
+  emptyTitle?: string;
+  emptyHint?: React.ReactNode;
 }
 
 export function ConversationPanel({
   onSendMessage,
   disabled = false,
   isStreaming = false,
+  messages: providedMessages,
+  emptyTitle = '开始与评审助手对话',
+  emptyHint,
 }: ConversationPanelProps) {
-  const { messages } = useWorkflowStore();
+  const storeMessages = useWorkflowStore((state) => state.messages);
+  const messages = providedMessages ?? storeMessages;
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -42,11 +49,15 @@ export function ConversationPanel({
       <div className="message-list">
         {messages.length === 0 && (
           <div className="empty-state">
-            <p>开始与评审助手对话</p>
+            <p>{emptyTitle}</p>
             <p className="hint">
-              当节点进入 WAITING_USER_INPUT 状态时，你可以：<br />
-              - 说"可以了"确认通过<br />
-              - 提出修改意见让节点重跑
+              {emptyHint ?? (
+                <>
+                  当节点进入 WAITING_USER_INPUT 状态时，你可以：<br />
+                  - 说"可以了"确认通过<br />
+                  - 提出修改意见让节点重跑
+                </>
+              )}
             </p>
           </div>
         )}

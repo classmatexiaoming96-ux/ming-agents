@@ -41,16 +41,17 @@ type ClaudeCodeConfig struct {
 }
 
 type ClaudeCodeSession struct {
-	id       string
-	workDir  string
-	cmd      *exec.Cmd
-	pty      *os.File
-	reader   *PTYReader
-	closed   bool
-	sendMu   sync.Mutex
-	stateMu  sync.Mutex
-	waitDone chan struct{}
-	doneErr  error
+	id         string
+	workDir    string
+	cmd        *exec.Cmd
+	pty        *os.File
+	reader     *PTYReader
+	closed     bool
+	sendMu     sync.Mutex
+	ptyInputMu sync.Mutex
+	stateMu    sync.Mutex
+	waitDone   chan struct{}
+	doneErr    error
 }
 
 type ClaudeCodeSessionManager struct {
@@ -257,6 +258,29 @@ func (s *ClaudeCodeSession) SendPrompt(ctx context.Context, prompt string) (stri
 	output := strings.TrimSpace(response)
 	output = stripPromptEcho(output, sentinelPrompt)
 	return output, nil
+}
+
+func (s *ClaudeCodeSession) WriteInput(data []byte) error {
+	if s == nil || s.pty == nil {
+		return errors.New("claude-code session PTY is not available")
+	}
+	if s.isClosed() {
+		return errors.New("claude-code session is closed")
+	}
+	s.ptyInputMu.Lock()
+	defer s.ptyInputMu.Unlock()
+	_, err := s.pty.Write(data)
+	return err
+}
+
+func (s *ClaudeCodeSession) Resize(cols, rows int) error {
+	if s == nil || s.pty == nil {
+		return errors.New("claude-code session PTY is not available")
+	}
+	if cols <= 0 || rows <= 0 {
+		return errors.New("claude-code session resize requires positive cols and rows")
+	}
+	return pty.Setsize(s.pty, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
 func (s *ClaudeCodeSession) lockSend(ctx context.Context) error {

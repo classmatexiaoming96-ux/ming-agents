@@ -66,6 +66,493 @@ body {
   font-size: 0.75rem;
 }
 
+/* WorkflowTaskPage */
+.workflow-page {
+  display: flex;
+  height: 100vh;
+  min-width: 0;
+  overflow: hidden;
+  background: #0f172a;
+}
+
+.workflow-shell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.task-tab-bar {
+  display: flex;
+  min-height: 64px;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid #334155;
+  background: #111827;
+  padding: 0.625rem 1rem 0;
+}
+
+.task-tabs {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  gap: 0.375rem;
+  overflow-x: auto;
+}
+
+.task-tab {
+  display: flex;
+  width: 220px;
+  min-width: 180px;
+  max-width: 260px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.25rem;
+  border: 1px solid #334155;
+  border-bottom: 0;
+  border-radius: 0.5rem 0.5rem 0 0;
+  background: #172033;
+  color: #cbd5e1;
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-tab.active {
+  border-color: #22c55e;
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.task-tab-title,
+.task-tab-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-tab-title {
+  font-size: 0.875rem;
+  font-weight: 650;
+}
+
+.task-tab-status {
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
+.task-tab-empty,
+.task-tab-meta,
+.task-tab-error {
+  display: inline-flex;
+  align-items: center;
+  color: #94a3b8;
+  font-size: 0.875rem;
+}
+
+.task-tab-error {
+  color: #fca5a5;
+}
+
+.task-tab-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.75rem;
+  padding-bottom: 0.625rem;
+}
+
+.task-tab-actions button,
+.chatbot-header button,
+.chatbot-mode-tabs button {
+  border: 1px solid #475569;
+  border-radius: 0.375rem;
+  background: #1f2937;
+  color: #e5e7eb;
+  cursor: pointer;
+  font: inherit;
+}
+
+.task-tab-actions button {
+  padding: 0.375rem 0.75rem;
+}
+
+.workflow-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.task-detail {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.task-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  border-bottom: 1px solid #334155;
+  background: #172033;
+  padding: 1rem 1.25rem;
+}
+
+.task-detail-header h1 {
+  overflow-wrap: anywhere;
+  color: #f8fafc;
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.task-detail-header p {
+  margin-top: 0.25rem;
+  color: #94a3b8;
+  font-size: 0.875rem;
+}
+
+.task-status-card {
+  display: flex;
+  min-width: 180px;
+  flex-direction: column;
+  gap: 0.25rem;
+  border-left: 3px solid #22c55e;
+  background: #111827;
+  padding: 0.625rem 0.875rem;
+}
+
+.task-status-card span {
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
+.task-status-card strong {
+  overflow-wrap: anywhere;
+  color: #e5e7eb;
+  font-size: 0.875rem;
+}
+
+.task-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.task-conversation {
+  background: #0f172a;
+}
+
+.pty-panel {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  border-bottom: 1px solid #334155;
+  background: #1e1e1e;
+  min-height: 260px;
+  max-height: 420px;
+}
+
+.pty-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.625rem 1rem;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+.pty-panel-header h2 {
+  color: #f5f5f5;
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+
+.pty-connection-state {
+  border: 1px solid #334155;
+  border-radius: 9999px;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  padding: 0.125rem 0.625rem;
+}
+
+.pty-connection-state.connected {
+  border-color: #15803d;
+  background: #16301f;
+  color: #bbf7d0;
+}
+
+.pty-connection-state.idle {
+  border-color: #3c3c3c;
+  background: #252526;
+  color: #a3a3a3;
+}
+
+.pty-connection-state.connecting {
+  border-color: #2563eb;
+  color: #bfdbfe;
+}
+
+.pty-connection-state.error {
+  border-color: #b91c1c;
+  background: #3b1118;
+  color: #fecaca;
+}
+
+.pty-tabs {
+  display: flex;
+  min-width: 0;
+  gap: 0.25rem;
+  overflow-x: auto;
+  padding: 0.5rem;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+.pty-tabs button {
+  display: inline-flex;
+  min-width: 140px;
+  max-width: 260px;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid #3c3c3c;
+  border-radius: 0.25rem;
+  background: #2d2d2d;
+  color: #cccccc;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.375rem 0.75rem;
+  text-align: left;
+}
+
+.pty-tabs button.active {
+  border-color: #007acc;
+  background: #1e1e1e;
+  color: #ffffff;
+}
+
+.sub-agent-status-dot {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #64748b;
+}
+
+.sub-agent-status-dot.running {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgb(34 197 94 / 0.16);
+}
+
+.pty-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pty-tab-meta {
+  color: #8f8f8f;
+  flex-shrink: 0;
+}
+
+.pty-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pty-empty {
+  color: #888;
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.pty-node-fallback {
+  display: grid;
+  gap: 0.375rem;
+  padding: 0.75rem 1rem 1rem;
+}
+
+.pty-node-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: #cccccc;
+  font-size: 0.8125rem;
+}
+
+.pty-node-row strong {
+  color: #a3a3a3;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.pty-approval-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  max-width: 460px;
+  margin: 1.5rem auto;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  background: #111827;
+  color: #e5e7eb;
+  padding: 1.25rem;
+}
+
+.pty-approval-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.pty-approval-content {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.pty-approval-content h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1rem;
+}
+
+.pty-approval-content p {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 0.875rem;
+}
+
+.pty-approval-content button {
+  justify-self: start;
+  margin-top: 0.25rem;
+  border: 1px solid #64748b;
+  border-radius: 0.375rem;
+  background: #1f2937;
+  color: #f8fafc;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0.5rem 0.875rem;
+}
+
+.pty-approval-content button:hover {
+  border-color: #94a3b8;
+  background: #334155;
+}
+
+.xterm-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: #1e1e1e;
+}
+
+.xterm-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  border-bottom: 1px solid #303030;
+  background: #1f1f1f;
+  padding: 0.375rem 0.5rem;
+}
+
+.xterm-toolbar input {
+  width: min(220px, 100%);
+  border: 1px solid #3c3c3c;
+  border-radius: 0.25rem;
+  background: #252526;
+  color: #d4d4d4;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.xterm-toolbar input:focus {
+  border-color: #007acc;
+  outline: none;
+}
+
+.xterm-container {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0.5rem;
+}
+
+.xterm-container .xterm {
+  height: 100%;
+}
+
+.chatbot-sidebar {
+  display: flex;
+  width: 380px;
+  min-width: 320px;
+  max-width: 42vw;
+  flex-direction: column;
+  border-left: 1px solid #334155;
+  background: #111827;
+  transition: width 0.18s ease, min-width 0.18s ease;
+}
+
+.chatbot-sidebar.collapsed {
+  width: 64px;
+  min-width: 64px;
+}
+
+.chatbot-header {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid #334155;
+  padding: 0.75rem;
+}
+
+.chatbot-header h2 {
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.chatbot-header button {
+  padding: 0.375rem 0.625rem;
+  white-space: nowrap;
+}
+
+.chatbot-mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.375rem;
+  border-bottom: 1px solid #334155;
+  padding: 0.75rem;
+}
+
+.chatbot-mode-tabs button {
+  min-height: 36px;
+}
+
+.chatbot-mode-tabs button.active {
+  border-color: #22c55e;
+  background: #16301f;
+  color: #dcfce7;
+}
+
+.chatbot-sidebar .conversation-panel {
+  min-height: 0;
+}
+
+.chatbot-sidebar .message {
+  max-width: 92%;
+}
+
 /* Main Content */
 .main-content {
   display: flex;
@@ -444,8 +931,36 @@ body {
 @media (max-width: 760px) {
   .workflow-status-bar,
   .main-content,
-  .agent-page {
+  .agent-page,
+  .workflow-page,
+  .task-workspace {
     flex-direction: column;
+  }
+
+  .workflow-page {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .task-tab-bar,
+  .task-detail-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .task-tab-actions {
+    justify-content: space-between;
+  }
+
+  .sub-agents-section {
+    padding: 0.875rem;
+  }
+
+  .sub-agents-header,
+  .pty-input-row {
+    align-items: stretch;
+    grid-template-columns: 1fr;
   }
 
   .artifact-panel,
@@ -454,6 +969,19 @@ body {
     max-height: 42vh;
     border-right: 0;
     border-bottom: 1px solid #374151;
+  }
+
+  .chatbot-sidebar,
+  .chatbot-sidebar.collapsed {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    border-left: 0;
+    border-top: 1px solid #334155;
+  }
+
+  .chatbot-sidebar.collapsed {
+    min-height: 56px;
   }
 
   .status-left,

@@ -6,19 +6,30 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ming-agents/server/adapter"
 )
 
 type WorkflowState = RunState
 
-func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*WorkflowState, error) {
+func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *WorkflowState, err error) {
 	if err := validatePlan(plan); err != nil {
 		return nil, err
 	}
 	runID := plan.TaskID
+	skipDeferredPhaseStatus := false
+	defer func() {
+		if err != nil && !skipDeferredPhaseStatus {
+			_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+				Phase:      "development",
+				GateStatus: "failed",
+				NextAction: "retry_generator",
+			})
+		}
+	}()
 	nodeDir := filepath.Join(repoRoot, ".workflow", "runs", runID, "node3")
 	if err := os.MkdirAll(nodeDir, 0755); err != nil {
 		return nil, err
@@ -58,6 +69,20 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 			}
 		}
 	}
+	evalResult, evalErr := RunEvaluation(ctx, repoRoot, runID)
+	if evalErr != nil {
+		_ = evalErr
+	} else if !evalResult.Passed {
+		_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+			Phase:        "evaluation",
+			GateStatus:   "failed",
+			FailureClass: evalResult.FailureClass,
+			NextAction:   retryActionFor(evalResult.FailureClass),
+			MissingItems: []string{evalResult.RetryAdvice},
+		})
+		skipDeferredPhaseStatus = true
+		return nil, fmt.Errorf("evaluation failed: %s - %s", evalResult.FailureClass, evalResult.RetryAdvice)
+	}
 	agentsPath := filepath.Join(nodeDir, "agents.json")
 	if err := WriteSubtaskAgentManifest(agentsPath, agents); err != nil {
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
@@ -81,6 +106,38 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 			"subtask_agents": agentsPath,
 		},
 	}
+independentEval, independentEvalErr := runIndependentEvaluator(ctx, repoRoot, runID, plan)
+if independentEvalErr != nil {
+    _ = independentEvalErr
+} else if independentEval != nil && !independentEval.Passed {
+    _ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+        Phase:        "evaluation",
+        GateStatus:   "failed",
+        FailureClass: independentEval.FailureClass,
+        NextAction:   retryActionFor(independentEval.FailureClass),
+        MissingItems: []string{independentEval.RetryAdvice},
+    })
+    skipDeferredPhaseStatus = true
+    return nil, fmt.Errorf("independent evaluation failed: %s - %s", independentEval.FailureClass, independentEval.RetryAdvice)
+}
+_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+    Phase:      "development",
+    GateStatus: phaseGateStatus(report.Passed),
+    NextAction: phaseNextAction(report.Passed),
+})
+check, checkErr := checkCompletionAt(repoRoot, runID)
+if checkErr != nil {
+    // Completion checks are best-effort unless they produce a structured failed result.
+} else if !check.Passed {
+    _ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+        Phase:        "development",
+        GateStatus:   "failed",
+        NextAction:   "retry_generator",
+        MissingItems: check.Missing,
+    })
+    skipDeferredPhaseStatus = true
+    return nil, fmt.Errorf("completion check failed: %v", check.Missing)
+}
 	outputPath := filepath.Join(repoRoot, "docs", "output.md")
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
@@ -98,6 +155,11 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (*Workflow
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
 		return finalState, fmt.Errorf("review found blocking issues")
 	}
+	_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+		Phase:      "completed",
+		GateStatus: "passed",
+		NextAction: "finish",
+	})
 	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationCompleted})
 	return finalState, nil
 }
@@ -161,18 +223,33 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 
 		runCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 		defer cancel()
-		cmd := exec.CommandContext(runCtx, "codex", "exec", prompt)
-		cmd.Dir = workDir
-		output, err := cmd.CombinedOutput()
-		result.Output = string(output)
+		manager := adapter.NewCodexSessionManager(adapter.CodexConfig{Command: "codex"})
+		session, err := manager.StartSession(runCtx, workDir)
+		if err == nil {
+			rec := &adapter.PTYSessionRecord{
+				SessionID:  sessionID,
+				RunID:      plan.TaskID,
+				NodeName:   "node_3",
+				SubtaskID:  st.ID,
+				AgentType:  "codex",
+				AdapterKey: "codex",
+				WorkDir:    workDir,
+				Status:     adapter.PTYSessionStatusRunning,
+			}
+			rec.AttachIO(session.Reader(), session.WriteInput, session.Resize)
+			adapter.DefaultPTYSessionRegistry.Register(rec)
+			defer session.Close()
+		}
+		output := ""
+		if err == nil {
+			output, err = session.SendPrompt(runCtx, prompt)
+		}
+		result.Output = output
 		result.Err = err
 		result.Status = "completed"
 		if err != nil {
 			result.Status = "failed"
 			result.ExitCode = 1
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				result.ExitCode = exitErr.ExitCode()
-			}
 		} else {
 			result.ExitCode = 0
 		}
@@ -184,20 +261,22 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 		if agent != nil {
 			if result.Status == "failed" {
 				agent.Session.Status = AgentSessionFailed
+				adapter.DefaultPTYSessionRegistry.UpdateStatus(sessionID, adapter.PTYSessionStatusFailed)
 				_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationFailed})
 			} else {
 				agent.Session.Status = AgentSessionCompleted
+				adapter.DefaultPTYSessionRegistry.UpdateStatus(sessionID, adapter.PTYSessionStatusCompleted)
 				_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationCompleted})
 			}
 			_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: result.Output})
 		}
-		_ = os.WriteFile(currentOutFile, output, 0644)
+		_ = os.WriteFile(currentOutFile, []byte(output), 0644)
 		_ = os.WriteFile(currentExitFile, []byte(fmt.Sprintf("%d\n", result.ExitCode)), 0644)
 	}
 
 	execute(promptFile, outFile, exitFile, issues)
 	if agent != nil {
-		_, approvalErr := waitForSubtaskApprovalRevisions(ctx, agent, sessionID, "subtask:"+st.ID, st.ID, issues, func(revisionIssues []ReviewIssue, revision int) error {
+		_, approvalErr := waitForSubtaskApprovalRevisionsAt(ctx, repoRoot, agent, sessionID, "subtask:"+st.ID, st.ID, issues, func(revisionIssues []ReviewIssue, revision int) error {
 			result.Err = nil
 			agent.Session.Status = AgentRevisionInProgress
 			_ = EmitNodeNotification(sessionID, NodeNotification{RunID: plan.TaskID, NodeName: "subtask:" + st.ID, Status: NotificationStarted})
@@ -222,12 +301,16 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 type subtaskRevisionExecutor func(revisionIssues []ReviewIssue, revision int) error
 
 func waitForSubtaskApprovalRevisions(ctx context.Context, agent *SubtaskAgent, sessionID, nodeName, subtaskID string, issues []ReviewIssue, executeRevision subtaskRevisionExecutor) ([]ReviewIssue, error) {
+	return waitForSubtaskApprovalRevisionsAt(ctx, ".", agent, sessionID, nodeName, subtaskID, issues, executeRevision)
+}
+
+func waitForSubtaskApprovalRevisionsAt(ctx context.Context, baseDir string, agent *SubtaskAgent, sessionID, nodeName, subtaskID string, issues []ReviewIssue, executeRevision subtaskRevisionExecutor) ([]ReviewIssue, error) {
 	const maxRevisions = 3
 
 	revisionIssues := append([]ReviewIssue{}, issues...)
 	revisions := 0
 	for {
-		approvalErr := waitForSubtaskApproval(ctx, agent, sessionID, nodeName)
+		approvalErr := waitForSubtaskApprovalAt(ctx, baseDir, agent, sessionID, nodeName)
 		if approvalErr == nil {
 			return revisionIssues, nil
 		}
@@ -266,14 +349,40 @@ func waitForSubtaskApprovalRevisions(ctx context.Context, agent *SubtaskAgent, s
 }
 
 func waitForSubtaskApproval(ctx context.Context, agent *SubtaskAgent, sessionID, nodeName string) error {
+	return waitForSubtaskApprovalAt(ctx, ".", agent, sessionID, nodeName)
+}
+
+func waitForSubtaskApprovalAt(ctx context.Context, baseDir string, agent *SubtaskAgent, sessionID, nodeName string) error {
 	if agent != nil {
 		agent.Session.Status = AgentWaitingApproval
+	}
+	runID := runIDFromSessionID(sessionID)
+	if runID != "" {
+		_ = writePhaseStatusAt(baseDir, runID, &PhaseStatus{
+			Phase:      "approval",
+			GateStatus: "waiting_user",
+			NextAction: "ask_user",
+		})
 	}
 	if err := WaitForApproval(ctx, sessionID, nodeName); err != nil {
 		if errors.Is(err, ErrApprovalRejected) && agent != nil {
 			agent.Session.Status = AgentWaitingRevision
 		}
+		if runID != "" {
+			_ = writePhaseStatusAt(baseDir, runID, &PhaseStatus{
+				Phase:      "approval",
+				GateStatus: "failed",
+				NextAction: "retry_generator",
+			})
+		}
 		return err
+	}
+	if runID != "" {
+		_ = writePhaseStatusAt(baseDir, runID, &PhaseStatus{
+			Phase:      "approval",
+			GateStatus: "passed",
+			NextAction: "run_evaluator",
+		})
 	}
 	return nil
 }
@@ -335,7 +444,85 @@ func RunReview(ctx context.Context, repoRoot, nodeDir string, plan *Plan, result
 		report.Passed = false
 		report.Issues = append(report.Issues, ReviewIssue{Severity: "blocking", Description: err.Error()})
 	}
+	_ = writePhaseStatusAt(repoRoot, plan.TaskID, &PhaseStatus{
+		Phase:      "evaluation",
+		GateStatus: phaseGateStatus(report.Passed),
+		NextAction: phaseNextAction(report.Passed),
+	})
 	return report, output, nil
+}
+
+func phaseGateStatus(passed bool) string {
+	if passed {
+		return "passed"
+	}
+	return "failed"
+}
+
+func phaseNextAction(passed bool) string {
+	if passed {
+		return "finish"
+	}
+	return "retry_generator"
+}
+
+func retryActionFor(fc string) string {
+	switch fc {
+	case "environment_block", "validator_issue":
+		return "fix_environment"
+	case "product_defect":
+		return "retry_generator"
+	case "transient":
+		return "retry_evaluation"
+	default:
+		return "ask_user"
+	}
+}
+
+func runIndependentEvaluator(ctx context.Context, repoRoot, runID string, plan *Plan) (*EvaluationResult, error) {
+	artifacts := adapter.ArtifactIndex{
+		PlanPath:    filepath.Join(repoRoot, "docs", "planning.md"),
+		OutputPath:  filepath.Join(repoRoot, "docs", "output.md"),
+		CodeDirs:    findCodeDirs(repoRoot, runID),
+		EvidenceDir: filepath.Join(repoRoot, ".workflow", "runs", runID),
+	}
+	runner := adapter.NewVerificationRunner(adapter.NewCodexSessionManager(adapter.CodexConfig{Command: "codex"}))
+	result, err := runner.Run(ctx, runID, verificationPlanFromPlan(plan), artifacts)
+	if err != nil {
+		return nil, err
+	}
+	evalResult := evaluationResultFromVerification(result)
+	if err := writeEvaluationResult(repoRoot, runID, evalResult); err != nil {
+		_ = err
+	}
+	return evalResult, nil
+}
+
+func verificationPlanFromPlan(plan *Plan) adapter.VerificationPlan {
+	if plan == nil {
+		return adapter.VerificationPlan{}
+	}
+	out := adapter.VerificationPlan{TaskID: plan.TaskID}
+	for _, st := range plan.Subtasks {
+		out.Subtasks = append(out.Subtasks, adapter.VerificationSubtask{
+			ID:                 st.ID,
+			Description:        st.Description,
+			AcceptanceCriteria: append([]string(nil), st.AcceptanceCriteria...),
+		})
+	}
+	return out
+}
+
+func findCodeDirs(repoRoot, runID string) []string {
+	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
+	entries, _ := os.ReadDir(runDir)
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() && (e.Name() == "code" || e.Name() == "src" || e.Name() == "changes") {
+			dirs = append(dirs, filepath.Join(runDir, e.Name()))
+		}
+	}
+	return dirs
 }
 
 func blockingRetryTargets(report *ReviewReport, results []*SubtaskResult) map[string][]ReviewIssue {

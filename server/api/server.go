@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -109,6 +110,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /runs/{id}/cancel", s.handleCancelRun)
 	s.mux.HandleFunc("POST /runs/{id}/resume", s.handleResumeRun)
 	s.mux.HandleFunc("GET /runs/{run_id}/events", s.handleSSEEvents)
+	s.mux.HandleFunc("GET /runs/{run_id}/pty-sessions", s.handlePTYSessions)
+	s.mux.HandleFunc("GET /runs/{run_id}/phase-status", s.handleGetPhaseStatus)
+	s.mux.HandleFunc("GET /api/runs/{run_id}/phase-status", s.handleGetPhaseStatus)
+	s.mux.HandleFunc("GET /runs/{run_id}/evaluation", s.handleGetEvaluation)
+	s.mux.HandleFunc("GET /api/runs/{run_id}/evaluation", s.handleGetEvaluation)
+	s.mux.HandleFunc("GET /ws/pty/{session_id}", s.handlePTYWebSocket)
 	s.mux.HandleFunc("GET /runs/{id}/steps", s.handleListSteps)
 	s.mux.HandleFunc("GET /runs/{id}/tasks", s.handleListTasks)
 	s.mux.HandleFunc("GET /runs/{id}/timeline", s.handleTimeline)
@@ -178,6 +185,30 @@ type taskResp struct {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleGetPhaseStatus(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("run_id")
+	statusPath := filepath.Join(".workflow", "runs", runID, "phase_status.json")
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		http.Error(w, "phase status not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleGetEvaluation(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("run_id")
+	evalPath := filepath.Join(".workflow", "runs", runID, "evaluation.json")
+	data, err := os.ReadFile(evalPath)
+	if err != nil {
+		http.Error(w, "evaluation not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
