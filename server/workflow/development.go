@@ -15,7 +15,21 @@ import (
 
 type WorkflowState = RunState
 
+const ConfigSkipInternalReviewEvaluation = "skip_internal_review_evaluation"
+
+type developmentOptions struct {
+	SkipInternalReviewEvaluation bool
+}
+
 func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *WorkflowState, err error) {
+	return runDevelopment(ctx, repoRoot, plan, developmentOptions{})
+}
+
+func RunDevelopmentOnly(ctx context.Context, repoRoot string, plan *Plan) (state *WorkflowState, err error) {
+	return runDevelopment(ctx, repoRoot, plan, developmentOptions{SkipInternalReviewEvaluation: true})
+}
+
+func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts developmentOptions) (state *WorkflowState, err error) {
 	if err := validatePlan(plan); err != nil {
 		return nil, err
 	}
@@ -53,6 +67,9 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *Wo
 	}, map[string]any{"subtask_agents": filepath.Join(nodeDir, "agents.json")})
 
 	results := runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, nil, 0)
+	if opts.SkipInternalReviewEvaluation {
+		return finishDevelopmentOnly(repoRoot, runID, nodeDir, nodeSession, agents, results)
+	}
 	report, reviewOut, err := RunReview(ctx, repoRoot, nodeDir, plan, results)
 	if err != nil {
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
@@ -106,38 +123,38 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *Wo
 			"subtask_agents": agentsPath,
 		},
 	}
-independentEval, independentEvalErr := runIndependentEvaluator(ctx, repoRoot, runID, plan)
-if independentEvalErr != nil {
-    _ = independentEvalErr
-} else if independentEval != nil && !independentEval.Passed {
-    _ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
-        Phase:        "evaluation",
-        GateStatus:   "failed",
-        FailureClass: independentEval.FailureClass,
-        NextAction:   retryActionFor(independentEval.FailureClass),
-        MissingItems: []string{independentEval.RetryAdvice},
-    })
-    skipDeferredPhaseStatus = true
-    return nil, fmt.Errorf("independent evaluation failed: %s - %s", independentEval.FailureClass, independentEval.RetryAdvice)
-}
-_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
-    Phase:      "development",
-    GateStatus: phaseGateStatus(report.Passed),
-    NextAction: phaseNextAction(report.Passed),
-})
-check, checkErr := checkCompletionAt(repoRoot, runID)
-if checkErr != nil {
-    // Completion checks are best-effort unless they produce a structured failed result.
-} else if !check.Passed {
-    _ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
-        Phase:        "development",
-        GateStatus:   "failed",
-        NextAction:   "retry_generator",
-        MissingItems: check.Missing,
-    })
-    skipDeferredPhaseStatus = true
-    return nil, fmt.Errorf("completion check failed: %v", check.Missing)
-}
+	independentEval, independentEvalErr := runIndependentEvaluator(ctx, repoRoot, runID, plan)
+	if independentEvalErr != nil {
+		_ = independentEvalErr
+	} else if independentEval != nil && !independentEval.Passed {
+		_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+			Phase:        "evaluation",
+			GateStatus:   "failed",
+			FailureClass: independentEval.FailureClass,
+			NextAction:   retryActionFor(independentEval.FailureClass),
+			MissingItems: []string{independentEval.RetryAdvice},
+		})
+		skipDeferredPhaseStatus = true
+		return nil, fmt.Errorf("independent evaluation failed: %s - %s", independentEval.FailureClass, independentEval.RetryAdvice)
+	}
+	_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+		Phase:      "development",
+		GateStatus: phaseGateStatus(report.Passed),
+		NextAction: phaseNextAction(report.Passed),
+	})
+	check, checkErr := checkCompletionAt(repoRoot, runID)
+	if checkErr != nil {
+		// Completion checks are best-effort unless they produce a structured failed result.
+	} else if !check.Passed {
+		_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+			Phase:        "development",
+			GateStatus:   "failed",
+			NextAction:   "retry_generator",
+			MissingItems: check.Missing,
+		})
+		skipDeferredPhaseStatus = true
+		return nil, fmt.Errorf("completion check failed: %v", check.Missing)
+	}
 	outputPath := filepath.Join(repoRoot, "docs", "output.md")
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
@@ -160,6 +177,37 @@ if checkErr != nil {
 		GateStatus: "passed",
 		NextAction: "finish",
 	})
+	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationCompleted})
+	return finalState, nil
+}
+
+func finishDevelopmentOnly(repoRoot, runID, nodeDir string, nodeSession AgentSession, agents []SubtaskAgent, results []*SubtaskResult) (*WorkflowState, error) {
+	agentsPath := filepath.Join(nodeDir, "agents.json")
+	if err := WriteSubtaskAgentManifest(agentsPath, agents); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
+		return nil, err
+	}
+	finalState := &WorkflowState{
+		RunID: runID,
+		Nodes: map[string]NodeStatus{
+			"node1": NodeCompleted,
+			"node2": NodeCompleted,
+			"node3": NodeCompleted,
+		},
+		Details: map[string]any{
+			"subtask_agents":  agentsPath,
+			"subtask_results": results,
+		},
+	}
+	_ = writePhaseStatusAt(repoRoot, runID, &PhaseStatus{
+		Phase:      "development",
+		GateStatus: "passed",
+		NextAction: "run_evaluator",
+	})
+	if err := writeJSONAtomic(filepath.Join(repoRoot, ".workflow", "runs", runID, "state.json"), finalState); err != nil {
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
+		return nil, err
+	}
 	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationCompleted})
 	return finalState, nil
 }

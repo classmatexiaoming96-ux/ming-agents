@@ -19,7 +19,11 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 	if err := json.Unmarshal(planJSON, &plan); err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
-	state, err := RunDevelopment(ctx, req.RepoRoot, &plan)
+	runDevelopment := RunDevelopment
+	if skipInternalReviewEvaluation(req.Config) {
+		runDevelopment = RunDevelopmentOnly
+	}
+	state, err := runDevelopment(ctx, req.RepoRoot, &plan)
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
@@ -28,4 +32,13 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 		Status: NodeStatusCompleted,
 		Values: map[string]any{"state": state},
 	}, nil
+}
+
+func skipInternalReviewEvaluation(config map[string]any) bool {
+	value, ok := config[ConfigSkipInternalReviewEvaluation]
+	if !ok {
+		return false
+	}
+	skip, ok := value.(bool)
+	return ok && skip
 }

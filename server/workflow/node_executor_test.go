@@ -41,6 +41,17 @@ func (blockingNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, 
 	return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusBlocked, Error: "waiting for reuse ack"}, nil
 }
 
+type configRecordingNode struct {
+	seen *map[string]any
+}
+
+func (n configRecordingNode) Kind() NodeKind { return NodeKindDevelopment }
+
+func (n configRecordingNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
+	*n.seen = req.Config
+	return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusCompleted}, nil
+}
+
 func TestNodeExecutorRunsNodesInTopologicalOrderAndPassesOutputs(t *testing.T) {
 	var seen []string
 	registry := NewNodeRegistry()
@@ -94,5 +105,31 @@ func TestNodeExecutorStopsOnBlockedNode(t *testing.T) {
 	}, nil)
 	if err == nil {
 		t.Fatal("Run() error = nil, want blocked error")
+	}
+}
+
+func TestNodeExecutorSetsDevelopmentSkipInternalReviewEvaluationFlag(t *testing.T) {
+	seen := map[string]any{}
+	registry := NewNodeRegistry()
+	registry.Register(NodeKindDevelopment, func() WorkflowNode { return configRecordingNode{seen: &seen} })
+
+	specConfig := map[string]any{"existing": "value"}
+	_, err := NewNodeExecutor(registry, NodeServices{}).Run(context.Background(), "/repo", WorkflowSpec{
+		RunID: "run-dev-config",
+		Nodes: []NodeSpec{
+			{ID: "development", Kind: NodeKindDevelopment, Config: specConfig},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := seen[ConfigSkipInternalReviewEvaluation]; got != true {
+		t.Fatalf("development skip flag = %v, want true", got)
+	}
+	if got := seen["existing"]; got != "value" {
+		t.Fatalf("existing config = %v, want value", got)
+	}
+	if _, mutated := specConfig[ConfigSkipInternalReviewEvaluation]; mutated {
+		t.Fatal("Run() mutated NodeSpec.Config with development skip flag")
 	}
 }
