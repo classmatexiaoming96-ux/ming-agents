@@ -77,7 +77,7 @@ func TestEvaluationResultFromVerificationClassifiesRawVerdict(t *testing.T) {
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
-	if result.FailureClass != "product_defect" {
+	if result.FailureClass != FailureClassProductDefect {
 		t.Fatalf("FailureClass = %q, want product_defect", result.FailureClass)
 	}
 	if !strings.Contains(result.RetryAdvice, "missing output") {
@@ -90,7 +90,7 @@ func TestEvaluationResultFromVerificationClassifiesRawVerdict(t *testing.T) {
 		Verdict:     "ERROR",
 		Reason:      "session closed",
 	})
-	if result.FailureClass != "validator_issue" {
+	if result.FailureClass != FailureClassValidatorIssue {
 		t.Fatalf("FailureClass = %q, want validator_issue", result.FailureClass)
 	}
 }

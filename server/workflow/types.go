@@ -36,13 +36,13 @@ type ReviewReport struct {
 }
 
 type ReviewIssue struct {
-	SubtaskID     string   `json:"subtask_id,omitempty"`
-	SessionID     string   `json:"session_id,omitempty"`
-	Severity      string   `json:"severity"`
-	FailureClass  string   `json:"failure_class,omitempty"`
-	EvidenceRefs  []string `json:"evidence_refs,omitempty"`
-	Description   string   `json:"description"`
-	RequiredFixes []string `json:"required_fixes,omitempty"`
+	SubtaskID     string       `json:"subtask_id,omitempty"`
+	SessionID     string       `json:"session_id,omitempty"`
+	Severity      string       `json:"severity"`
+	FailureClass  FailureClass `json:"failure_class,omitempty"`
+	EvidenceRefs  []string     `json:"evidence_refs,omitempty"`
+	Description   string       `json:"description"`
+	RequiredFixes []string     `json:"required_fixes,omitempty"`
 }
 
 type NodeStatus string
@@ -144,14 +144,14 @@ type ReviewDecision struct {
 
 // PhaseStatus 代表一个 run 的当前阶段状态
 type PhaseStatus struct {
-	RunID            string    `json:"run_id"`
-	Phase            string    `json:"phase"`       // clarification/planning/development/evaluation/approval/completed
-	GateStatus       string    `json:"gate_status"` // blocked/passed/failed/waiting_user
-	FailureClass     string    `json:"failure_class,omitempty"`
-	NextAction       string    `json:"next_action"` // run_evaluator/retry_generator/ask_user/finish
-	NextActionPrompt string    `json:"next_action_prompt,omitempty"`
-	MissingItems     []string  `json:"missing_items,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	RunID            string       `json:"run_id"`
+	Phase            string       `json:"phase"`       // clarification/planning/development/evaluation/approval/completed
+	GateStatus       string       `json:"gate_status"` // blocked/passed/failed/waiting_user
+	FailureClass     FailureClass `json:"failure_class,omitempty"`
+	NextAction       string       `json:"next_action"` // run_evaluator/retry_generator/ask_user/finish
+	NextActionPrompt string       `json:"next_action_prompt,omitempty"`
+	MissingItems     []string     `json:"missing_items,omitempty"`
+	UpdatedAt        time.Time    `json:"updated_at"`
 }
 
 // CompletionCheck 代表一个 run 的完成证据检查结果
@@ -208,7 +208,7 @@ type EvaluationResult struct {
 	EvaluatedAt    time.Time        `json:"evaluated_at"`
 	TestResults    []TestResult     `json:"test_results,omitempty"`
 	Evidence       []EvidenceRef    `json:"evidence,omitempty"`
-	FailureClass   string           `json:"failure_class,omitempty"` // 见下方分类
+	FailureClass   FailureClass     `json:"failure_class,omitempty"` // 见下方分类
 	RetryAdvice    string           `json:"retry_advice,omitempty"`
 	Passed         bool             `json:"passed"`
 	SubtaskResults []SubtaskFailure `json:"subtask_results,omitempty"`
@@ -216,15 +216,15 @@ type EvaluationResult struct {
 
 // TestResult 是单个验证命令的执行结果
 type TestResult struct {
-	TestID       string `json:"test_id"`
-	SubtaskID    string `json:"subtask_id,omitempty"`
-	Command      string `json:"command"`
-	ExitCode     int    `json:"exit_code"`
-	Passed       bool   `json:"passed"`
-	StdoutPath   string `json:"stdout_path,omitempty"`
-	StderrPath   string `json:"stderr_path,omitempty"`
-	DurationMs   int64  `json:"duration_ms,omitempty"`
-	FailureClass string `json:"failure_class,omitempty"`
+	TestID       string       `json:"test_id"`
+	SubtaskID    string       `json:"subtask_id,omitempty"`
+	Command      string       `json:"command"`
+	ExitCode     int          `json:"exit_code"`
+	Passed       bool         `json:"passed"`
+	StdoutPath   string       `json:"stdout_path,omitempty"`
+	StderrPath   string       `json:"stderr_path,omitempty"`
+	DurationMs   int64        `json:"duration_ms,omitempty"`
+	FailureClass FailureClass `json:"failure_class,omitempty"`
 }
 
 type SubtaskFailure struct {
@@ -233,7 +233,7 @@ type SubtaskFailure struct {
 	Reason       string        `json:"reason"`
 	EvidenceRefs []EvidenceRef `json:"evidence_refs,omitempty"`
 	RetryAdvice  string        `json:"retry_advice,omitempty"`
-	NextAction   string        `json:"next_action,omitempty"`
+	NextAction   NextAction    `json:"next_action,omitempty"`
 }
 
 // EvidenceRef 是对 evidence 文件的引用

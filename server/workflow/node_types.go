@@ -44,10 +44,23 @@ const (
 	RollbackActionFixClarification  RollbackAction = "fix_clarification"
 	RollbackActionRegeneratePlan    RollbackAction = "regenerate_plan"
 	RollbackActionRegenerateSubtask RollbackAction = "regenerate_subtask"
+	RollbackActionRetrySubtask      RollbackAction = "retry_subtask"
+	RollbackActionRetryReport       RollbackAction = "retry_report"
 	RollbackActionFixEnvironment    RollbackAction = "fix_environment"
 	RollbackActionRetryGenerator    RollbackAction = "retry_generator"
 	RollbackActionAskUser           RollbackAction = "ask_user"
 	RollbackActionBlocked           RollbackAction = "blocked"
+)
+
+type NextAction string
+
+const (
+	NextActionRetrySubtask      NextAction = "retry_subtask"
+	NextActionFixEnvironment    NextAction = "fix_environment"
+	NextActionAskUser           NextAction = "ask_user"
+	NextActionRegenerateSubtask NextAction = "regenerate_subtask"
+	NextActionRetryReport       NextAction = "retry_report"
+	NextActionRetryGenerator    NextAction = "retry_generator"
 )
 
 type SessionReusePolicy string

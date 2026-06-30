@@ -23,7 +23,7 @@ type AttemptEvent struct {
 	ArtifactRefs    []ArtifactRef       `json:"artifact_refs,omitempty"`
 	PromptDelta     *AttemptPromptDelta `json:"prompt_delta,omitempty"`
 	Decision        *RollbackDecision   `json:"decision,omitempty"`
-	NextAction      string              `json:"next_action,omitempty"`
+	NextAction      NextAction          `json:"next_action,omitempty"`
 	Outcome         *AttemptOutcome     `json:"outcome,omitempty"`
 	StartedAt       time.Time           `json:"started_at"`
 	FinishedAt      time.Time           `json:"finished_at,omitempty"`

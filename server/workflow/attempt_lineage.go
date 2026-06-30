@@ -7,14 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
+var attemptLineageLocks sync.Map
+
 func AppendAttemptEvent(repoRoot string, event AttemptEvent) error {
-	if strings.TrimSpace(event.RunID) == "" {
-		return fmt.Errorf("append attempt event: run_id is required")
+	if err := validatePathID(event.RunID, "run_id"); err != nil {
+		return fmt.Errorf("append attempt event: %w", err)
 	}
-	if strings.TrimSpace(event.NodeID) == "" {
-		return fmt.Errorf("append attempt event: node_id is required")
+	if err := validatePathID(event.NodeID, "node_id"); err != nil {
+		return fmt.Errorf("append attempt event: %w", err)
 	}
 
 	data, err := json.Marshal(event)
@@ -22,6 +25,10 @@ func AppendAttemptEvent(repoRoot string, event AttemptEvent) error {
 		return fmt.Errorf("marshal attempt event: %w", err)
 	}
 	line := append(data, '\n')
+
+	lock := attemptLineageLock(repoRoot, event.RunID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	paths := []string{
 		attemptNodePath(repoRoot, event.RunID, event.NodeID),
@@ -49,6 +56,16 @@ func AppendAttemptEvent(repoRoot string, event AttemptEvent) error {
 }
 
 func ReadAttemptEvents(repoRoot, runID, nodeID string) ([]AttemptEvent, error) {
+	if err := validatePathID(runID, "run_id"); err != nil {
+		return nil, fmt.Errorf("read attempt events: %w", err)
+	}
+	if err := validatePathID(nodeID, "node_id"); err != nil {
+		return nil, fmt.Errorf("read attempt events: %w", err)
+	}
+	lock := attemptLineageLock(repoRoot, runID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	path := attemptNodePath(repoRoot, runID, nodeID)
 	file, err := os.Open(path)
 	if err != nil {
@@ -114,6 +131,32 @@ func (s *fileLineageStore) List(filter AttemptFilter) ([]AttemptEvent, error) {
 func safeScope(scope string) string {
 	replacer := strings.NewReplacer(":", "_", "/", "_", "\\", "_", " ", "_")
 	return replacer.Replace(scope)
+}
+
+func validatePathID(name, label string) error {
+	if name == "" {
+		return fmt.Errorf("%s is required", label)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("%s %q contains disallowed path traversal", label, name)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("%s %q contains disallowed character %q", label, name, r)
+		}
+	}
+	return nil
+}
+
+func attemptLineageLock(repoRoot, runID string) *sync.Mutex {
+	key := repoRoot + "\x00" + runID
+	value, _ := attemptLineageLocks.LoadOrStore(key, &sync.Mutex{})
+	return value.(*sync.Mutex)
 }
 
 func attemptNodePath(repoRoot, runID, nodeID string) string {

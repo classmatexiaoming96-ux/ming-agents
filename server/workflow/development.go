@@ -514,13 +514,13 @@ func phaseNextAction(passed bool) string {
 	return "retry_generator"
 }
 
-func retryActionFor(fc string) string {
+func retryActionFor(fc FailureClass) string {
 	switch fc {
-	case "environment_block", "validator_issue":
+	case FailureClassEnvironmentBlock, FailureClassValidatorIssue:
 		return "fix_environment"
-	case "product_defect":
+	case FailureClassProductDefect:
 		return "retry_generator"
-	case "transient":
+	case FailureClassTransient:
 		return "retry_evaluation"
 	default:
 		return "ask_user"

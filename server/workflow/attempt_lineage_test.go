@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -42,7 +43,7 @@ func TestAttemptEventJSONRoundTrip(t *testing.T) {
 			NewAttempt:  1,
 			Rationale:   "contract error",
 		},
-		NextAction: "retry_report",
+		NextAction: NextActionRetryReport,
 		Outcome: &AttemptOutcome{
 			Status:       "failed",
 			FailureClass: FailureClassContractError,
@@ -224,5 +225,85 @@ func TestFileLineageStoreListAppliesFilter(t *testing.T) {
 	}
 	if got[0].Attempt != 2 || got[0].SubtaskID != "api" {
 		t.Fatalf("got[0] = %+v, want api attempt 2", got[0])
+	}
+}
+
+func TestAppendAttemptEventConcurrent(t *testing.T) {
+	tmpDir := t.TempDir()
+	const total = 100
+
+	var wg sync.WaitGroup
+	errs := make(chan error, total)
+	for i := 0; i < total; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- AppendAttemptEvent(tmpDir, AttemptEvent{
+				RunID:     "run-concurrent",
+				NodeID:    "review",
+				NodeKind:  NodeKindReview,
+				Scope:     "review:subtask-api",
+				SubtaskID: "api",
+				Attempt:   i,
+				StartedAt: time.Now().UTC(),
+			})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("AppendAttemptEvent() error = %v", err)
+		}
+	}
+
+	events, err := ReadAttemptEvents(tmpDir, "run-concurrent", "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != total {
+		t.Fatalf("len(events) = %d, want %d", len(events), total)
+	}
+	seen := map[int]bool{}
+	for _, event := range events {
+		seen[event.Attempt] = true
+	}
+	for i := 0; i < total; i++ {
+		if !seen[i] {
+			t.Fatalf("missing attempt %d in concurrent append results", i)
+		}
+	}
+}
+
+func TestAppendAttemptEventRejectsUnsafePathIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	cases := []struct {
+		name   string
+		runID  string
+		nodeID string
+	}{
+		{name: "empty run", runID: "", nodeID: "review"},
+		{name: "slash", runID: "run/1", nodeID: "review"},
+		{name: "backslash", runID: "run\\1", nodeID: "review"},
+		{name: "dotdot", runID: "run..1", nodeID: "review"},
+		{name: "space", runID: "run 1", nodeID: "review"},
+		{name: "chinese", runID: "运行", nodeID: "review"},
+		{name: "emoji", runID: "run🙂", nodeID: "review"},
+		{name: "unsafe node", runID: "run-1", nodeID: "../review"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := AppendAttemptEvent(tmpDir, AttemptEvent{
+				RunID:     tc.runID,
+				NodeID:    tc.nodeID,
+				NodeKind:  NodeKindReview,
+				Attempt:   0,
+				StartedAt: time.Now().UTC(),
+			})
+			if err == nil {
+				t.Fatal("AppendAttemptEvent() error = nil, want invalid path id error")
+			}
+		})
 	}
 }

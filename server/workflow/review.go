@@ -105,7 +105,7 @@ func parseReviewIssueField(issue *ReviewIssue, line string) {
 	case "session_id", "session":
 		issue.SessionID = value
 	case "failure_class", "failure class":
-		issue.FailureClass = value
+		issue.FailureClass = FailureClass(value)
 	case "evidence_refs", "evidence refs", "evidence":
 		issue.EvidenceRefs = splitReviewCSV(value)
 	case "description":

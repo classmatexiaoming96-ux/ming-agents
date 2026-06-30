@@ -41,8 +41,9 @@ func RunEvaluation(runCtx context.Context, repoRoot, runID string) (*EvaluationR
 	if !result.Passed {
 		result.FailureClass = classifyFailure(result.TestResults)
 		result.RetryAdvice = retryAdviceFor(result.FailureClass)
+		result.SubtaskResults = subtaskFailuresFromTestResults(result.TestResults, result.Evidence)
 	} else {
-		result.FailureClass = "none"
+		result.FailureClass = FailureClassNone
 	}
 
 	if err := writeEvaluationResult(repoRoot, runID, result); err != nil {
@@ -117,19 +118,25 @@ func runTestForSubtask(runCtx context.Context, repoRoot, runID, subtaskDir strin
 		stderrPath = errPath
 	}
 
+	failureClass := FailureClassNone
+	if exitCode != 0 {
+		failureClass = classifyCommandResult(exitCode, cmdStr, stdout.String(), stderr.String())
+	}
+
 	return TestResult{
-		TestID:     subtaskDir,
-		SubtaskID:  subtaskDir,
-		Command:    cmdStr,
-		ExitCode:   exitCode,
-		Passed:     exitCode == 0,
-		StdoutPath: outPath,
-		StderrPath: stderrPath,
-		DurationMs: time.Since(start).Milliseconds(),
+		TestID:       subtaskDir,
+		SubtaskID:    subtaskDir,
+		Command:      cmdStr,
+		ExitCode:     exitCode,
+		Passed:       exitCode == 0,
+		StdoutPath:   outPath,
+		StderrPath:   stderrPath,
+		DurationMs:   time.Since(start).Milliseconds(),
+		FailureClass: failureClass,
 	}
 }
 
-func classifyFailure(results []TestResult) string {
+func classifyFailure(results []TestResult) FailureClass {
 	hasRealFailure := false
 	hasEnvError := false
 	hasValidatorError := false
@@ -149,26 +156,26 @@ func classifyFailure(results []TestResult) string {
 	}
 
 	if hasValidatorError {
-		return "validator_issue"
+		return FailureClassValidatorIssue
 	}
 	if hasEnvError {
-		return "environment_block"
+		return FailureClassEnvironmentBlock
 	}
 	if hasRealFailure {
-		return "product_defect"
+		return FailureClassProductDefect
 	}
-	return "inconclusive"
+	return FailureClassInconclusive
 }
 
-func retryAdviceFor(fc string) string {
+func retryAdviceFor(fc FailureClass) string {
 	switch fc {
-	case "environment_block":
+	case FailureClassEnvironmentBlock:
 		return "修复环境问题后重试：安装依赖/检查网络/确认权限"
-	case "validator_issue":
+	case FailureClassValidatorIssue:
 		return "修复验证工具问题后重试：检查测试框架/断言/超时配置"
-	case "transient":
+	case FailureClassTransient:
 		return "建议重试 1-2 次，flaky test 需要单独处理"
-	case "product_defect":
+	case FailureClassProductDefect:
 		return "需要修复代码问题后重试"
 	default:
 		return "检查验证结果后重试"
@@ -185,7 +192,7 @@ func evaluationResultFromVerification(result *adapter.VerificationResult) *Evalu
 		EvaluatedAt:  result.EvaluatedAt,
 		FailureClass: failureClass,
 		RetryAdvice:  retryAdviceForVerification(failureClass, result.Reason),
-		Passed:       failureClass == "none",
+		Passed:       failureClass == FailureClassNone,
 	}
 	for _, ref := range result.Evidence {
 		out.Evidence = append(out.Evidence, EvidenceRef{Type: ref.Type, Path: ref.Path})
@@ -193,38 +200,101 @@ func evaluationResultFromVerification(result *adapter.VerificationResult) *Evalu
 	return out
 }
 
-func classifyVerificationVerdict(verdict, reason string) string {
+func classifyVerificationVerdict(verdict, reason string) FailureClass {
 	normalizedVerdict := strings.ToLower(strings.TrimSpace(verdict))
 	normalizedReason := strings.ToLower(strings.TrimSpace(reason))
 	switch normalizedVerdict {
 	case "pass":
-		return "none"
+		return FailureClassNone
 	case "error":
-		return "validator_issue"
+		return FailureClassValidatorIssue
 	case "fail":
 		if strings.Contains(normalizedReason, "go: not found") ||
 			strings.Contains(normalizedReason, "npm: not found") ||
 			strings.Contains(normalizedReason, "command not found") ||
 			strings.Contains(normalizedReason, "permission denied") ||
 			strings.Contains(normalizedReason, "network") {
-			return "environment_block"
+			return FailureClassEnvironmentBlock
 		}
-		return "product_defect"
+		return FailureClassProductDefect
 	case "":
-		return "inconclusive"
+		return FailureClassInconclusive
 	default:
-		return "inconclusive"
+		return FailureClassInconclusive
 	}
 }
 
-func retryAdviceForVerification(failureClass, reason string) string {
-	if failureClass == "none" {
+func retryAdviceForVerification(failureClass FailureClass, reason string) string {
+	if failureClass == FailureClassNone {
 		return ""
 	}
 	if strings.TrimSpace(reason) != "" {
 		return "验证失败: " + strings.TrimSpace(reason)
 	}
 	return retryAdviceFor(failureClass)
+}
+
+func classifyCommandResult(exitCode int, command, stdout, stderr string) FailureClass {
+	failureText := strings.ToLower(command + "\n" + stdout + "\n" + stderr)
+	switch {
+	case exitCode == -1:
+		return FailureClassValidatorIssue
+	case exitCode == 2, exitCode == 126, exitCode == 127:
+		return FailureClassEnvironmentBlock
+	case strings.Contains(failureText, "go: not found"),
+		strings.Contains(failureText, "npm: not found"),
+		strings.Contains(failureText, "command not found"),
+		strings.Contains(failureText, "permission denied"),
+		strings.Contains(failureText, "network"):
+		return FailureClassEnvironmentBlock
+	case exitCode != 0:
+		return FailureClassProductDefect
+	default:
+		return FailureClassNone
+	}
+}
+
+func subtaskFailuresFromTestResults(results []TestResult, evidence []EvidenceRef) []SubtaskFailure {
+	var failures []SubtaskFailure
+	for _, result := range results {
+		if result.Passed {
+			continue
+		}
+		failureClass := result.FailureClass
+		if failureClass == "" {
+			failureClass = classifyCommandResult(result.ExitCode, result.Command, "", "")
+		}
+		failures = append(failures, SubtaskFailure{
+			SubtaskID:    result.SubtaskID,
+			FailureClass: failureClass,
+			Reason:       evaluationFailureReason(result),
+			EvidenceRefs: append([]EvidenceRef(nil), evidence...),
+			RetryAdvice:  retryAdviceFor(failureClass),
+			NextAction:   nextActionForFailure(failureClass),
+		})
+	}
+	return failures
+}
+
+func evaluationFailureReason(result TestResult) string {
+	if result.StderrPath != "" {
+		return "test command failed; see " + result.StderrPath
+	}
+	if result.StdoutPath != "" {
+		return "test command failed; see " + result.StdoutPath
+	}
+	return "test command failed"
+}
+
+func nextActionForFailure(failureClass FailureClass) NextAction {
+	switch failureClass {
+	case FailureClassEnvironmentBlock, FailureClassValidatorIssue:
+		return NextActionFixEnvironment
+	case FailureClassProductDefect:
+		return NextActionRetrySubtask
+	default:
+		return NextActionAskUser
+	}
 }
 
 func collectEvidence(repoRoot, runID string) []EvidenceRef {

@@ -107,7 +107,7 @@ Two criteria are not satisfied yet.
 	if len(report.Issues[0].RequiredFixes) != 1 {
 		t.Fatalf("first issue fixes = %#v", report.Issues[0].RequiredFixes)
 	}
-	if report.Issues[0].FailureClass != "product_defect" {
+	if report.Issues[0].FailureClass != FailureClassProductDefect {
 		t.Fatalf("first issue failure class = %q", report.Issues[0].FailureClass)
 	}
 	if got := report.Issues[0].EvidenceRefs; len(got) != 2 || got[0] != "test.log" || got[1] != "build.log" {
