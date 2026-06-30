@@ -25,3 +25,24 @@ func writePhaseStatusAt(baseDir, runID string, status *PhaseStatus) error {
 	}
 	return os.WriteFile(filepath.Join(runDir, "phase_status.json"), data, 0644)
 }
+
+func NextActionForFailure(fc FailureClass) string {
+	switch fc {
+	case FailureClassProductDefect:
+		return "retry_generator"
+	case FailureClassEnvironmentBlock, FailureClassValidatorIssue:
+		return "fix_environment"
+	case FailureClassContractError:
+		return "retry_report"
+	case FailureClassMissingEvidence, FailureClassHumanReject, FailureClassInconclusive, FailureClassInvalidInput:
+		return "ask_user"
+	case FailureClassTransient:
+		return "retry_evaluation"
+	case FailureClassUserBlocked, FailureClassUnsafeOrOutOfScope:
+		return "blocked"
+	case FailureClassNone, "":
+		return "finish"
+	default:
+		return "ask_user"
+	}
+}
