@@ -310,7 +310,7 @@ func subtaskFailuresFromTestResults(results []TestResult, evidence []EvidenceRef
 			Reason:       evaluationFailureReason(result),
 			EvidenceRefs: append([]EvidenceRef(nil), evidence...),
 			RetryAdvice:  retryAdviceFor(failureClass),
-			NextAction:   nextActionForFailure(failureClass),
+			NextAction:   NextAction(NextActionForFailure(failureClass)),
 		})
 	}
 	return failures
@@ -324,17 +324,6 @@ func evaluationFailureReason(result TestResult) string {
 		return "test command failed; see " + result.StdoutPath
 	}
 	return "test command failed"
-}
-
-func nextActionForFailure(failureClass FailureClass) NextAction {
-	switch failureClass {
-	case FailureClassEnvironmentBlock, FailureClassValidatorIssue:
-		return NextActionFixEnvironment
-	case FailureClassProductDefect:
-		return NextActionRetrySubtask
-	default:
-		return NextActionAskUser
-	}
 }
 
 func collectEvidence(repoRoot, runID string) []EvidenceRef {

@@ -94,7 +94,7 @@ func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts devel
 			Phase:        "evaluation",
 			GateStatus:   "failed",
 			FailureClass: evalResult.FailureClass,
-			NextAction:   retryActionFor(evalResult.FailureClass),
+			NextAction:   NextActionForFailure(evalResult.FailureClass),
 			MissingItems: []string{evalResult.RetryAdvice},
 		})
 		skipDeferredPhaseStatus = true
@@ -131,7 +131,7 @@ func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts devel
 			Phase:        "evaluation",
 			GateStatus:   "failed",
 			FailureClass: independentEval.FailureClass,
-			NextAction:   retryActionFor(independentEval.FailureClass),
+			NextAction:   NextActionForFailure(independentEval.FailureClass),
 			MissingItems: []string{independentEval.RetryAdvice},
 		})
 		skipDeferredPhaseStatus = true
@@ -544,19 +544,6 @@ func phaseNextAction(passed bool) string {
 		return "finish"
 	}
 	return "retry_generator"
-}
-
-func retryActionFor(fc FailureClass) string {
-	switch fc {
-	case FailureClassEnvironmentBlock, FailureClassValidatorIssue:
-		return "fix_environment"
-	case FailureClassProductDefect:
-		return "retry_generator"
-	case FailureClassTransient:
-		return "retry_evaluation"
-	default:
-		return "ask_user"
-	}
 }
 
 func runIndependentEvaluator(ctx context.Context, repoRoot, runID string, plan *Plan) (*EvaluationResult, error) {
