@@ -203,6 +203,12 @@ func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *pla
 			Status:   NotificationCompleted,
 		})
 
+		// 写 initial attempt（attempt=0，best-effort，不中断主流程）。
+		// revision 后的 attempt 在重跑分支写入。
+		if revisions == 0 {
+			writePlanningAttempt(repoRoot, run.RunID, planningLineageNodeID, out.SessionID, revisions, "initial", FailureClassNone, "", out.PromptFile, out.OutFile, out.ExitFile)
+		}
+
 		approvalErr := WaitForApproval(ctx, out.SessionID, run.AgentID)
 		if approvalErr == nil {
 			return nil
@@ -226,6 +232,8 @@ func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *pla
 			Role:    "user",
 			Content: revision,
 		})
+
+		writePlanningAttempt(repoRoot, run.RunID, planningLineageNodeID, out.SessionID, revisions+1, "human_reject", FailureClassHumanReject, revision, out.PromptFile, out.OutFile, out.ExitFile)
 
 		_ = EmitNodeNotification(out.SessionID, NodeNotification{
 			RunID:    run.RunID,
@@ -438,4 +446,51 @@ func runCodexPrompt(ctx context.Context, repoRoot, prompt string, timeout time.D
 func writeWorkflowState(repoRoot, runID string, nodes map[string]NodeStatus, details map[string]any) error {
 	state := RunState{RunID: runID, Nodes: nodes, Details: details}
 	return writeJSONAtomic(filepath.Join(repoRoot, ".workflow", "runs", runID, "state.json"), state)
+}
+
+const planningLineageNodeID = "planning"
+
+// writePlanningAttempt 写 planning attempt event（best-effort）。
+// attempt 编号语义：0 = initial（agent 第一次跑完），1+ = revision（reject 后重跑）。
+// lineage 写入失败不中断主流程。
+func writePlanningAttempt(repoRoot, runID, nodeID, sessionID string, attempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) {
+	if runID == "" {
+		// 没有有效 runID 时无法构造 lineage 路径，直接跳过（best-effort）。
+		return
+	}
+	now := time.Now().UTC()
+	event := AttemptEvent{
+		RunID:      runID,
+		NodeID:     nodeID,
+		NodeKind:   NodeKindPlanning,
+		Scope:      "node-agent",
+		SessionID:  sessionID,
+		Role:       "codex",
+		Attempt:    attempt,
+		Trigger:    trigger,
+		StartedAt:  now,
+		FinishedAt: now,
+	}
+	if failureClass != "" {
+		event.FailureClass = failureClass
+	}
+	if rejectionReason != "" {
+		event.RejectionReason = rejectionReason
+		event.PromptDelta = &AttemptPromptDelta{
+			AddedFeedback: "reviewer requested planning revision: " + rejectionReason,
+		}
+	}
+	if promptPath != "" {
+		event.PromptPath = promptPath
+	}
+	if outputPath != "" {
+		event.OutputPath = outputPath
+	}
+	if exitPath != "" {
+		event.ExitPath = exitPath
+	}
+	if err := AppendAttemptEvent(repoRoot, event); err != nil {
+		// best-effort：lineage 写入失败不中断主流程。
+		_ = err
+	}
 }

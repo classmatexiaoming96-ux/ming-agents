@@ -757,6 +757,118 @@ func TestClarificationRevisionWritesLineage(t *testing.T) {
 	}
 }
 
+func TestPlanningRevisionWritesLineage(t *testing.T) {
+	tmpDir := t.TempDir()
+	runID := "20260630-130000"
+	run := planningAgentRun{
+		RunID:       runID,
+		AgentID:     "node2:codex",
+		AgentType:   "codex",
+		SessionID:   NewPTYSessionID(runID, "node2", "codex", 1),
+		Prompt:      "initial planning prompt",
+		PromptFile:  filepath.Join(tmpDir, "codex.prompt.md"),
+		OutFile:     filepath.Join(tmpDir, "codex.out.md"),
+		ExitFile:    filepath.Join(tmpDir, "codex.exit"),
+		HistoryFile: filepath.Join(tmpDir, "codex.messages.jsonl"),
+		Session: AgentSession{
+			ID:          NewPTYSessionID(runID, "node2", "codex", 1),
+			AgentType:   "codex",
+			Status:      AgentSessionPending,
+			HistoryFile: filepath.Join(tmpDir, "codex.messages.jsonl"),
+		},
+	}
+	RegisterAgentSession(run.Session)
+	out := planningAgentOutput{
+		AgentType:   run.AgentType,
+		SessionID:   run.SessionID,
+		Status:      "completed",
+		Output:      "first planning output",
+		PromptFile:  run.PromptFile,
+		OutFile:     run.OutFile,
+		ExitFile:    run.ExitFile,
+		HistoryFile: run.HistoryFile,
+		Session:     run.Session,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	approverDone := make(chan error, 1)
+	go func() {
+		waitForHistoryRoleCount(t, run.HistoryFile, "approval_request", 1)
+		if err := RejectSession(run.SessionID, run.AgentID, ReviewDecision{
+			Reason:     "tighten the plan",
+			RejectType: RejectTypeReplan,
+		}); err != nil {
+			approverDone <- err
+			return
+		}
+		waitForHistoryRoleCount(t, run.HistoryFile, "approval_request", 2)
+		approverDone <- ApproveSession(run.SessionID, run.AgentID, "approved after revision")
+	}()
+
+	err := waitForPlanningAgentApproval(ctx, tmpDir, &out, run, func(ctx context.Context, repoRoot string, next planningAgentRun) planningAgentOutput {
+		next.Session = run.Session
+		return planningAgentOutput{
+			AgentType:   next.AgentType,
+			SessionID:   next.SessionID,
+			Status:      "completed",
+			Output:      "revised planning output",
+			PromptFile:  next.PromptFile,
+			OutFile:     next.OutFile,
+			ExitFile:    next.ExitFile,
+			HistoryFile: next.HistoryFile,
+			Session:     next.Session,
+		}
+	})
+	if err != nil {
+		t.Fatalf("waitForPlanningAgentApproval() error = %v", err)
+	}
+	if err := <-approverDone; err != nil {
+		t.Fatalf("approval goroutine error = %v", err)
+	}
+
+	nodePath := filepath.Join(tmpDir, ".workflow", "runs", runID, "planning", "attempts.jsonl")
+	if _, err := os.Stat(nodePath); err != nil {
+		t.Fatalf("attempts.jsonl not created: %v", err)
+	}
+
+	events, err := ReadAttemptEvents(tmpDir, runID, "planning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("expected >= 2 events, got %d", len(events))
+	}
+	if events[0].Attempt != 0 {
+		t.Errorf("first event attempt = %d, want 0", events[0].Attempt)
+	}
+	if events[0].NodeKind != NodeKindPlanning {
+		t.Errorf("first event node_kind = %q, want %q", events[0].NodeKind, NodeKindPlanning)
+	}
+	if events[0].Scope != "node-agent" {
+		t.Errorf("first event scope = %q, want node-agent", events[0].Scope)
+	}
+	if events[0].Role != "codex" {
+		t.Errorf("first event role = %q, want codex", events[0].Role)
+	}
+
+	var foundReject bool
+	for _, e := range events {
+		if e.FailureClass == FailureClassHumanReject && e.RejectionReason != "" {
+			foundReject = true
+			if e.Attempt < 1 {
+				t.Errorf("human_reject event attempt = %d, want >= 1", e.Attempt)
+			}
+			if e.RejectionReason != "tighten the plan" {
+				t.Errorf("rejection reason = %q, want tighten the plan", e.RejectionReason)
+			}
+		}
+	}
+	if !foundReject {
+		t.Errorf("no human_reject event with rejection reason found")
+	}
+}
+
 func TestWaitForSubtaskApprovalRejectsAndRerunsUntilApproved(t *testing.T) {
 	dir := t.TempDir()
 	sessionID := "subtask-agent-session"
