@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -37,4 +38,39 @@ func TestNodeRegistryReturnsErrorForUnknownKind(t *testing.T) {
 	if !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("Resolve() error = %q, want missing kind", err.Error())
 	}
+}
+
+func TestWorkflowNodeInterfaceMinimal(t *testing.T) {
+	typ := reflect.TypeOf((*WorkflowNode)(nil)).Elem()
+	if typ.NumMethod() != 2 {
+		t.Fatalf("WorkflowNode has %d methods, want 2", typ.NumMethod())
+	}
+	if _, ok := typ.MethodByName("Kind"); !ok {
+		t.Fatal("WorkflowNode missing Kind method")
+	}
+	if _, ok := typ.MethodByName("Execute"); !ok {
+		t.Fatal("WorkflowNode missing Execute method")
+	}
+}
+
+func TestRollbackTypesExposeFailureClasses(t *testing.T) {
+	classes := []FailureClass{
+		FailureClassNone,
+		FailureClassHumanReject,
+		FailureClassTransient,
+		FailureClassMissingEvidence,
+		FailureClassContractError,
+		FailureClassInconclusive,
+		FailureClassProductDefect,
+		FailureClassEnvironmentBlock,
+		FailureClassValidatorIssue,
+		FailureClassInvalidInput,
+		FailureClassUserBlocked,
+		FailureClassUnsafeOrOutOfScope,
+	}
+	if len(classes) != 12 {
+		t.Fatalf("len(classes) = %d, want 12", len(classes))
+	}
+
+	var _ RollbackCapableNode
 }
