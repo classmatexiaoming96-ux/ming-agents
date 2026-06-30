@@ -880,6 +880,7 @@ func TestDevelopmentSubtaskInitialWritesLineage(t *testing.T) {
 		"session-dev-api",
 		"api",
 		0,
+		-1,
 		"initial",
 		FailureClassNone,
 		"",
@@ -922,8 +923,8 @@ func TestDevelopmentSubtaskRevisionWritesLineage(t *testing.T) {
 	tmpDir := t.TempDir()
 	runID := "20260630-141000"
 
-	writeDevelopmentAttempt(tmpDir, runID, developmentLineageNodeID, "session-dev-api", "api", 0, "initial", FailureClassNone, "", "initial.prompt.md", "initial.out.md", "initial.exit")
-	writeDevelopmentAttempt(tmpDir, runID, developmentLineageNodeID, "session-dev-api", "api", 1, "human_reject", FailureClassHumanReject, "add API validation", "revision.prompt.md", "revision.out.md", "revision.exit")
+	writeDevelopmentAttempt(tmpDir, runID, developmentLineageNodeID, "session-dev-api", "api", 0, -1, "initial", FailureClassNone, "", "initial.prompt.md", "initial.out.md", "initial.exit")
+	writeDevelopmentAttempt(tmpDir, runID, developmentLineageNodeID, "session-dev-api", "api", 1, 0, "human_reject", FailureClassHumanReject, "add API validation", "revision.prompt.md", "revision.out.md", "revision.exit")
 
 	events, err := ReadAttemptEvents(tmpDir, runID, developmentLineageNodeID)
 	if err != nil {
@@ -961,7 +962,7 @@ func TestDevelopmentSubtaskRevisionWritesLineage(t *testing.T) {
 func TestWriteDevelopmentAttemptEmptyRunIDSkips(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	writeDevelopmentAttempt(tmpDir, "", developmentLineageNodeID, "session-dev-api", "api", 0, "initial", FailureClassNone, "", "prompt.md", "out.md", "exit")
+	writeDevelopmentAttempt(tmpDir, "", developmentLineageNodeID, "session-dev-api", "api", 0, -1, "initial", FailureClassNone, "", "prompt.md", "out.md", "exit")
 
 	if _, err := os.Stat(filepath.Join(tmpDir, ".workflow")); !os.IsNotExist(err) {
 		t.Fatalf(".workflow stat error = %v, want not exist", err)

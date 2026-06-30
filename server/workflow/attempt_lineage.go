@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 var attemptLineageLocks sync.Map
@@ -243,9 +245,61 @@ func captureAppendStates(paths []string) ([]appendState, error) {
 func rollbackAppends(states []appendState) {
 	for _, state := range states {
 		if !state.exists {
-			_ = os.Remove(state.path)
+			if err := os.Remove(state.path); err != nil {
+				log.Printf("rollback: remove %s: %v", state.path, err)
+			}
 			continue
 		}
-		_ = os.Truncate(state.path, state.size)
+		if err := os.Truncate(state.path, state.size); err != nil {
+			log.Printf("rollback: truncate %s to %d: %v", state.path, state.size, err)
+		}
 	}
+}
+
+// writeAttemptEvent is the shared lineage write helper used by all node writeXxxAttempt functions.
+// It constructs a minimal AttemptEvent and writes it via RecordAttemptEvent.
+// runID empty → skip silently (best-effort).
+func writeAttemptEvent(repoRoot, runID, nodeID string, nodeKind NodeKind, scope, role, sessionID string, attempt, parentAttempt int, trigger string, failureClass FailureClass, failureReason, rejectionReason string, outcome *AttemptOutcome, promptDelta *AttemptPromptDelta, promptPath, outputPath, exitPath string) error {
+	if runID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	event := AttemptEvent{
+		RunID:      runID,
+		NodeID:     nodeID,
+		NodeKind:   nodeKind,
+		Scope:      scope,
+		SessionID:  sessionID,
+		Role:       role,
+		Attempt:    attempt,
+		Trigger:    trigger,
+		StartedAt:  now,
+		FinishedAt: now,
+	}
+	if parentAttempt >= 0 {
+		event.ParentAttempt = &parentAttempt
+	}
+	if failureClass != "" {
+		event.FailureClass = failureClass
+		event.FailureReason = string(failureClass)
+	}
+	if outcome != nil {
+		event.Outcome = outcome
+	}
+	if rejectionReason != "" {
+		event.RejectionReason = rejectionReason
+	}
+	if promptDelta != nil {
+		event.PromptDelta = promptDelta
+	}
+	if promptPath != "" {
+		event.PromptPath = promptPath
+	}
+	if outputPath != "" {
+		event.OutputPath = outputPath
+	}
+	if exitPath != "" {
+		event.ExitPath = exitPath
+	}
+	return RecordAttemptEvent(repoRoot, event)
 }

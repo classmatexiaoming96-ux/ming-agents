@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,10 @@ func RunEvaluation(runCtx context.Context, repoRoot, runID string) (*EvaluationR
 		Passed:      true,
 	}
 
-	_, _ = ReadPhaseStatus(repoRoot, runID)
+	_, err := ReadPhaseStatus(repoRoot, runID)
+	if err != nil {
+		log.Printf("RunEvaluation: ReadPhaseStatus: %v", err)
+	}
 	subtasks := discoverSubtasks(repoRoot, runID)
 	for _, st := range subtasks {
 		tr := runTestForSubtask(runCtx, repoRoot, runID, st)
@@ -88,6 +92,11 @@ func runTestForSubtask(runCtx context.Context, repoRoot, runID, subtaskDir strin
 		if cmdStr == "" {
 			cmdStr = "echo 'no test command configured'"
 		}
+	} else {
+		// 文件不存在时写入默认值
+		cmdStr = "echo 'no test command configured'"
+		_ = os.WriteFile(cmdPath, []byte(cmdStr+"\n"), 0644)
+		log.Printf("runTestForSubtask: cannot read %s: %v, using fallback", cmdPath, err)
 	}
 
 	start := time.Now()
@@ -108,13 +117,19 @@ func runTestForSubtask(runCtx context.Context, repoRoot, runID, subtaskDir strin
 	}
 
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
-	_ = os.MkdirAll(runDir, 0755)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		log.Printf("runTestForSubtask: mkdir %s: %v", runDir, err)
+	}
 	outPath := filepath.Join(runDir, subtaskDir+"_stdout.txt")
 	errPath := filepath.Join(runDir, subtaskDir+"_stderr.txt")
-	_ = os.WriteFile(outPath, stdout.Bytes(), 0644)
+	if err := os.WriteFile(outPath, stdout.Bytes(), 0644); err != nil {
+		log.Printf("runTestForSubtask: write %s: %v", outPath, err)
+	}
 	stderrPath := ""
 	if stderr.Len() > 0 {
-		_ = os.WriteFile(errPath, stderr.Bytes(), 0644)
+		if err := os.WriteFile(errPath, stderr.Bytes(), 0644); err != nil {
+			log.Printf("runTestForSubtask: write %s: %v", errPath, err)
+		}
 		stderrPath = errPath
 	}
 

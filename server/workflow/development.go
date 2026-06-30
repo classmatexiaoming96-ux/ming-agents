@@ -324,7 +324,7 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 
 	execute(promptFile, outFile, exitFile, issues)
 	if agent != nil && retry == 0 {
-		_ = writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, 0, "initial", FailureClassNone, "", promptFile, outFile, exitFile)
+		_ = writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, 0, -1, "initial", FailureClassNone, "", promptFile, outFile, exitFile)
 	}
 	if agent != nil {
 		_, approvalErr := waitForSubtaskApprovalRevisionsAt(ctx, repoRoot, agent, sessionID, "subtask:"+st.ID, st.ID, issues, func(revisionIssues []ReviewIssue, revision int) error {
@@ -340,7 +340,7 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 			if len(revisionIssues) > 0 {
 				rejectionReason = revisionIssues[len(revisionIssues)-1].Description
 			}
-			_ = writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, revision, "human_reject", FailureClassHumanReject, rejectionReason, revPromptFile, revOutFile, revExitFile)
+			_ = writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, revision, revision-1, "human_reject", FailureClassHumanReject, rejectionReason, revPromptFile, revOutFile, revExitFile)
 			return nil
 		})
 		if approvalErr != nil {
@@ -654,42 +654,26 @@ const developmentLineageNodeID = "development"
 // writeDevelopmentAttempt 写 development subtask attempt event（best-effort）。
 // attempt 编号语义：0 = initial（agent 第一次跑完），1+ = revision（reject 后重跑）。
 // lineage 写入失败不中断主流程。
-func writeDevelopmentAttempt(repoRoot, runID, nodeID, sessionID, subtaskID string, attempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) error {
-	if runID == "" {
-		// 没有有效 runID 时无法构造 lineage 路径，直接跳过（best-effort）。
-		return nil
+func writeDevelopmentAttempt(repoRoot, runID, nodeID, sessionID, subtaskID string, attempt int, parentAttempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) error {
+	scope := "subtask:" + subtaskID
+	var outcome *AttemptOutcome
+	if failureClass != "" && failureClass != FailureClassNone {
+		status := "failed"
+		if failureClass == FailureClassHumanReject {
+			status = "rejected"
+		}
+		outcome = &AttemptOutcome{
+			Status:       status,
+			Passed:       false,
+			FailureClass: failureClass,
+			Reason:       rejectionReason,
+		}
 	}
-	now := time.Now().UTC()
-	event := AttemptEvent{
-		RunID:      runID,
-		NodeID:     nodeID,
-		NodeKind:   NodeKindDevelopment,
-		Scope:      "subtask:" + subtaskID,
-		SubtaskID:  subtaskID,
-		SessionID:  sessionID,
-		Role:       "codex",
-		Attempt:    attempt,
-		Trigger:    trigger,
-		StartedAt:  now,
-		FinishedAt: now,
-	}
-	if failureClass != "" {
-		event.FailureClass = failureClass
-	}
+	var promptDelta *AttemptPromptDelta
 	if rejectionReason != "" {
-		event.RejectionReason = rejectionReason
-		event.PromptDelta = &AttemptPromptDelta{
+		promptDelta = &AttemptPromptDelta{
 			AddedFeedback: "reviewer requested development revision: " + rejectionReason,
 		}
 	}
-	if promptPath != "" {
-		event.PromptPath = promptPath
-	}
-	if outputPath != "" {
-		event.OutputPath = outputPath
-	}
-	if exitPath != "" {
-		event.ExitPath = exitPath
-	}
-	return RecordAttemptEvent(repoRoot, event)
+	return writeAttemptEvent(repoRoot, runID, nodeID, NodeKindDevelopment, scope, "codex", sessionID, attempt, parentAttempt, trigger, failureClass, string(failureClass), rejectionReason, outcome, promptDelta, promptPath, outputPath, exitPath)
 }
