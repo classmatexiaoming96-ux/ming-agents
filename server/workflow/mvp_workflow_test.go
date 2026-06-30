@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,84 @@ func TestValidatePlanAcceptsValidPlan(t *testing.T) {
 	plan := &Plan{TaskID: "task", Subtasks: []Subtask{validSubtask("one")}}
 	if err := validatePlan(plan); err != nil {
 		t.Fatalf("validatePlan() error = %v", err)
+	}
+}
+
+func TestPlanningRollbackRetriesContractErrorOutput(t *testing.T) {
+	repoRoot := t.TempDir()
+	commandDir := t.TempDir()
+	countPath := filepath.Join(commandDir, "count")
+	codexPath := filepath.Join(commandDir, "codex")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'OpenAI Codex\n› '
+while IFS= read -r line; do
+  case "$line" in
+    *MING_AGENTS_DONE:*)
+      count=0
+      if [ -f %[1]q ]; then
+        count=$(cat %[1]q)
+      fi
+      count=$((count + 1))
+      printf '%%s\n' "$count" > %[1]q
+      marker=$(printf '%%s' "$line" | tr -d '"' | sed 's/ + //g')
+      if [ "$count" -eq 1 ]; then
+        printf 'planning output without json\n'
+      else
+        printf '## Execution Plan JSON\n\n'
+        printf '\140\140\140json\n'
+        printf '{"task_id":"run-planning-contract","subtasks":[{"id":"api","agent_type":"codex","repo_path":"server","description":"fix api","acceptance_criteria":["tests pass"]}]}\n'
+        printf '\140\140\140\n'
+      fi
+      printf '%%s\n' "$marker"
+      ;;
+  esac
+done
+`, countPath)
+	if err := os.WriteFile(codexPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", commandDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	clarFile := filepath.Join(repoRoot, "docs", "requirements-clarity.md")
+	if err := os.MkdirAll(filepath.Dir(clarFile), 0755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	clarification := `# Requirements Clarity
+
+run_id: run-planning-contract
+
+## Agent Result: codex
+
+<!-- agent:codex begin -->
+Build the API.
+<!-- agent:codex end -->
+`
+	if err := os.WriteFile(clarFile, []byte(clarification), 0644); err != nil {
+		t.Fatalf("write clarification: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	approvalDone := make(chan error, 1)
+	go func() {
+		sessionID := NewPTYSessionID("run-planning-contract", "node2", "codex", 1)
+		historyFile := filepath.Join(repoRoot, ".workflow", "runs", "run-planning-contract", "node2", "codex.messages.jsonl")
+		waitForHistoryRoleCount(t, historyFile, "approval_request", 1)
+		approvalDone <- ApproveSession(sessionID, "node2:codex", "approved")
+	}()
+
+	plan, err := RunPlanning(ctx, repoRoot, clarFile)
+	if err != nil {
+		t.Fatalf("RunPlanning() error = %v", err)
+	}
+	if err := <-approvalDone; err != nil {
+		t.Fatalf("approval error = %v", err)
+	}
+	if plan.TaskID != "run-planning-contract" {
+		t.Fatalf("TaskID = %q, want run-planning-contract", plan.TaskID)
+	}
+	if len(plan.Subtasks) != 1 || plan.Subtasks[0].ID != "api" {
+		t.Fatalf("Subtasks = %#v, want api subtask", plan.Subtasks)
 	}
 }
 

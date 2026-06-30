@@ -87,12 +87,8 @@ func RunPlanning(ctx context.Context, repoRoot, clarFile string) (*Plan, error) 
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
 		return nil, fmt.Errorf("run planning prompt: %w", out.Err)
 	}
-	plan, err := extractPlanJSON(out.Output)
+	plan, err := parsePlanningOutputWithRollback(ctx, repoRoot, nodeSession, &out, run, executePlanningAgent)
 	if err != nil {
-		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
-		return nil, err
-	}
-	if err := validatePlan(plan); err != nil {
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})
 		return nil, err
 	}
@@ -115,6 +111,60 @@ func RunPlanning(ctx context.Context, repoRoot, clarFile string) (*Plan, error) 
 		}, map[string]any{"planning_file": target})
 	}
 	return plan, nil
+}
+
+func parsePlanningOutputWithRollback(ctx context.Context, repoRoot string, nodeSession AgentSession, out *planningAgentOutput, run planningAgentRun, execute planningAgentExecutor) (*Plan, error) {
+	retries := 0
+	for {
+		plan, err := extractPlanJSON(out.Output)
+		if err == nil {
+			err = validatePlan(plan)
+		}
+		if err == nil {
+			return plan, nil
+		}
+
+		reason := "planning output contract error: " + err.Error()
+		spec := DefaultRollbackSpec(NodeKindPlanning)
+		unit := spec.DefaultUnit
+		rctx := RollbackContext{
+			RunID:    run.RunID,
+			NodeID:   planningLineageNodeID,
+			NodeKind: NodeKindPlanning,
+			Unit:     unit,
+			Budget:   RollbackBudget{ExhaustedAction: RollbackActionBlocked},
+			Lineage:  NewFileLineageStore(repoRoot),
+		}
+		rollbackDecision := NewRollbackRunner().Decide(rctx, spec, unit, syntheticRollbackAttempts(unit.Scope, retries), RollbackSignal{
+			FailureClass: FailureClassContractError,
+			Reason:       reason,
+			SourceNode:   run.AgentID,
+		})
+		if rollbackDecision.Action != RollbackActionRegeneratePlan {
+			return nil, err
+		}
+		parentAttempt := rollbackDecision.NewAttempt - 1
+		_ = writePlanningAttempt(repoRoot, run.RunID, planningLineageNodeID, out.SessionID, rollbackDecision.NewAttempt, parentAttempt, "contract_error", FailureClassContractError, reason, out.PromptFile, out.OutFile, out.ExitFile)
+
+		session := out.Session
+		if session.ID == "" {
+			session = run.Session
+		}
+		if session.HistoryFile == "" {
+			session.HistoryFile = run.HistoryFile
+		}
+		_ = AppendAgentMessage(&SubtaskAgent{Session: session}, AgentMessage{Role: "user", Content: reason})
+		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: run.RunID, NodeName: run.AgentID, Status: NotificationStarted})
+
+		nextRun := run
+		nextRun.Prompt = renderPlanningRevisionPrompt(run.Prompt, out.Output, reason)
+		nextRun.Session = session
+		*out = execute(ctx, repoRoot, nextRun)
+		if out.Err != nil {
+			return nil, fmt.Errorf("rerun planning prompt after contract error: %w", out.Err)
+		}
+		retries++
+	}
 }
 
 func newPlanningAgentRun(runID, nodeDir, agentType, prompt string, index int) planningAgentRun {
@@ -352,9 +402,13 @@ func parseClarificationMarkdown(markdown string) clarificationContext {
 		AgentSections: map[string]string{},
 		RunID:         extractMetadataLine(markdown, "run_id"),
 	}
-	re := regexp.MustCompile(`(?s)<!-- agent:([^ ]+) begin -->(.*?)<!-- agent:\1 end -->`)
+	re := regexp.MustCompile(`(?s)<!-- agent:([^ ]+) begin -->(.*?)<!-- agent:([^ ]+) end -->`)
 	for _, match := range re.FindAllStringSubmatch(markdown, -1) {
-		clar.AgentSections[strings.TrimSpace(match[1])] = strings.TrimSpace(match[2])
+		agent := strings.TrimSpace(match[1])
+		if agent != strings.TrimSpace(match[3]) {
+			continue
+		}
+		clar.AgentSections[agent] = strings.TrimSpace(match[2])
 	}
 	if idx := strings.Index(markdown, "## Aggregated Clarifications"); idx >= 0 {
 		clar.AggregatedSection = strings.TrimSpace(markdown[idx:])
