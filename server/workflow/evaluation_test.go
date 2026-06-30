@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -455,6 +456,132 @@ func TestChangedFilesHaveGoCodeChanges(t *testing.T) {
 	}
 }
 
+func TestRunCoverageCommandParsesFullCoverageAndWritesProfile(t *testing.T) {
+	repoRoot := t.TempDir()
+	runID := "run-coverage-full"
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+set -eu
+if [ "$1" = "test" ]; then
+	profile=""
+	for arg in "$@"; do
+		case "$arg" in
+			-coverprofile=*) profile="${arg#-coverprofile=}" ;;
+		esac
+	done
+	mkdir -p "$(dirname "$profile")"
+	printf 'mode: set\n' > "$profile"
+	pwd > "$profile.cwd"
+	printf 'ok example.test 0.001s coverage: 100.0%% of statements\n'
+	exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "cover" ]; then
+	printf 'example/file.go:1: Function 100.0%%\n'
+	printf 'total: (statements) 100.0%%\n'
+	exit 0
+fi
+printf 'unexpected go args: %s\n' "$*" >&2
+exit 2
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := RunCoverageCommand(context.Background(), repoRoot, runID)
+	if err != nil {
+		t.Fatalf("RunCoverageCommand() error = %v", err)
+	}
+	wantPath := filepath.Join(repoRoot, ".workflow", "runs", runID, "coverage.out")
+	if result.CoveragePath != wantPath {
+		t.Fatalf("CoveragePath = %q, want %q", result.CoveragePath, wantPath)
+	}
+	if result.TotalPercent != 100.0 {
+		t.Fatalf("TotalPercent = %v, want 100.0", result.TotalPercent)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("coverage.out was not written at %s: %v", wantPath, err)
+	}
+	cwd, err := os.ReadFile(wantPath + ".cwd")
+	if err != nil {
+		t.Fatalf("ReadFile(coverage cwd) error = %v", err)
+	}
+	if strings.TrimSpace(string(cwd)) != repoRoot {
+		t.Fatalf("go test ran in %q, want repoRoot %q", strings.TrimSpace(string(cwd)), repoRoot)
+	}
+}
+
+func TestRunCoverageCommandParsesBelowFullCoverage(t *testing.T) {
+	repoRoot := t.TempDir()
+	runID := "run-coverage-partial"
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+set -eu
+if [ "$1" = "test" ]; then
+	profile=""
+	for arg in "$@"; do
+		case "$arg" in
+			-coverprofile=*) profile="${arg#-coverprofile=}" ;;
+		esac
+	done
+	mkdir -p "$(dirname "$profile")"
+	printf 'mode: set\n' > "$profile"
+	exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "cover" ]; then
+	printf 'total: (statements) 87.5%%\n'
+	exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := RunCoverageCommand(context.Background(), repoRoot, runID)
+	if err != nil {
+		t.Fatalf("RunCoverageCommand() error = %v", err)
+	}
+	if result.TotalPercent != 87.5 {
+		t.Fatalf("TotalPercent = %v, want 87.5", result.TotalPercent)
+	}
+}
+
+func TestRunCoverageCommandGoTestFailureIsClassified(t *testing.T) {
+	repoRoot := t.TempDir()
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+if [ "$1" = "test" ]; then
+	printf 'go: module download failed: network unreachable\n' >&2
+	exit 1
+fi
+exit 2
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := RunCoverageCommand(context.Background(), repoRoot, "run-coverage-go-failure")
+	assertClassifiedEvaluationError(t, err, FailureClassEnvironmentBlock)
+}
+
+func TestRunCoverageCommandCoverToolFailureIsClassified(t *testing.T) {
+	repoRoot := t.TempDir()
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+set -eu
+if [ "$1" = "test" ]; then
+	profile=""
+	for arg in "$@"; do
+		case "$arg" in
+			-coverprofile=*) profile="${arg#-coverprofile=}" ;;
+		esac
+	done
+	mkdir -p "$(dirname "$profile")"
+	printf 'mode: set\n' > "$profile"
+	exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "cover" ]; then
+	printf 'cover: malformed coverage profile\n' >&2
+	exit 1
+fi
+exit 2
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := RunCoverageCommand(context.Background(), repoRoot, "run-coverage-tool-failure")
+	assertClassifiedEvaluationError(t, err, FailureClassValidatorIssue)
+}
+
 func initTempGitRepo(t *testing.T) string {
 	t.Helper()
 	repoRoot := t.TempDir()
@@ -482,5 +609,38 @@ func writeFile(t *testing.T, repoRoot, relPath, contents string) {
 	}
 	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+func installFakeGo(t *testing.T, repoRoot, script string) string {
+	t.Helper()
+	binDir := filepath.Join(repoRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(fake go bin) error = %v", err)
+	}
+	name := "go"
+	if runtime.GOOS == "windows" {
+		name = "go.bat"
+	}
+	path := filepath.Join(binDir, name)
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("WriteFile(fake go) error = %v", err)
+	}
+	return binDir
+}
+
+func assertClassifiedEvaluationError(t *testing.T, err error, want FailureClass) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("RunCoverageCommand() error = nil, want classified error")
+	}
+	var classified interface {
+		FailureClass() FailureClass
+	}
+	if !errors.As(err, &classified) {
+		t.Fatalf("RunCoverageCommand() error %T does not expose FailureClass()", err)
+	}
+	if classified.FailureClass() != want {
+		t.Fatalf("FailureClass() = %q, want %q; err = %v", classified.FailureClass(), want, err)
 	}
 }

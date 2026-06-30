@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -345,6 +346,104 @@ func collectEvidence(repoRoot, runID string) []EvidenceRef {
 		}
 	}
 	return refs
+}
+
+type CoverageCommandResult struct {
+	RunID        string
+	CoveragePath string
+	TotalPercent float64
+	TestOutput   string
+	ToolOutput   string
+}
+
+// RunCoverageCommand runs repository-wide Go coverage and parses the total percentage.
+func RunCoverageCommand(ctx context.Context, repoRoot, runID string) (*CoverageCommandResult, error) {
+	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		return nil, &classifiedEvaluationError{
+			op:           "prepare coverage output directory",
+			err:          err,
+			failureClass: FailureClassEnvironmentBlock,
+		}
+	}
+
+	coverageRelPath := filepath.ToSlash(filepath.Join(".workflow", "runs", runID, "coverage.out"))
+	coveragePath := filepath.Join(runDir, "coverage.out")
+	testArgs := []string{"test", "-cover", "-coverprofile=" + coverageRelPath, "./..."}
+	testOutput, err := runGoCommandOutput(ctx, repoRoot, testArgs...)
+	if err != nil {
+		return nil, err
+	}
+
+	toolArgs := []string{"tool", "cover", "-func=" + coveragePath}
+	toolOutput, err := runGoCommandOutput(ctx, repoRoot, toolArgs...)
+	if err != nil {
+		return nil, err
+	}
+	total, err := parseGoCoverTotalPercent(string(toolOutput))
+	if err != nil {
+		return nil, &classifiedEvaluationError{
+			op:           "parse go tool cover total",
+			err:          err,
+			output:       string(toolOutput),
+			failureClass: FailureClassValidatorIssue,
+		}
+	}
+
+	return &CoverageCommandResult{
+		RunID:        runID,
+		CoveragePath: coveragePath,
+		TotalPercent: total,
+		TestOutput:   string(testOutput),
+		ToolOutput:   string(toolOutput),
+	}, nil
+}
+
+func runGoCommandOutput(ctx context.Context, repoRoot string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, &classifiedEvaluationError{
+			op:           fmt.Sprintf("go %s", strings.Join(args, " ")),
+			err:          err,
+			output:       string(out),
+			failureClass: classifyCoverageCommandFailure(exitCodeFromError(err), strings.Join(append([]string{"go"}, args...), " "), string(out)),
+		}
+	}
+	return out, nil
+}
+
+func classifyCoverageCommandFailure(exitCode int, command, output string) FailureClass {
+	failureClass := ClassifyCommandResult(exitCode, command, output, output)
+	if failureClass == FailureClassEnvironmentBlock {
+		return FailureClassEnvironmentBlock
+	}
+	return FailureClassValidatorIssue
+}
+
+func exitCodeFromError(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func parseGoCoverTotalPercent(output string) (float64, error) {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "total:" {
+			continue
+		}
+		value := strings.TrimSuffix(fields[len(fields)-1], "%")
+		percent, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return 0, err
+		}
+		return percent, nil
+	}
+	return 0, errors.New("missing total coverage line")
 }
 
 type classifiedEvaluationError struct {
