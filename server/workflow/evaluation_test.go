@@ -582,6 +582,78 @@ exit 2
 	assertClassifiedEvaluationError(t, err, FailureClassValidatorIssue)
 }
 
+func TestRunEvaluationFailsCoverageGateForChangedGoCode(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	writeFile(t, repoRoot, "pkg/example/example.go", "package example\n\nfunc Covered() int { return 1 }\n")
+	writeFile(t, repoRoot, "go.mod", "module example.test\n\ngo 1.22\n")
+	git(t, repoRoot, "add", ".")
+	git(t, repoRoot, "commit", "-m", "initial")
+	writeFile(t, repoRoot, "pkg/example/example.go", "package example\n\nfunc Covered() int { return 1 }\nfunc Uncovered() int { return 2 }\n")
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+set -eu
+if [ "$1" = "test" ]; then
+	profile=""
+	for arg in "$@"; do
+		case "$arg" in
+			-coverprofile=*) profile="${arg#-coverprofile=}" ;;
+		esac
+	done
+	mkdir -p "$(dirname "$profile")"
+	printf 'mode: set\n' > "$profile"
+	exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "cover" ]; then
+	printf 'total: (statements) 99.9%%\n'
+	exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := RunEvaluation(context.Background(), repoRoot, "run-coverage-gate")
+	if err != nil {
+		t.Fatalf("RunEvaluation() error = %v", err)
+	}
+	if result.Passed {
+		t.Fatal("RunEvaluation() Passed = true, want coverage gate failure")
+	}
+	if result.FailureClass != FailureClassProductDefect {
+		t.Fatalf("FailureClass = %q, want %q", result.FailureClass, FailureClassProductDefect)
+	}
+	if len(result.Evidence) != 1 || result.Evidence[0].Type != EvidenceTypeCoverage {
+		t.Fatalf("Evidence = %#v, want coverage evidence", result.Evidence)
+	}
+	if len(result.TestResults) != 1 || result.TestResults[0].TestID != "coverage" || result.TestResults[0].Passed {
+		t.Fatalf("TestResults = %#v, want failing coverage test result", result.TestResults)
+	}
+}
+
+func TestRunEvaluationSkipsCoverageGateForDocsOnlyChange(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	writeFile(t, repoRoot, "docs/readme.md", "# docs\n")
+	git(t, repoRoot, "add", ".")
+	git(t, repoRoot, "commit", "-m", "initial")
+	writeFile(t, repoRoot, "docs/readme.md", "# changed\n")
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+printf 'coverage gate should not run for docs-only changes\n' >&2
+exit 7
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := RunEvaluation(context.Background(), repoRoot, "run-docs-only")
+	if err != nil {
+		t.Fatalf("RunEvaluation() error = %v", err)
+	}
+	if !result.Passed {
+		t.Fatalf("RunEvaluation() Passed = false, want docs-only coverage skip: %#v", result)
+	}
+	for _, evidence := range result.Evidence {
+		if evidence.Type == EvidenceTypeCoverage {
+			t.Fatalf("Evidence contains coverage for docs-only change: %#v", result.Evidence)
+		}
+	}
+}
+
 func initTempGitRepo(t *testing.T) string {
 	t.Helper()
 	repoRoot := t.TempDir()

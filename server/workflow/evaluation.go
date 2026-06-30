@@ -42,6 +42,7 @@ func RunEvaluation(runCtx context.Context, repoRoot, runID string) (*EvaluationR
 		result.Passed = true
 	}
 
+	applyCoverageGate(runCtx, repoRoot, runID, result)
 	result.Evidence = collectEvidence(repoRoot, runID)
 
 	if !result.Passed {
@@ -57,6 +58,51 @@ func RunEvaluation(runCtx context.Context, repoRoot, runID string) (*EvaluationR
 	}
 
 	return result, nil
+}
+
+func applyCoverageGate(runCtx context.Context, repoRoot, runID string, result *EvaluationResult) {
+	changedFiles, err := ChangedFiles(repoRoot)
+	if err != nil {
+		log.Printf("RunEvaluation: ChangedFiles: %v", err)
+		return
+	}
+	if !changedFilesHaveGoCode(changedFiles) {
+		return
+	}
+
+	tr := TestResult{
+		TestID:  "coverage",
+		Command: "go test -cover -coverprofile=.workflow/runs/" + runID + "/coverage.out ./...",
+		Passed:  true,
+	}
+	coverage, err := RunCoverageCommand(runCtx, repoRoot, runID)
+	if err != nil {
+		tr.Passed = false
+		tr.ExitCode = 1
+		tr.FailureClass = failureClassFromError(err, FailureClassValidatorIssue)
+		result.Passed = false
+		result.TestResults = append(result.TestResults, tr)
+		return
+	}
+	if coverage.TotalPercent < 100.0 {
+		tr.Passed = false
+		tr.ExitCode = 1
+		tr.FailureClass = FailureClassProductDefect
+		result.Passed = false
+	}
+	result.TestResults = append(result.TestResults, tr)
+}
+
+func failureClassFromError(err error, fallback FailureClass) FailureClass {
+	var classified interface {
+		FailureClass() FailureClass
+	}
+	if errors.As(err, &classified) {
+		if failureClass := classified.FailureClass(); failureClass != "" {
+			return failureClass
+		}
+	}
+	return fallback
 }
 
 // ReadPhaseStatus 读取 phase_status.json（如果不存在返回 nil）
