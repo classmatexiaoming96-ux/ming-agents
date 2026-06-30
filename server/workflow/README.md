@@ -922,6 +922,15 @@ Evaluation failure attribution uses the current plan when available:
 3. Otherwise, an existing `TestResult.SubtaskID` is used as a fallback.
 4. Ambiguous matches remain run-level with an empty subtask id.
 
+### P3 to P4 handoff
+
+Phase 3 deliberately leaves two parallel paths around review rollback that Phase 4 will converge:
+
+- **Inline revision path (live in P3).** Review report revisions—both contract-error revision and the one-shot human-reject revision—run inline inside `RunSubtaskReview` / `RunAggregateReview`. This is the path actually exercised today.
+- **`PrepareRollback` interface path (declared, not yet driven).** `reviewNode` implements `RollbackCapableNode` (`PrepareRollback` / `RollbackArtifacts`) with a compile-time assertion, mirroring the development/evaluation nodes. It has no production caller in P3; the inline path does not route through it. The same is true for the other rollback-capable nodes.
+
+These two paths are not yet unified on purpose: P3 review does not attach to a P4 executor, and review-time human gating (blocking on a decision, then re-entering review) is the orchestrator's responsibility (see "P3 design choice: review human-reject revision does not block"). Phase 4 will introduce a `RollbackRunner`-driven executor that calls each node's `PrepareRollback` to decide budgeted rollback actions, replacing the inline revision branches with a single orchestrated path. Until then, treat the `PrepareRollback` implementations as the forward-looking interface and the inline branches as the operative behavior.
+
 ## 11. CLI 使用方法
 
 构建 CLI。由于仓库根目录已有 `workflow/` 目录，建议显式指定输出文件：

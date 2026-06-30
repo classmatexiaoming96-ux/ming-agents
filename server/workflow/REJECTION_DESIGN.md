@@ -335,6 +335,15 @@ Evaluation remains a forward DAG node. Its coverage gate writes `.workflow/runs/
 
 Budget exhaustion returns a structured `RollbackDecision` with an exhausted action such as `blocked`; callers translate that into the existing node error or phase status. Product defects are not retried inside evaluation; they route back toward generator/development work.
 
+### P3 to P4 handoff
+
+Phase 3 keeps two parallel rollback paths that Phase 4 will converge:
+
+- The inline revision path is live: review report revisions (contract-error and the one-shot human-reject revision) run inside `RunSubtaskReview` / `RunAggregateReview`.
+- The `PrepareRollback` interface path is declared but has no production caller in P3. `reviewNode` implements `RollbackCapableNode` with a compile-time assertion (like the development and evaluation nodes), but the inline path does not route through it.
+
+This split is intentional: P3 review does not attach to a P4 executor, and review-time human gating is the orchestrator's responsibility. Phase 4 will add a `RollbackRunner`-driven executor that calls each node's `PrepareRollback` to decide budgeted rollback actions, unifying the inline revision branches and the interface path into one orchestrated flow.
+
 ### 针对节点 Agent
 
 Node1 或 Node2 的拒绝不走 `RouteSubtaskMessage`，因为它们不是 SubtaskAgent，而是 workflow-level node session。
