@@ -116,12 +116,6 @@ type AttemptLineageStore interface {
 	List(filter AttemptFilter) ([]AttemptEvent, error)
 }
 
-type AttemptEvent struct{}
-
-type AttemptFilter struct{}
-
-type ArtifactRef struct{}
-
 type NodeRequest struct {
 	RunID    string
 	RepoRoot string
