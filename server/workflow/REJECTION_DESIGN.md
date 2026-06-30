@@ -308,13 +308,26 @@ Workflow 检测 rejection
 
 Phase 1 makes rejection decisions visible to later rollback orchestration by writing attempt lineage:
 
-- Clarification rejection writes a `clarification` attempt event with `scope=agent:{agentType}`.
+- Clarification rejection writes a `clarification` attempt event with `scope=clarification:{agentType}`.
 - Planning rejection writes a `planning` attempt event with `scope=node-agent`.
 - Development subtask rejection writes a `development` attempt event with `scope=subtask:{subtaskID}`.
 
 Each rejection attempt records `failure_class=human_reject`, `rejection_reason`, prompt/output/exit paths when available, and appears in both the node-local `attempts.jsonl` and run-level `attempts.index.jsonl`. Later orchestrator work can read this lineage to decide rollback targets without scraping session history.
 
-P1 lineage writes are best-effort: workflow execution should continue if `RecordAttemptEvent` cannot persist an event. P2 introduces the rollback runner and budgeted rollback decisions; that runner may choose stricter error handling for core rollback state, but P1 keeps lineage as an observable side channel rather than a hard dependency.
+P1 lineage writes are best-effort: workflow execution should continue if `RecordAttemptEvent` cannot persist an event. P2 introduces the rollback runner and budgeted rollback decisions while keeping lineage as an observable side channel for existing node attempts.
+
+### P2 rollback runner 视角
+
+Phase 2 does not change the default DAG: `clarification -> planning -> development -> evaluation` remains the execution order. Local rollback happens inside the node that owns the failed attempt.
+
+`RollbackRunner` only decides and records rollback decisions. It does not call agents, mutate sessions, or choose prompts by itself. Nodes still own the concrete execution:
+
+- Clarification uses `RollbackUnit{Scope: "clarification:<agent>", MaxAttempts: 3, ReusePolicy: same_session}` for human rejection.
+- Planning uses max 3 same-session revisions for human rejection and contract-error parse/validate failures.
+- Development maps each subtask to `RollbackUnit{Scope: "subtask:<id>", MaxAttempts: 3, ReusePolicy: reuse_on_human_reject}`.
+- Evaluation maps each command to `RollbackUnit{Scope: "command:<test_id>", MaxAttempts: 2, ReusePolicy: new_session}` and records command attempt lineage.
+
+Budget exhaustion returns a structured `RollbackDecision` with an exhausted action such as `blocked`; callers translate that into the existing node error or phase status. Product defects are not retried inside evaluation; they route back toward generator/development work.
 
 ### 针对节点 Agent
 

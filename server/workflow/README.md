@@ -743,9 +743,10 @@ The per-node `attempts.jsonl` is the node-local stream. The `attempts/{safeScope
 
 Scope naming conventions:
 
-- `agent:{agentType}` for clarification agents, for example `agent:codex`.
+- `clarification:{agentType}` for clarification agents, for example `clarification:codex`.
 - `node-agent` for planning node agent attempts.
 - `subtask:{subtaskID}` for development subtask attempts.
+- `command:{testID}` for evaluation command attempts.
 
 Completion evidence also recognizes `attempt_lineage` when `attempts.index.jsonl` exists. This is evidence indexing only; rollback decisions are handled by later phases.
 
@@ -780,7 +781,51 @@ started_at
 finished_at
 ```
 
-Phase 1 writers use best-effort lineage recording for clarification, planning, and development so a lineage write failure does not stop the core workflow. `RecordAttemptEvent` is the shared wrapper that validates required fields and returns contextual errors; callers decide whether to treat those errors as fatal.
+Phase 1 writers use best-effort lineage recording for clarification, planning, and development so a lineage write failure does not stop the core workflow. Phase 2 also records evaluation command attempts. `RecordAttemptEvent` is the shared wrapper that validates required fields and returns contextual errors; callers decide whether to treat those errors as fatal.
+
+## P2: Rollback Runner & Budgeted Retries
+
+Phase 2 keeps the default DAG unchanged:
+
+```text
+clarification -> planning -> development -> evaluation
+```
+
+No DAG back-edges are added. Instead, nodes that can handle local retry/revision work implement `RollbackCapableNode`, and the shared `RollbackRunner` decides whether a rollback action is still within budget.
+
+### RollbackRunner
+
+`RollbackRunner` is a pure decision helper. It does not own agent sessions and does not execute prompts or commands. Callers provide:
+
+- `RollbackContext`: run/node identity, rollback unit, budget, and optional lineage store.
+- `RollbackSpec`: node default unit and action routing for contract, human rejection, and product defect failures.
+- `RollbackUnit`: the retry scope, maximum attempts, and session reuse policy.
+- `RollbackSignal`: the classified failure and reason.
+
+The runner returns a `RollbackDecision` with action, target scope, next attempt number, session reuse choice, and rationale. It can also record a decision event through an `AttemptLineageStore`, but the node remains responsible for actually appending prompts, rerunning commands, and writing normal attempt artifacts.
+
+### Rollback Units
+
+Current Phase 2 units are:
+
+- Clarification: `clarification:{agentType}`, max 3 human-reject revisions, same session.
+- Planning: `planning` for contract-error retry decisions and `node-agent` for existing planning lineage, max 3 revisions, same session.
+- Development: `subtask:{subtaskID}`, max 3 human-reject revisions, reuse on human reject.
+- Evaluation: `command:{testID}`, max 2 command attempts, new session/no session reuse.
+
+The runner budget counts retry/revision attempts for the target scope. Existing loops keep a local revision-count fallback for compatibility when old tests or ad hoc sessions do not have persisted lineage.
+
+### Failure Routing
+
+`NextActionForFailure` centralizes phase-status routing:
+
+- product defects -> `retry_generator`
+- environment or validator issues -> `fix_environment`
+- contract errors -> `retry_report`
+- missing evidence, human rejection, invalid input, or inconclusive results -> `ask_user`
+- transient failures -> `retry_evaluation`
+- user-blocked or unsafe/out-of-scope failures -> `blocked`
+- no failure -> `finish`
 
 ### Failure Attribution Fields
 
