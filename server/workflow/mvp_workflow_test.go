@@ -869,6 +869,105 @@ func TestPlanningRevisionWritesLineage(t *testing.T) {
 	}
 }
 
+func TestDevelopmentSubtaskInitialWritesLineage(t *testing.T) {
+	tmpDir := t.TempDir()
+	runID := "20260630-140000"
+
+	writeDevelopmentAttempt(
+		tmpDir,
+		runID,
+		developmentLineageNodeID,
+		"session-dev-api",
+		"api",
+		0,
+		"initial",
+		FailureClassNone,
+		"",
+		filepath.Join(tmpDir, "api.prompt.md"),
+		filepath.Join(tmpDir, "api.out.md"),
+		filepath.Join(tmpDir, "api.exit"),
+	)
+
+	events, err := ReadAttemptEvents(tmpDir, runID, developmentLineageNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	got := events[0]
+	if got.Attempt != 0 {
+		t.Errorf("Attempt = %d, want 0", got.Attempt)
+	}
+	if got.NodeKind != NodeKindDevelopment {
+		t.Errorf("NodeKind = %q, want %q", got.NodeKind, NodeKindDevelopment)
+	}
+	if got.Scope != "subtask:api" {
+		t.Errorf("Scope = %q, want subtask:api", got.Scope)
+	}
+	if got.Role != "codex" {
+		t.Errorf("Role = %q, want codex", got.Role)
+	}
+	if got.FailureClass != FailureClassNone {
+		t.Errorf("FailureClass = %q, want %q", got.FailureClass, FailureClassNone)
+	}
+
+	indexPath := filepath.Join(tmpDir, ".workflow", "runs", runID, "attempts.index.jsonl")
+	if _, err := os.Stat(indexPath); err != nil {
+		t.Fatalf("attempts.index.jsonl not created: %v", err)
+	}
+}
+
+func TestDevelopmentSubtaskRevisionWritesLineage(t *testing.T) {
+	tmpDir := t.TempDir()
+	runID := "20260630-141000"
+
+	writeDevelopmentAttempt(tmpDir, runID, developmentLineageNodeID, "session-dev-api", "api", 0, "initial", FailureClassNone, "", "initial.prompt.md", "initial.out.md", "initial.exit")
+	writeDevelopmentAttempt(tmpDir, runID, developmentLineageNodeID, "session-dev-api", "api", 1, "human_reject", FailureClassHumanReject, "add API validation", "revision.prompt.md", "revision.out.md", "revision.exit")
+
+	events, err := ReadAttemptEvents(tmpDir, runID, developmentLineageNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(events))
+	}
+	if events[0].Attempt != 0 {
+		t.Errorf("initial attempt = %d, want 0", events[0].Attempt)
+	}
+	revision := events[1]
+	if revision.Attempt != 1 {
+		t.Errorf("revision attempt = %d, want 1", revision.Attempt)
+	}
+	if revision.Trigger != "human_reject" {
+		t.Errorf("revision trigger = %q, want human_reject", revision.Trigger)
+	}
+	if revision.FailureClass != FailureClassHumanReject {
+		t.Errorf("revision failure class = %q, want %q", revision.FailureClass, FailureClassHumanReject)
+	}
+	if revision.RejectionReason != "add API validation" {
+		t.Errorf("revision rejection reason = %q, want add API validation", revision.RejectionReason)
+	}
+	if revision.PromptDelta == nil || revision.PromptDelta.AddedFeedback != "reviewer requested development revision: add API validation" {
+		t.Errorf("revision prompt delta = %+v", revision.PromptDelta)
+	}
+
+	shardPath := filepath.Join(tmpDir, ".workflow", "runs", runID, developmentLineageNodeID, "attempts", "subtask_api.jsonl")
+	if _, err := os.Stat(shardPath); err != nil {
+		t.Fatalf("scope shard not created: %v", err)
+	}
+}
+
+func TestWriteDevelopmentAttemptEmptyRunIDSkips(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	writeDevelopmentAttempt(tmpDir, "", developmentLineageNodeID, "session-dev-api", "api", 0, "initial", FailureClassNone, "", "prompt.md", "out.md", "exit")
+
+	if _, err := os.Stat(filepath.Join(tmpDir, ".workflow")); !os.IsNotExist(err) {
+		t.Fatalf(".workflow stat error = %v, want not exist", err)
+	}
+}
+
 func TestWaitForSubtaskApprovalRejectsAndRerunsUntilApproved(t *testing.T) {
 	dir := t.TempDir()
 	sessionID := "subtask-agent-session"
