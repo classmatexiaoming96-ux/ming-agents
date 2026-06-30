@@ -224,6 +224,13 @@ func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificati
 		}
 		session.Status = AgentSessionPending
 		RegisterAgentSession(session)
+
+		// 写 initial attempt（attempt=0）/ revision 后的最新 attempt 已在重跑分支写入，
+		// 此处仅在 attempt 0 时记录 initial（best-effort，不中断主流程）。
+		if revisions == 0 {
+			writeClarificationAttempt(repoRoot, runIDFromSessionID(out.SessionID), clarificationLineageNodeID, out.AgentType, out.SessionID, revisions, "initial", FailureClassNone, "", out.PromptFile, out.OutFile, out.ExitFile)
+		}
+
 		// 通知完成
 		_ = EmitNodeNotification(out.SessionID, NodeNotification{
 			RunID:    runIDFromSessionID(out.SessionID),
@@ -257,6 +264,9 @@ func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificati
 		}); err != nil {
 			return err
 		}
+
+		// 写 revision attempt（human_reject，attempt=N，N=1,2,3...）（best-effort）。
+		writeClarificationAttempt(repoRoot, runIDFromSessionID(out.SessionID), clarificationLineageNodeID, out.AgentType, out.SessionID, revisions+1, "human_reject", FailureClassHumanReject, revision, out.PromptFile, out.OutFile, out.ExitFile)
 
 		// 通知进入重跑
 		_ = EmitNodeNotification(out.SessionID, NodeNotification{
@@ -369,6 +379,51 @@ func clarificationState(outputs []clarificationOutput) NodeStatus {
 		return NodeFailed
 	}
 	return NodeCompleted
+}
+
+// clarificationLineageNodeID is the node ID used for clarification attempt lineage.
+const clarificationLineageNodeID = "clarification"
+
+// writeClarificationAttempt 写 clarification attempt event（best-effort）。
+// attempt 编号语义：0 = initial（agent 第一次跑完），1+ = revision（reject 后重跑）。
+// lineage 写入失败不中断主流程。
+func writeClarificationAttempt(repoRoot, runID, nodeID, agentType, sessionID string, attempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) {
+	if runID == "" {
+		// 没有有效 runID 时无法构造 lineage 路径，直接跳过（best-effort）。
+		return
+	}
+	now := time.Now().UTC()
+	event := AttemptEvent{
+		RunID:      runID,
+		NodeID:     nodeID,
+		NodeKind:   NodeKindClarification,
+		Scope:      "agent:" + agentType,
+		SessionID:  sessionID,
+		Role:       "assistant",
+		Attempt:    attempt,
+		Trigger:    trigger,
+		StartedAt:  now,
+		FinishedAt: now,
+	}
+	if failureClass != "" {
+		event.FailureClass = failureClass
+	}
+	if rejectionReason != "" {
+		event.RejectionReason = rejectionReason
+	}
+	if promptPath != "" {
+		event.PromptPath = promptPath
+	}
+	if outputPath != "" {
+		event.OutputPath = outputPath
+	}
+	if exitPath != "" {
+		event.ExitPath = exitPath
+	}
+	if err := AppendAttemptEvent(repoRoot, event); err != nil {
+		// best-effort：lineage 写入失败不中断主流程。
+		_ = err
+	}
 }
 
 func allClarificationAgentsFailed(outputs []clarificationOutput) bool {
