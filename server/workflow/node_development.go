@@ -9,6 +9,31 @@ type developmentNode struct{}
 
 func (n *developmentNode) Kind() NodeKind { return NodeKindDevelopment }
 
+func (n *developmentNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
+	spec := DefaultRollbackSpec(NodeKindDevelopment)
+	unit := rctx.Unit
+	if unit.Scope == "" {
+		unit = spec.DefaultUnit
+	}
+	var attempts []AttemptEvent
+	if rctx.Lineage != nil {
+		listed, err := rctx.Lineage.List(AttemptFilter{RunID: rctx.RunID, NodeID: rctx.NodeID, Scope: unit.Scope})
+		if err != nil {
+			return nil, err
+		}
+		attempts = rollbackBudgetEvents(listed)
+	}
+	decision := NewRollbackRunner().Decide(rctx, spec, unit, attempts, signal)
+	if signal.Reason != "" {
+		decision.Rationale = signal.Reason
+	}
+	return decision, nil
+}
+
+func (n *developmentNode) RollbackArtifacts(rctx RollbackContext) []ArtifactRef {
+	return nil
+}
+
 func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
 	planOutput := req.Inputs["planning"]
 	planJSON, ok := planOutput.Values["plan"].(json.RawMessage)

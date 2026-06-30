@@ -359,8 +359,6 @@ func waitForSubtaskApprovalRevisions(ctx context.Context, agent *SubtaskAgent, s
 }
 
 func waitForSubtaskApprovalRevisionsAt(ctx context.Context, baseDir string, agent *SubtaskAgent, sessionID, nodeName, subtaskID string, issues []ReviewIssue, executeRevision subtaskRevisionExecutor) ([]ReviewIssue, error) {
-	const maxRevisions = 3
-
 	revisionIssues := append([]ReviewIssue{}, issues...)
 	revisions := 0
 	for {
@@ -370,9 +368,6 @@ func waitForSubtaskApprovalRevisionsAt(ctx context.Context, baseDir string, agen
 		}
 		if !errors.Is(approvalErr, ErrApprovalRejected) {
 			return revisionIssues, approvalErr
-		}
-		if revisions >= maxRevisions {
-			return revisionIssues, fmt.Errorf("agent %s exceeded max revision attempts", nodeName)
 		}
 
 		revision := "Revision requested by reviewer."
@@ -384,6 +379,37 @@ func waitForSubtaskApprovalRevisionsAt(ctx context.Context, baseDir string, agen
 			if reason := strings.TrimSpace(decision.Reason); reason != "" {
 				revision = reason
 			}
+		}
+		unit := RollbackUnit{Scope: nodeName, MaxAttempts: 3, ReusePolicy: SessionReuseOnHumanReject}
+		runID := runIDFromSessionID(sessionID)
+		attempts := syntheticRollbackAttempts(unit.Scope, revisions)
+		if runID != "" {
+			listed, err := NewFileLineageStore(baseDir).List(AttemptFilter{
+				RunID:  runID,
+				NodeID: developmentLineageNodeID,
+				Scope:  unit.Scope,
+			})
+			if err != nil {
+				return revisionIssues, err
+			}
+			if budgetEvents := rollbackBudgetEvents(listed); len(budgetEvents) > 0 {
+				attempts = budgetEvents
+			}
+		}
+		rctx := RollbackContext{
+			RunID:    runID,
+			NodeID:   developmentLineageNodeID,
+			NodeKind: NodeKindDevelopment,
+			Unit:     unit,
+			Budget:   RollbackBudget{ExhaustedAction: RollbackActionBlocked},
+		}
+		rollbackDecision := NewRollbackRunner().Decide(rctx, DefaultRollbackSpec(NodeKindDevelopment), unit, attempts, RollbackSignal{
+			FailureClass: FailureClassHumanReject,
+			Reason:       revision,
+			SourceNode:   nodeName,
+		})
+		if rollbackDecision.Action != RollbackActionRetrySubtask {
+			return revisionIssues, fmt.Errorf("agent %s exceeded max revision attempts", nodeName)
 		}
 		if err := AppendAgentMessage(agent, AgentMessage{Role: "user", Content: revision}); err != nil {
 			return revisionIssues, err

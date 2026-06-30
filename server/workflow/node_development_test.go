@@ -5,9 +5,41 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestDevelopmentNodeImplementsRollbackCapableNode(t *testing.T) {
+	var _ RollbackCapableNode = (*developmentNode)(nil)
+}
+
+func TestDevelopmentNodePrepareRollback(t *testing.T) {
+	node := &developmentNode{}
+	rctx := RollbackContext{
+		RunID:    "run-1",
+		NodeID:   "development",
+		NodeKind: NodeKindDevelopment,
+		Unit:     RollbackUnit{Scope: "subtask:api", MaxAttempts: 3, ReusePolicy: SessionReuseOnHumanReject},
+	}
+
+	decision, err := node.PrepareRollback(context.Background(), rctx, RollbackSignal{
+		FailureClass: FailureClassHumanReject,
+		Reason:       "cover validation",
+	})
+	if err != nil {
+		t.Fatalf("PrepareRollback() error = %v", err)
+	}
+	if decision.Action != RollbackActionRetrySubtask {
+		t.Fatalf("Action = %q, want %q", decision.Action, RollbackActionRetrySubtask)
+	}
+	if !decision.ReuseSession {
+		t.Fatal("ReuseSession = false, want true")
+	}
+	if !strings.Contains(decision.Rationale, "cover validation") {
+		t.Fatalf("Rationale = %q, want feedback", decision.Rationale)
+	}
+}
 
 func TestDevelopmentNodeSkipsInternalReviewAndEvaluation(t *testing.T) {
 	repoRoot := t.TempDir()
