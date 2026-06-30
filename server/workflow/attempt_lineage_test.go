@@ -2,6 +2,9 @@ package workflow
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,5 +86,143 @@ func TestArtifactRefDistinctFromEvidenceRef(t *testing.T) {
 	}
 	if artifact.SubtaskID != "api" {
 		t.Fatalf("ArtifactRef SubtaskID = %q, want api", artifact.SubtaskID)
+	}
+}
+
+func TestAppendAttemptEvent(t *testing.T) {
+	tmpDir := t.TempDir()
+	runID := "run-1"
+	nodeID := "review"
+
+	event := AttemptEvent{
+		RunID:     runID,
+		NodeID:    nodeID,
+		NodeKind:  NodeKindReview,
+		Scope:     "review:subtask-api",
+		SubtaskID: "api",
+		Attempt:   0,
+		StartedAt: time.Now().UTC(),
+	}
+	if err := AppendAttemptEvent(tmpDir, event); err != nil {
+		t.Fatal(err)
+	}
+
+	nodePath := filepath.Join(tmpDir, ".workflow", "runs", runID, nodeID, "attempts.jsonl")
+	indexPath := filepath.Join(tmpDir, ".workflow", "runs", runID, "attempts.index.jsonl")
+	scopePath := filepath.Join(tmpDir, ".workflow", "runs", runID, nodeID, "attempts", "review_subtask-api.jsonl")
+
+	for _, path := range []string{nodePath, indexPath, scopePath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to exist: %v", path, err)
+		}
+	}
+}
+
+func TestAppendAttemptEventMultipleEvents(t *testing.T) {
+	tmpDir := t.TempDir()
+	runID := "run-1"
+	nodeID := "development"
+
+	for i := 0; i < 3; i++ {
+		event := AttemptEvent{
+			RunID:     runID,
+			NodeID:    nodeID,
+			NodeKind:  NodeKindDevelopment,
+			Attempt:   i,
+			StartedAt: time.Now().UTC(),
+		}
+		if err := AppendAttemptEvent(tmpDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	events, err := ReadAttemptEvents(tmpDir, runID, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("len(events) = %d, want 3", len(events))
+	}
+	for i, event := range events {
+		if event.Attempt != i {
+			t.Errorf("events[%d].Attempt = %d, want %d", i, event.Attempt, i)
+		}
+	}
+
+	nodePath := filepath.Join(tmpDir, ".workflow", "runs", runID, nodeID, "attempts.jsonl")
+	data, err := os.ReadFile(nodePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("len(lines) = %d, want 3", len(lines))
+	}
+	for i, line := range lines {
+		var event AttemptEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v", i, err)
+		}
+	}
+}
+
+func TestSafeScopeCleansPathSeparators(t *testing.T) {
+	cases := map[string]string{
+		"review:subtask-api/foo":  "review_subtask-api_foo",
+		"approval:plan\\validate": "approval_plan_validate",
+		"subtask api has space":   "subtask_api_has_space",
+		"safe-scope-name":         "safe-scope-name",
+		"":                        "",
+	}
+	for in, want := range cases {
+		if got := safeScope(in); got != want {
+			t.Errorf("safeScope(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestEmptyScopeDoesNotCreateAttemptsDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	event := AttemptEvent{
+		RunID:     "run-1",
+		NodeID:    "dev",
+		NodeKind:  NodeKindDevelopment,
+		Scope:     "",
+		Attempt:   0,
+		StartedAt: time.Now().UTC(),
+	}
+	if err := AppendAttemptEvent(tmpDir, event); err != nil {
+		t.Fatal(err)
+	}
+
+	attemptsDir := filepath.Join(tmpDir, ".workflow", "runs", "run-1", "dev", "attempts")
+	if _, err := os.Stat(attemptsDir); !os.IsNotExist(err) {
+		t.Errorf("attempts dir should not exist for empty scope, stat err=%v", err)
+	}
+}
+
+func TestFileLineageStoreListAppliesFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewFileLineageStore(tmpDir)
+	events := []AttemptEvent{
+		{RunID: "run-1", NodeID: "review", NodeKind: NodeKindReview, Scope: "review:subtask-api", SubtaskID: "api", Attempt: 0, StartedAt: time.Now().UTC()},
+		{RunID: "run-1", NodeID: "review", NodeKind: NodeKindReview, Scope: "review:subtask-web", SubtaskID: "web", Attempt: 1, StartedAt: time.Now().UTC()},
+		{RunID: "run-1", NodeID: "review", NodeKind: NodeKindReview, Scope: "review:subtask-api", SubtaskID: "api", Attempt: 2, StartedAt: time.Now().UTC()},
+	}
+	for _, event := range events {
+		if err := store.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := store.List(AttemptFilter{RunID: "run-1", NodeID: "review", SubtaskID: "api", Scope: "review:subtask-api", FromAttempt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Attempt != 2 || got[0].SubtaskID != "api" {
+		t.Fatalf("got[0] = %+v, want api attempt 2", got[0])
 	}
 }
