@@ -162,3 +162,84 @@ func TestReviewNodeRunsSeparateReviewForEachSubtask(t *testing.T) {
 		t.Fatalf("aggregate attempts = %d, want 1", aggregateAttempts)
 	}
 }
+
+func TestRunSubtaskReviewRevisesOnHumanReject(t *testing.T) {
+	repoRoot := t.TempDir()
+	plan := &Plan{TaskID: "run-human-reject", Subtasks: []Subtask{{ID: "api", RepoPath: "server/api"}}}
+	result := &SubtaskResult{Subtask: plan.Subtasks[0], SessionID: "session-api", Status: "completed"}
+	paths := NewReviewSubtaskPaths(repoRoot, plan.TaskID, "api")
+	calls := 0
+	oldRunner := runReviewCodexPrompt
+	runReviewCodexPrompt = func(ctx context.Context, repoRoot, prompt string, timeout time.Duration) (string, error) {
+		calls++
+		if calls == 1 {
+			if err := RejectSession(paths.SessionID, "review:subtask:api", ReviewDecision{Reason: "tighten issue wording"}); err != nil {
+				t.Fatalf("RejectSession() error = %v", err)
+			}
+			return "## Summary\nfirst\n\n## Issues\n", nil
+		}
+		if !strings.Contains(prompt, "tighten issue wording") {
+			t.Fatalf("human reject revision prompt missing reason:\n%s", prompt)
+		}
+		return "## Summary\nrevised\n\n## Issues\n", nil
+	}
+	defer func() { runReviewCodexPrompt = oldRunner }()
+
+	report, _, _, err := RunSubtaskReview(context.Background(), repoRoot, plan.TaskID, plan, result, "/tmp/diff")
+	if err != nil {
+		t.Fatalf("RunSubtaskReview() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", calls)
+	}
+	if report.Summary != "revised" {
+		t.Fatalf("Summary = %q, want revised report", report.Summary)
+	}
+	events, err := ReadAttemptEvents(repoRoot, plan.TaskID, "review")
+	if err != nil {
+		t.Fatalf("ReadAttemptEvents() error = %v", err)
+	}
+	if len(events) != 2 || events[1].FailureClass != FailureClassHumanReject || events[1].SubtaskID != "api" {
+		t.Fatalf("events = %#v, want subtask human reject revision", events)
+	}
+}
+
+func TestRunAggregateReviewRevisesOnHumanReject(t *testing.T) {
+	repoRoot := t.TempDir()
+	plan := &Plan{TaskID: "run-aggregate-reject"}
+	paths := NewReviewAggregatePaths(repoRoot, plan.TaskID)
+	calls := 0
+	oldRunner := runReviewCodexPrompt
+	runReviewCodexPrompt = func(ctx context.Context, repoRoot, prompt string, timeout time.Duration) (string, error) {
+		calls++
+		if calls == 1 {
+			if err := RejectSession(paths.SessionID, "review:aggregate", ReviewDecision{Reason: "check shared docs"}); err != nil {
+				t.Fatalf("RejectSession() error = %v", err)
+			}
+			return "## Summary\nfirst aggregate\n\n## Issues\n", nil
+		}
+		if !strings.Contains(prompt, "check shared docs") {
+			t.Fatalf("aggregate human reject prompt missing reason:\n%s", prompt)
+		}
+		return "## Summary\nrevised aggregate\n\n## Issues\n", nil
+	}
+	defer func() { runReviewCodexPrompt = oldRunner }()
+
+	report, _, _, err := RunAggregateReview(context.Background(), repoRoot, plan.TaskID, plan, map[string]*ReviewReport{"api": {Passed: true, Summary: "api ok"}})
+	if err != nil {
+		t.Fatalf("RunAggregateReview() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", calls)
+	}
+	if report.Summary != "revised aggregate" {
+		t.Fatalf("Summary = %q, want revised aggregate", report.Summary)
+	}
+	events, err := ReadAttemptEvents(repoRoot, plan.TaskID, "review")
+	if err != nil {
+		t.Fatalf("ReadAttemptEvents() error = %v", err)
+	}
+	if len(events) != 2 || events[1].FailureClass != FailureClassHumanReject || events[1].SubtaskID != "" {
+		t.Fatalf("events = %#v, want aggregate human reject revision", events)
+	}
+}

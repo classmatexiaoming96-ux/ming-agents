@@ -420,6 +420,21 @@ func renderReviewContractRevisionPrompt(originalPrompt, output string, err error
 	return b.String()
 }
 
+func renderReviewHumanRejectRevisionPrompt(originalPrompt, output string, decision ReviewDecision) string {
+	var b strings.Builder
+	b.WriteString("# Review Human Rejection Revision\n")
+	b.WriteString("Revise only the review report in response to the human rejection. Do not inspect or modify repository files.\n\n")
+	b.WriteString("# Rejection Reason\n")
+	b.WriteString(decision.Reason)
+	b.WriteString("\n\n# Previous Review Prompt\n")
+	b.WriteString(originalPrompt)
+	b.WriteString("\n\n# Previous Review Output\n")
+	b.WriteString(output)
+	b.WriteString("\n\n# Required Output\n")
+	b.WriteString("Return a corrected review report using the required review output format.\n")
+	return b.String()
+}
+
 func renderAggregateReviewPrompt(plan *Plan, subtaskReports map[string]*ReviewReport) string {
 	var ids []string
 	for id := range subtaskReports {
@@ -486,6 +501,7 @@ func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, r
 	}
 	agent := &SubtaskAgent{SubtaskID: result.Subtask.ID, Session: session}
 	_ = AppendAgentMessage(agent, AgentMessage{Role: "system", Content: prompt})
+	_ = appendReviewApprovalRequest(agent, "review:subtask:"+result.Subtask.ID)
 
 	output, err := runReviewCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
 	exitCode := 0
@@ -554,6 +570,13 @@ func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, r
 		}
 	}
 	_ = writeReviewAttempt(repoRoot, runID, "review:subtask:"+result.Subtask.ID, paths.SessionID, result.Subtask.ID, 0, -1, "initial", FailureClassNone, "", paths.ReviewAttemptPaths)
+	if revisedReport, revisedOutput, revised, reviseErr := runReviewHumanRejectRevision(ctx, repoRoot, runID, "review:subtask:"+result.Subtask.ID, paths.SessionID, result.Subtask.ID, prompt, output, paths.ReviewAttemptPaths, func(report *ReviewReport) error {
+		return ValidateReviewReport(report, []*SubtaskResult{result}, result.Subtask.ID)
+	}); reviseErr != nil {
+		return nil, "", paths, reviseErr
+	} else if revised {
+		return revisedReport, revisedOutput, paths, nil
+	}
 	return report, output, paths, nil
 }
 
@@ -575,6 +598,7 @@ func RunAggregateReview(ctx context.Context, repoRoot, runID string, plan *Plan,
 	}
 	agent := &SubtaskAgent{Session: session}
 	_ = AppendAgentMessage(agent, AgentMessage{Role: "system", Content: prompt})
+	_ = appendReviewApprovalRequest(agent, "review:aggregate")
 	output, err := runReviewCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
 	exitCode := 0
 	if err != nil {
@@ -590,7 +614,68 @@ func RunAggregateReview(ctx context.Context, repoRoot, runID string, plan *Plan,
 		report.Issues = append(report.Issues, ReviewIssue{Severity: "blocking", Description: err.Error()})
 	}
 	_ = writeReviewAttempt(repoRoot, runID, "review:aggregate", paths.SessionID, "", 0, -1, "initial", FailureClassNone, "", paths.ReviewAttemptPaths)
+	if revisedReport, revisedOutput, revised, reviseErr := runReviewHumanRejectRevision(ctx, repoRoot, runID, "review:aggregate", paths.SessionID, "", prompt, output, paths.ReviewAttemptPaths, nil); reviseErr != nil {
+		return nil, "", paths, reviseErr
+	} else if revised {
+		return revisedReport, revisedOutput, paths, nil
+	}
 	return report, output, paths, nil
+}
+
+func appendReviewApprovalRequest(agent *SubtaskAgent, nodeName string) error {
+	request := ApprovalRequest{
+		RunID:     runIDFromSessionID(agent.Session.ID),
+		SessionID: agent.Session.ID,
+		NodeName:  nodeName,
+		Status:    "WAITING",
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	return AppendAgentMessage(agent, AgentMessage{Role: "approval_request", Content: string(data)})
+}
+
+func runReviewHumanRejectRevision(ctx context.Context, repoRoot, runID, scope, sessionID, subtaskID, originalPrompt, output string, paths ReviewAttemptPaths, validate func(*ReviewReport) error) (*ReviewReport, string, bool, error) {
+	decision, ok, err := LatestReviewDecision(sessionID, scope)
+	if err != nil || !ok || decision.Approved {
+		return nil, "", false, err
+	}
+	revisionPromptPath, revisionOutPath, revisionExitPath := AttemptPathsForRevision(paths.PromptFile, paths.OutFile, paths.ExitFile, 1)
+	revisionPaths := ReviewAttemptPaths{
+		PromptFile:  revisionPromptPath,
+		OutFile:     revisionOutPath,
+		ExitFile:    revisionExitPath,
+		HistoryFile: paths.HistoryFile,
+	}
+	revisionPrompt := renderReviewHumanRejectRevisionPrompt(originalPrompt, output, decision)
+	if err := writeTextAtomic(revisionPaths.PromptFile, revisionPrompt); err != nil {
+		return nil, "", false, err
+	}
+	agent := &SubtaskAgent{SubtaskID: subtaskID, Session: AgentSession{ID: sessionID, HistoryFile: paths.HistoryFile}}
+	_ = AppendAgentMessage(agent, AgentMessage{Role: "user", Content: revisionPrompt})
+	revisionOutput, revisionErr := runReviewCodexPrompt(ctx, repoRoot, revisionPrompt, 30*time.Minute)
+	revisionExitCode := 0
+	if revisionErr != nil {
+		revisionExitCode = 1
+		revisionOutput = revisionErr.Error()
+	}
+	_ = os.WriteFile(revisionPaths.OutFile, []byte(revisionOutput), 0644)
+	_ = os.WriteFile(revisionPaths.ExitFile, []byte(fmt.Sprintf("%d\n", revisionExitCode)), 0644)
+	_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: revisionOutput})
+	report := ParseReviewReport(revisionOutput)
+	if revisionErr != nil {
+		report.Passed = false
+		report.Issues = append(report.Issues, ReviewIssue{SubtaskID: subtaskID, Severity: "blocking", FailureClass: FailureClassHumanReject, Description: revisionErr.Error()})
+	} else if validate != nil {
+		if contractErr := validate(report); contractErr != nil {
+			report.Passed = false
+			report.Issues = append(report.Issues, ReviewIssue{SubtaskID: subtaskID, Severity: "blocking", FailureClass: FailureClassContractError, Description: contractErr.Error()})
+		}
+	}
+	_ = writeReviewAttempt(repoRoot, runID, scope, sessionID, subtaskID, 1, 0, "human_reject", FailureClassHumanReject, decision.Reason, revisionPaths)
+	return report, revisionOutput, true, nil
 }
 
 func MergeReviewReports(subtaskReports map[string]*ReviewReport, aggregate *ReviewReport) *ReviewReport {
