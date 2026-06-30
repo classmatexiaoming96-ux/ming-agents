@@ -83,6 +83,19 @@ func discoverSubtasks(repoRoot, runID string) []string {
 }
 
 func runTestForSubtask(runCtx context.Context, repoRoot, runID, subtaskDir string) TestResult {
+	unit := RollbackUnit{Scope: "command:" + subtaskDir, MaxAttempts: 2, ReusePolicy: SessionReuseNewSession}
+	attempt := 0
+	for {
+		result := executeTestCommand(runCtx, repoRoot, runID, subtaskDir)
+		writeEvaluationAttempt(repoRoot, runID, unit.Scope, attempt, result)
+		if result.Passed || !evaluationFailureRetryable(result.FailureClass) || attempt+1 >= unit.MaxAttempts {
+			return result
+		}
+		attempt++
+	}
+}
+
+func executeTestCommand(runCtx context.Context, repoRoot, runID, subtaskDir string) TestResult {
 	stDir := filepath.Join(repoRoot, ".workflow", "runs", runID, subtaskDir)
 	cmdPath := filepath.Join(stDir, "test_command.txt")
 
@@ -149,6 +162,34 @@ func runTestForSubtask(runCtx context.Context, repoRoot, runID, subtaskDir strin
 		DurationMs:   time.Since(start).Milliseconds(),
 		FailureClass: failureClass,
 	}
+}
+
+func evaluationFailureRetryable(fc FailureClass) bool {
+	switch fc {
+	case FailureClassTransient, FailureClassValidatorIssue, FailureClassMissingEvidence, FailureClassInconclusive:
+		return true
+	default:
+		return false
+	}
+}
+
+func writeEvaluationAttempt(repoRoot, runID, scope string, attempt int, result TestResult) {
+	outcome := &AttemptOutcome{
+		Status:       "completed",
+		Passed:       result.Passed,
+		FailureClass: result.FailureClass,
+		ArtifactRefs: []ArtifactRef{
+			{Type: ArtifactTypeOutput, Path: result.StdoutPath, Description: "stdout"},
+		},
+	}
+	if !result.Passed {
+		outcome.Status = "failed"
+		outcome.Reason = evaluationFailureReason(result)
+	}
+	if result.StderrPath != "" {
+		outcome.ArtifactRefs = append(outcome.ArtifactRefs, ArtifactRef{Type: ArtifactTypeLog, Path: result.StderrPath, Description: "stderr"})
+	}
+	_ = writeAttemptEvent(repoRoot, runID, "evaluation", NodeKindEvaluation, scope, "command", "", attempt, attempt-1, "command", result.FailureClass, string(result.FailureClass), "", outcome, nil, "", result.StdoutPath, result.StderrPath)
 }
 
 func classifyFailure(results []TestResult) FailureClass {

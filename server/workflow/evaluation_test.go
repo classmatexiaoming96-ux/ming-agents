@@ -10,6 +10,29 @@ import (
 	"testing"
 )
 
+func TestEvaluationNodeImplementsRollbackCapableNode(t *testing.T) {
+	var _ RollbackCapableNode = (*evaluationNode)(nil)
+}
+
+func TestEvaluationNodePrepareRollback(t *testing.T) {
+	node := &evaluationNode{}
+	decision, err := node.PrepareRollback(context.Background(), RollbackContext{
+		RunID:    "run-1",
+		NodeID:   "evaluation",
+		NodeKind: NodeKindEvaluation,
+		Unit:     RollbackUnit{Scope: "command:subtask-api", MaxAttempts: 2, ReusePolicy: SessionReuseNewSession},
+	}, RollbackSignal{FailureClass: FailureClassTransient, Reason: "flaky command"})
+	if err != nil {
+		t.Fatalf("PrepareRollback() error = %v", err)
+	}
+	if decision.Action != RollbackActionRetryReport {
+		t.Fatalf("Action = %q, want %q", decision.Action, RollbackActionRetryReport)
+	}
+	if decision.ReuseSession {
+		t.Fatal("ReuseSession = true, want false")
+	}
+}
+
 func TestRunEvaluationWritesEvaluationJSONAndClassifiesFailure(t *testing.T) {
 	repoRoot := t.TempDir()
 	runID := "run-eval"
@@ -58,6 +81,61 @@ func TestRunEvaluationWritesEvaluationJSONAndClassifiesFailure(t *testing.T) {
 	}
 	if decoded.RunID != runID || decoded.FailureClass != FailureClassProductDefect {
 		t.Fatalf("decoded evaluation = %+v", decoded)
+	}
+}
+
+func TestRunEvaluationWritesCommandAttemptLineage(t *testing.T) {
+	repoRoot := t.TempDir()
+	runID := "run-eval-lineage"
+	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
+	subtaskDir := filepath.Join(runDir, "subtask-api")
+	if err := os.MkdirAll(subtaskDir, 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subtaskDir, "test_command.txt"), []byte("printf 'ok'"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := RunEvaluation(context.Background(), repoRoot, runID); err != nil {
+		t.Fatalf("RunEvaluation() error = %v", err)
+	}
+	events, err := ReadAttemptEvents(repoRoot, runID, "evaluation")
+	if err != nil {
+		t.Fatalf("ReadAttemptEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Scope != "command:subtask-api" {
+		t.Fatalf("Scope = %q, want command:subtask-api", event.Scope)
+	}
+	if event.Outcome == nil || !event.Outcome.Passed {
+		t.Fatalf("Outcome = %#v, want passed outcome", event.Outcome)
+	}
+}
+
+func TestRunEvaluationDoesNotRetryProductDefect(t *testing.T) {
+	repoRoot := t.TempDir()
+	runID := "run-eval-no-product-retry"
+	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
+	subtaskDir := filepath.Join(runDir, "subtask-api")
+	if err := os.MkdirAll(subtaskDir, 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subtaskDir, "test_command.txt"), []byte("printf 'unit failed'; exit 1"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := RunEvaluation(context.Background(), repoRoot, runID); err != nil {
+		t.Fatalf("RunEvaluation() error = %v", err)
+	}
+	events, err := ReadAttemptEvents(repoRoot, runID, "evaluation")
+	if err != nil {
+		t.Fatalf("ReadAttemptEvents() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want product defect to stop after one attempt", len(events))
 	}
 }
 
