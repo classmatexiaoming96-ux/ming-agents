@@ -6,8 +6,67 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"unicode"
 )
+
+type ReviewAttemptPaths struct {
+	PromptFile  string
+	OutFile     string
+	ExitFile    string
+	HistoryFile string
+}
+
+type ReviewSubtaskPaths struct {
+	SubtaskID     string
+	SafeSubtaskID string
+	SessionID     string
+	Dir           string
+	ReviewAttemptPaths
+}
+
+func NewReviewSubtaskPaths(repoRoot, runID, subtaskID string) ReviewSubtaskPaths {
+	safeID := safeReviewSubtaskID(subtaskID)
+	dir := filepath.Join(repoRoot, ".workflow", "runs", runID, "review", "subtasks", safeID)
+	return ReviewSubtaskPaths{
+		SubtaskID:     subtaskID,
+		SafeSubtaskID: safeID,
+		SessionID:     NewPTYSessionID(runID, "review", "subtask-"+subtaskID, 1),
+		Dir:           dir,
+		ReviewAttemptPaths: ReviewAttemptPaths{
+			PromptFile:  filepath.Join(dir, "review-"+safeID+".prompt.md"),
+			OutFile:     filepath.Join(dir, "review-"+safeID+".out.md"),
+			ExitFile:    filepath.Join(dir, "review-"+safeID+".exit"),
+			HistoryFile: filepath.Join(dir, "review-"+safeID+".messages.jsonl"),
+		},
+	}
+}
+
+func safeReviewSubtaskID(subtaskID string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range subtaskID {
+		safe := unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.'
+		if safe {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	safe := strings.Trim(b.String(), ".-")
+	for strings.Contains(safe, "..") {
+		safe = strings.ReplaceAll(safe, "..", ".")
+	}
+	if safe == "" {
+		return "subtask"
+	}
+	return safe
+}
 
 func ParseReviewReport(markdown string) *ReviewReport {
 	report := &ReviewReport{Passed: true}
@@ -190,6 +249,77 @@ func renderReviewPrompt(plan *Plan, results []*SubtaskResult, diffFile string) s
 	b.WriteString("- severity: info|warning|blocking\n")
 	b.WriteString("  subtask_id: optional subtask id\n")
 	b.WriteString("  session_id: optional session id\n")
+	b.WriteString("  description: concrete issue\n")
+	b.WriteString("  required_fixes:\n")
+	b.WriteString("  - concrete fix\n")
+	return b.String()
+}
+
+func renderSubtaskReviewPrompt(plan *Plan, result *SubtaskResult, diffFile string) string {
+	var subtask Subtask
+	sessionID := ""
+	status := ""
+	exitCode := 0
+	outFile := ""
+	if result != nil {
+		subtask = result.Subtask
+		sessionID = result.SessionID
+		status = result.Status
+		exitCode = result.ExitCode
+		outFile = result.OutFile
+	}
+	plannedFiles := append([]string(nil), subtask.PlannedFiles...)
+	sort.Strings(plannedFiles)
+
+	var b strings.Builder
+	b.WriteString("# Role\n")
+	b.WriteString("You are the review agent for exactly one development subtask.\n\n")
+	b.WriteString("# Run\n")
+	if plan != nil {
+		fmt.Fprintf(&b, "task_id: %s\n", plan.TaskID)
+	}
+	b.WriteString("\n# Target Subtask\n")
+	fmt.Fprintf(&b, "subtask_id: %s\n", subtask.ID)
+	fmt.Fprintf(&b, "session_id: %s\n", sessionID)
+	fmt.Fprintf(&b, "repo_path: %s\n", subtask.RepoPath)
+	fmt.Fprintf(&b, "description: %s\n", subtask.Description)
+	fmt.Fprintf(&b, "status: %s\n", status)
+	fmt.Fprintf(&b, "exit_code: %d\n", exitCode)
+	fmt.Fprintf(&b, "out_file: %s\n\n", outFile)
+	if len(plannedFiles) > 0 {
+		b.WriteString("planned_files:\n")
+		for _, file := range plannedFiles {
+			fmt.Fprintf(&b, "- %s\n", file)
+		}
+		b.WriteString("\n")
+	}
+	if len(subtask.AcceptanceCriteria) > 0 {
+		b.WriteString("acceptance_criteria:\n")
+		for _, criterion := range subtask.AcceptanceCriteria {
+			fmt.Fprintf(&b, "- %s\n", criterion)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("# Diff Snapshot\n")
+	b.WriteString("Review the repository diff at: ")
+	b.WriteString(diffFile)
+	b.WriteString("\n\n")
+	b.WriteString("# Review Instructions\n")
+	b.WriteString("Focus only on the target subtask, its planned files, repo path, acceptance criteria, and referenced artifacts. Do not review unrelated subtasks.\n")
+	b.WriteString("Read artifact files by path; do not rely on embedded development output.\n\n")
+	b.WriteString("# Output Format\n")
+	b.WriteString("Return markdown with these exact headings:\n\n")
+	b.WriteString("## Summary\n")
+	b.WriteString("One concise review summary for this subtask.\n\n")
+	b.WriteString("## Issues\n")
+	b.WriteString("For each issue use:\n")
+	b.WriteString("- severity: info|warning|blocking\n")
+	b.WriteString("  subtask_id: ")
+	b.WriteString(subtask.ID)
+	b.WriteString("\n")
+	b.WriteString("  session_id: ")
+	b.WriteString(sessionID)
+	b.WriteString("\n")
 	b.WriteString("  description: concrete issue\n")
 	b.WriteString("  required_fixes:\n")
 	b.WriteString("  - concrete fix\n")
