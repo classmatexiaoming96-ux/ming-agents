@@ -235,23 +235,7 @@ func retryAdviceForVerification(failureClass FailureClass, reason string) string
 }
 
 func classifyCommandResult(exitCode int, command, stdout, stderr string) FailureClass {
-	failureText := strings.ToLower(command + "\n" + stdout + "\n" + stderr)
-	switch {
-	case exitCode == -1:
-		return FailureClassValidatorIssue
-	case exitCode == 2, exitCode == 126, exitCode == 127:
-		return FailureClassEnvironmentBlock
-	case strings.Contains(failureText, "go: not found"),
-		strings.Contains(failureText, "npm: not found"),
-		strings.Contains(failureText, "command not found"),
-		strings.Contains(failureText, "permission denied"),
-		strings.Contains(failureText, "network"):
-		return FailureClassEnvironmentBlock
-	case exitCode != 0:
-		return FailureClassProductDefect
-	default:
-		return FailureClassNone
-	}
+	return ClassifyCommandResult(exitCode, command, stdout, stderr)
 }
 
 func subtaskFailuresFromTestResults(results []TestResult, evidence []EvidenceRef) []SubtaskFailure {
