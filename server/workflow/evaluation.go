@@ -654,7 +654,11 @@ func ChangedFiles(repoRoot string) ([]string, error) {
 
 func ensureGitRepo(repoRoot string) error {
 	if _, err := runGitOutput(repoRoot, "rev-parse", "--is-inside-work-tree"); err != nil {
-		return err
+		return &classifiedEvaluationError{
+			op:           "ensure git repo",
+			err:          err,
+			failureClass: FailureClassEnvironmentBlock,
+		}
 	}
 	return nil
 }

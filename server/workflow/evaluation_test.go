@@ -483,6 +483,25 @@ func TestChangedFilesNonGitRepoReturnsClassifiedError(t *testing.T) {
 	}
 }
 
+func TestEnsureGitRepoWrapsNonGitRepoAsEnvironmentBlock(t *testing.T) {
+	err := ensureGitRepo(t.TempDir())
+	if err == nil {
+		t.Fatal("ensureGitRepo() error = nil, want classified error")
+	}
+	if !strings.Contains(err.Error(), "ensure git repo") {
+		t.Fatalf("ensureGitRepo() error = %q, want ensure git repo context", err.Error())
+	}
+	var classified interface {
+		FailureClass() FailureClass
+	}
+	if !errors.As(err, &classified) {
+		t.Fatalf("ensureGitRepo() error %T does not expose FailureClass()", err)
+	}
+	if classified.FailureClass() != FailureClassEnvironmentBlock {
+		t.Fatalf("FailureClass() = %q, want %q", classified.FailureClass(), FailureClassEnvironmentBlock)
+	}
+}
+
 func TestChangedFilesHaveGoCodeChanges(t *testing.T) {
 	tests := []struct {
 		name string
