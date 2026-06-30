@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,10 +78,20 @@ func ReadAttemptEvents(repoRoot, runID, nodeID string) ([]AttemptEvent, error) {
 	defer file.Close()
 
 	var events []AttemptEvent
-	scanner := bufio.NewScanner(file)
-	for lineNo := 1; scanner.Scan(); lineNo++ {
-		line := strings.TrimSpace(scanner.Text())
+	reader := bufio.NewReader(file)
+	for lineNo := 1; ; lineNo++ {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read attempt event %s:%d: %w", path, lineNo, err)
+		}
+		line := strings.TrimSpace(string(lineBytes))
 		if line == "" {
+			if err == io.EOF {
+				break
+			}
 			continue
 		}
 		var event AttemptEvent
@@ -88,9 +99,9 @@ func ReadAttemptEvents(repoRoot, runID, nodeID string) ([]AttemptEvent, error) {
 			return nil, fmt.Errorf("parse attempt event %s:%d: %w", path, lineNo, err)
 		}
 		events = append(events, event)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan attempt events from %s: %w", path, err)
+		if err == io.EOF {
+			break
+		}
 	}
 	return events, nil
 }

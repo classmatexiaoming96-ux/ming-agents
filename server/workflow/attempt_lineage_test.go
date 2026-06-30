@@ -249,6 +249,56 @@ func TestAppendAttemptEventMultipleEvents(t *testing.T) {
 	}
 }
 
+func TestReadAttemptEventsHandlesLargeJSONLLines(t *testing.T) {
+	tmpDir := t.TempDir()
+	largeFeedback := strings.Repeat("large-review-feedback-", 5000)
+	events := []AttemptEvent{
+		{
+			RunID:     "run-large",
+			NodeID:    "review",
+			NodeKind:  NodeKindReview,
+			Scope:     "review:subtask-api",
+			Attempt:   0,
+			StartedAt: time.Now().UTC(),
+		},
+		{
+			RunID:    "run-large",
+			NodeID:   "review",
+			NodeKind: NodeKindReview,
+			Scope:    "review:subtask-api",
+			Attempt:  1,
+			PromptDelta: &AttemptPromptDelta{
+				AddedFeedback: largeFeedback,
+			},
+			StartedAt: time.Now().UTC(),
+		},
+		{
+			RunID:     "run-large",
+			NodeID:    "review",
+			NodeKind:  NodeKindReview,
+			Scope:     "review:subtask-api",
+			Attempt:   2,
+			StartedAt: time.Now().UTC(),
+		},
+	}
+	for _, event := range events {
+		if err := AppendAttemptEvent(tmpDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ReadAttemptEvents(tmpDir, "run-large", "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(events) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(events))
+	}
+	if got[1].PromptDelta == nil || got[1].PromptDelta.AddedFeedback != largeFeedback {
+		t.Fatalf("large prompt delta did not round trip")
+	}
+}
+
 func TestSafeScopeCleansPathSeparators(t *testing.T) {
 	cases := map[string]string{
 		"review:subtask-api/foo":  "review_subtask-api_foo",
