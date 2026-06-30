@@ -20,6 +20,11 @@ import (
 
 // RunEvaluation 执行结构化验证并返回分类结果
 func RunEvaluation(runCtx context.Context, repoRoot, runID string) (*EvaluationResult, error) {
+	return RunEvaluationWithPlan(runCtx, repoRoot, runID, nil)
+}
+
+// RunEvaluationWithPlan executes validation with optional planning context for failure attribution.
+func RunEvaluationWithPlan(runCtx context.Context, repoRoot, runID string, plan *Plan) (*EvaluationResult, error) {
 	result := &EvaluationResult{
 		RunID:       runID,
 		EvaluatedAt: time.Now(),
@@ -42,13 +47,14 @@ func RunEvaluation(runCtx context.Context, repoRoot, runID string) (*EvaluationR
 		result.Passed = true
 	}
 
-	applyCoverageGate(runCtx, repoRoot, runID, result)
+	changedFiles := changedFilesForAttribution(repoRoot)
+	applyCoverageGate(runCtx, repoRoot, runID, plan, changedFiles, result)
 	result.Evidence = collectEvidence(repoRoot, runID)
 
 	if !result.Passed {
 		result.FailureClass = classifyFailure(result.TestResults)
 		result.RetryAdvice = retryAdviceFor(result.FailureClass)
-		result.SubtaskResults = subtaskFailuresFromTestResults(result.TestResults, result.Evidence)
+		result.SubtaskResults = subtaskFailuresFromTestResults(result.TestResults, result.Evidence, plan, changedFiles)
 	} else {
 		result.FailureClass = FailureClassNone
 	}
@@ -60,12 +66,16 @@ func RunEvaluation(runCtx context.Context, repoRoot, runID string) (*EvaluationR
 	return result, nil
 }
 
-func applyCoverageGate(runCtx context.Context, repoRoot, runID string, result *EvaluationResult) {
+func changedFilesForAttribution(repoRoot string) []string {
 	changedFiles, err := ChangedFiles(repoRoot)
 	if err != nil {
 		log.Printf("RunEvaluation: ChangedFiles: %v", err)
-		return
+		return nil
 	}
+	return changedFiles
+}
+
+func applyCoverageGate(runCtx context.Context, repoRoot, runID string, plan *Plan, changedFiles []string, result *EvaluationResult) {
 	if !changedFilesHaveGoCode(changedFiles) {
 		return
 	}
@@ -80,6 +90,7 @@ func applyCoverageGate(runCtx context.Context, repoRoot, runID string, result *E
 		tr.Passed = false
 		tr.ExitCode = 1
 		tr.FailureClass = failureClassFromError(err, FailureClassValidatorIssue)
+		tr.SubtaskID = AttributeFailureToSubtask(plan, changedFiles, tr)
 		result.Passed = false
 		result.TestResults = append(result.TestResults, tr)
 		return
@@ -88,6 +99,7 @@ func applyCoverageGate(runCtx context.Context, repoRoot, runID string, result *E
 		tr.Passed = false
 		tr.ExitCode = 1
 		tr.FailureClass = FailureClassProductDefect
+		tr.SubtaskID = AttributeFailureToSubtask(plan, changedFiles, tr)
 		result.Passed = false
 	}
 	result.TestResults = append(result.TestResults, tr)
@@ -342,7 +354,7 @@ func classifyCommandResult(exitCode int, command, stdout, stderr string) Failure
 	return ClassifyCommandResult(exitCode, command, stdout, stderr)
 }
 
-func subtaskFailuresFromTestResults(results []TestResult, evidence []EvidenceRef) []SubtaskFailure {
+func subtaskFailuresFromTestResults(results []TestResult, evidence []EvidenceRef, plan *Plan, changedFiles []string) []SubtaskFailure {
 	var failures []SubtaskFailure
 	for _, result := range results {
 		if result.Passed {
@@ -353,7 +365,7 @@ func subtaskFailuresFromTestResults(results []TestResult, evidence []EvidenceRef
 			failureClass = classifyCommandResult(result.ExitCode, result.Command, "", "")
 		}
 		failures = append(failures, SubtaskFailure{
-			SubtaskID:    result.SubtaskID,
+			SubtaskID:    AttributeFailureToSubtask(plan, changedFiles, result),
 			FailureClass: failureClass,
 			Reason:       evaluationFailureReason(result),
 			EvidenceRefs: append([]EvidenceRef(nil), evidence...),
@@ -362,6 +374,87 @@ func subtaskFailuresFromTestResults(results []TestResult, evidence []EvidenceRef
 		})
 	}
 	return failures
+}
+
+// AttributeFailureToSubtask returns the single subtask responsible for a failure.
+// Ambiguous plan matches intentionally return "" so callers treat the failure as run-level.
+func AttributeFailureToSubtask(plan *Plan, changedFiles []string, test TestResult) string {
+	if plan == nil {
+		return test.SubtaskID
+	}
+	changed := normalizedPathSet(changedFiles)
+	if len(changed) > 0 {
+		if subtaskID, ok, ambiguous := singlePlannedFileMatch(plan, changed); ok || ambiguous {
+			if ambiguous {
+				return ""
+			}
+			return subtaskID
+		}
+		if subtaskID, ok, ambiguous := singleRepoPathMatch(plan, changed); ok || ambiguous {
+			if ambiguous {
+				return ""
+			}
+			return subtaskID
+		}
+	}
+	return test.SubtaskID
+}
+
+func singlePlannedFileMatch(plan *Plan, changed map[string]struct{}) (string, bool, bool) {
+	matches := map[string]struct{}{}
+	for _, subtask := range plan.Subtasks {
+		for _, plannedFile := range subtask.PlannedFiles {
+			path := normalizeGitRelativePath(plannedFile)
+			if path == "" {
+				continue
+			}
+			if _, ok := changed[path]; ok {
+				matches[subtask.ID] = struct{}{}
+			}
+		}
+	}
+	return singleMatch(matches)
+}
+
+func singleRepoPathMatch(plan *Plan, changed map[string]struct{}) (string, bool, bool) {
+	matches := map[string]struct{}{}
+	for _, subtask := range plan.Subtasks {
+		repoPath := normalizeGitRelativePath(subtask.RepoPath)
+		if repoPath == "" {
+			continue
+		}
+		for changedFile := range changed {
+			if changedFile == repoPath || strings.HasPrefix(changedFile, repoPath+"/") {
+				matches[subtask.ID] = struct{}{}
+			}
+		}
+	}
+	return singleMatch(matches)
+}
+
+func normalizedPathSet(paths []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, path := range paths {
+		normalized := normalizeGitRelativePath(path)
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	return out
+}
+
+func singleMatch(matches map[string]struct{}) (string, bool, bool) {
+	if len(matches) == 0 {
+		return "", false, false
+	}
+	if len(matches) > 1 {
+		return "", false, true
+	}
+	for subtaskID := range matches {
+		return subtaskID, true, false
+	}
+	return "", false, false
 }
 
 func evaluationFailureReason(result TestResult) string {

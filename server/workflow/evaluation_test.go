@@ -361,6 +361,53 @@ func TestRunEvaluationPopulatesSubtaskFailureAttribution(t *testing.T) {
 	}
 }
 
+func TestAttributeFailureToSubtaskUsesPlannedFilesBeforeFallbacks(t *testing.T) {
+	plan := &Plan{TaskID: "run-attribution", Subtasks: []Subtask{
+		{ID: "api", RepoPath: "server/api", PlannedFiles: []string{"server/api/handler.go"}},
+		{ID: "ui", RepoPath: "web", PlannedFiles: []string{"web/app.ts"}},
+	}}
+
+	got := AttributeFailureToSubtask(plan, []string{"server/api/handler.go"}, TestResult{SubtaskID: "ui"})
+	if got != "api" {
+		t.Fatalf("AttributeFailureToSubtask() = %q, want api", got)
+	}
+}
+
+func TestAttributeFailureToSubtaskUsesRepoPathWhenNoPlannedFileMatches(t *testing.T) {
+	plan := &Plan{TaskID: "run-attribution", Subtasks: []Subtask{
+		{ID: "api", RepoPath: "server/api"},
+		{ID: "ui", RepoPath: "web"},
+	}}
+
+	got := AttributeFailureToSubtask(plan, []string{"web/components/button.tsx"}, TestResult{SubtaskID: "api"})
+	if got != "ui" {
+		t.Fatalf("AttributeFailureToSubtask() = %q, want ui", got)
+	}
+}
+
+func TestAttributeFailureToSubtaskFallsBackToTestResultSubtaskID(t *testing.T) {
+	plan := &Plan{TaskID: "run-attribution", Subtasks: []Subtask{
+		{ID: "api", RepoPath: "server/api"},
+	}}
+
+	got := AttributeFailureToSubtask(plan, []string{"docs/readme.md"}, TestResult{SubtaskID: "subtask-api"})
+	if got != "subtask-api" {
+		t.Fatalf("AttributeFailureToSubtask() = %q, want subtask-api", got)
+	}
+}
+
+func TestAttributeFailureToSubtaskReturnsEmptyForAmbiguousSharedFile(t *testing.T) {
+	plan := &Plan{TaskID: "run-attribution", Subtasks: []Subtask{
+		{ID: "api", RepoPath: "server", PlannedFiles: []string{"server/shared/config.go"}},
+		{ID: "worker", RepoPath: "server", PlannedFiles: []string{"server/shared/config.go"}},
+	}}
+
+	got := AttributeFailureToSubtask(plan, []string{"server/shared/config.go"}, TestResult{SubtaskID: "api"})
+	if got != "" {
+		t.Fatalf("AttributeFailureToSubtask() = %q, want empty for ambiguous planned file", got)
+	}
+}
+
 func TestChangedFilesReturnsUnstagedTrackedFile(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	writeFile(t, repoRoot, "pkg/feature/file.go", "package feature\n")
@@ -625,6 +672,50 @@ exit 2
 	}
 	if len(result.TestResults) != 1 || result.TestResults[0].TestID != "coverage" || result.TestResults[0].Passed {
 		t.Fatalf("TestResults = %#v, want failing coverage test result", result.TestResults)
+	}
+}
+
+func TestRunEvaluationAttributesCoverageFailureToMatchingSubtask(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	writeFile(t, repoRoot, "pkg/api/api.go", "package api\n\nfunc Covered() int { return 1 }\n")
+	writeFile(t, repoRoot, "go.mod", "module example.test\n\ngo 1.22\n")
+	git(t, repoRoot, "add", ".")
+	git(t, repoRoot, "commit", "-m", "initial")
+	writeFile(t, repoRoot, "pkg/api/api.go", "package api\n\nfunc Covered() int { return 1 }\nfunc Uncovered() int { return 2 }\n")
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+set -eu
+if [ "$1" = "test" ]; then
+	profile=""
+	for arg in "$@"; do
+		case "$arg" in
+			-coverprofile=*) profile="${arg#-coverprofile=}" ;;
+		esac
+	done
+	mkdir -p "$(dirname "$profile")"
+	printf 'mode: set\n' > "$profile"
+	exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "cover" ]; then
+	printf 'total: (statements) 99.9%%\n'
+	exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+	plan := &Plan{TaskID: "run-coverage-attribution", Subtasks: []Subtask{
+		{ID: "api", RepoPath: "pkg/api", PlannedFiles: []string{"pkg/api/api.go"}},
+		{ID: "web", RepoPath: "web"},
+	}}
+
+	result, err := RunEvaluationWithPlan(context.Background(), repoRoot, plan.TaskID, plan)
+	if err != nil {
+		t.Fatalf("RunEvaluationWithPlan() error = %v", err)
+	}
+	if len(result.TestResults) != 1 || result.TestResults[0].SubtaskID != "api" {
+		t.Fatalf("coverage TestResults = %#v, want subtask api", result.TestResults)
+	}
+	if len(result.SubtaskResults) != 1 || result.SubtaskResults[0].SubtaskID != "api" {
+		t.Fatalf("SubtaskResults = %#v, want coverage failure attributed to api", result.SubtaskResults)
 	}
 }
 

@@ -35,7 +35,11 @@ func (n *evaluationNode) RollbackArtifacts(rctx RollbackContext) []ArtifactRef {
 }
 
 func (n *evaluationNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
-	result, err := RunEvaluation(ctx, req.RepoRoot, req.RunID)
+	plan, err := evaluationPlanFromInputs(req.Inputs)
+	if err != nil {
+		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+	}
+	result, err := RunEvaluationWithPlan(ctx, req.RepoRoot, req.RunID, plan)
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
@@ -46,4 +50,20 @@ func (n *evaluationNode) Execute(ctx context.Context, req NodeRequest) (*NodeRes
 		Values:      map[string]any{"evaluation": json.RawMessage(resultJSON)},
 		OutputPaths: []string{filepath.Join(req.RepoRoot, ".workflow", "runs", req.RunID, "evaluation.json")},
 	}, nil
+}
+
+func evaluationPlanFromInputs(inputs NodeInputs) (*Plan, error) {
+	planOutput, ok := inputs["planning"]
+	if !ok || planOutput.Values == nil {
+		return nil, nil
+	}
+	planJSON, ok := planOutput.Values["plan"].(json.RawMessage)
+	if !ok {
+		return nil, nil
+	}
+	var plan Plan
+	if err := json.Unmarshal(planJSON, &plan); err != nil {
+		return nil, err
+	}
+	return &plan, nil
 }
