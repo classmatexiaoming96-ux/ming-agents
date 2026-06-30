@@ -92,7 +92,7 @@ func addCompletionEvidenceIfExists(check *CompletionCheck, subtaskID, evidenceTy
 
 func addReviewReportEvidence(check *CompletionCheck, runDir string) {
 	_ = filepath.WalkDir(runDir, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != "review.out.md" {
+		if err != nil || entry.IsDir() || !isReviewReportEvidenceName(entry.Name()) {
 			return nil
 		}
 		check.EvidenceIndex = append(check.EvidenceIndex, EvidenceItem{
@@ -103,4 +103,12 @@ func addReviewReportEvidence(check *CompletionCheck, runDir string) {
 		})
 		return nil
 	})
+}
+
+func isReviewReportEvidenceName(name string) bool {
+	if name == "review.out.md" {
+		return true
+	}
+	matched, _ := filepath.Match("review-*.out.md", name)
+	return matched
 }

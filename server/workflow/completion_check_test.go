@@ -130,6 +130,35 @@ func TestCompletionCheckRecognizesReviewReportEvidence(t *testing.T) {
 	assertEvidenceType(t, check, "review_report", reviewPath)
 }
 
+func TestCompletionCheckRecognizesPhase3ReviewReportEvidence(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-phase3-review-report"
+	writeCompletionCheckBaseFiles(t, dir, runID)
+	paths := []string{
+		filepath.Join(dir, ".workflow", "runs", runID, "review", "subtasks", "api", "review-api.out.md"),
+		filepath.Join(dir, ".workflow", "runs", runID, "review", "aggregate", "review-aggregate.out.md"),
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte("# Review\n"), 0644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, err)
+		}
+	}
+
+	check, err := checkCompletionAt(dir, runID)
+	if err != nil {
+		t.Fatalf("checkCompletionAt() error = %v", err)
+	}
+	if !check.Passed {
+		t.Fatalf("checkCompletionAt() Passed = false, missing = %v", check.Missing)
+	}
+	for _, path := range paths {
+		assertEvidenceType(t, check, "review_report", path)
+	}
+}
+
 func TestCompletionCheckRecognizesAttemptLineageEvidence(t *testing.T) {
 	dir := t.TempDir()
 	runID := "run-attempt-lineage"

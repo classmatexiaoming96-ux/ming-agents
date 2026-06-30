@@ -318,7 +318,11 @@ P1 lineage writes are best-effort: workflow execution should continue if `Record
 
 ### P2 rollback runner 视角
 
-Phase 2 does not change the default DAG: `clarification -> planning -> development -> evaluation` remains the execution order. Local rollback happens inside the node that owns the failed attempt.
+Phase 2 did not change the default DAG. Phase 3 changes the default execution order to `clarification -> planning -> development -> review -> evaluation`. Local rollback still happens inside the node that owns the failed attempt.
+
+Phase 3 review rejection behavior is scoped to review report revision, not development rerun. Subtask review sessions use `scope="review:subtask:<subtask_id>"` and artifacts under `.workflow/runs/<run_id>/review/subtasks/<safe_subtask_id>/review-<safe_subtask_id>.prompt.md`, `.out.md`, and `.exit`. Aggregate review uses `scope="review:aggregate"` and artifacts under `.workflow/runs/<run_id>/review/aggregate/review-aggregate.prompt.md`, `.out.md`, and `.exit`.
+
+Evaluation remains a forward DAG node. Its coverage gate writes `.workflow/runs/<run_id>/coverage.out` and fails Go-code changes below 100% total coverage, with attribution routed by `planned_files`, then `repo_path`, then existing test subtask id.
 
 `RollbackRunner` only decides and records rollback decisions. It does not call agents, mutate sessions, or choose prompts by itself. Nodes still own the concrete execution:
 

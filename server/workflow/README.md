@@ -845,10 +845,67 @@ P1 adds strongly typed failure and attribution data:
 Completion check keeps the existing `document` and `code_artifacts` evidence behavior and additionally recognizes:
 
 - `coverage` for `coverage.out`, so P3 can add a coverage gate without completion misclassifying the file.
-- `review_report` for review output reports.
+- `review_report` for legacy `review.out.md` and Phase 3 reports such as `review-api.out.md` and `review-aggregate.out.md`.
 - `attempt_lineage` for `attempts.index.jsonl`.
 
 Completion check does not enforce 100% line coverage. Coverage pass/fail remains a P3 evaluation gate concern.
+
+## P3: Review Before Evaluation, Coverage Gate, and Attribution
+
+Phase 3 changes the default DAG to:
+
+```text
+clarification -> planning -> development -> review -> evaluation
+```
+
+No DAG back-edges are added. Review and evaluation emit structured failures and attempt lineage; later orchestration decides whether development should be rerun.
+
+Development node execution now uses the development-only path. The legacy `RunDevelopment` entry point remains for compatibility, but the default DAG expects review and evaluation to run as their own nodes.
+
+### Review Sessions and Artifacts
+
+Each development subtask gets an isolated review session, history file, artifact directory, and attempt scope:
+
+```text
+.workflow/runs/<run_id>/review/subtasks/<safe_subtask_id>/review-<safe_subtask_id>.prompt.md
+.workflow/runs/<run_id>/review/subtasks/<safe_subtask_id>/review-<safe_subtask_id>.out.md
+.workflow/runs/<run_id>/review/subtasks/<safe_subtask_id>/review-<safe_subtask_id>.exit
+.workflow/runs/<run_id>/review/subtasks/<safe_subtask_id>/review-<safe_subtask_id>.messages.jsonl
+```
+
+Subtask review attempts use `scope="review:subtask:<subtask_id>"` and set `SubtaskID`.
+
+After all subtask reviews complete, aggregate review runs under:
+
+```text
+.workflow/runs/<run_id>/review/aggregate/review-aggregate.prompt.md
+.workflow/runs/<run_id>/review/aggregate/review-aggregate.out.md
+.workflow/runs/<run_id>/review/aggregate/review-aggregate.exit
+```
+
+Aggregate attempts use `scope="review:aggregate"` and do not set `SubtaskID`. `MergeReviewReports` keeps `ReviewReport.SubtaskReports` and fails the final report if any subtask or aggregate report has a blocking issue.
+
+Review contract errors are classified as `contract_error`. A malformed subtask review report gets at most one same-session report revision. Human rejection can also revise one subtask review or the aggregate review once, using `failure_class=human_reject`.
+
+### Evaluation Coverage Gate
+
+Evaluation discovers changed files with `git diff --name-only` and `git diff --cached --name-only`. When changed files include Go code, it runs one run-level coverage command:
+
+```bash
+go test -cover -coverprofile=.workflow/runs/<run_id>/coverage.out ./...
+go tool cover -func=.workflow/runs/<run_id>/coverage.out
+```
+
+The required total coverage is exactly `100.0%`. Lower coverage produces a blocking `product_defect` failure and a `coverage.out` evidence ref. Pure documentation or non-Go changes skip the coverage gate.
+
+### Evaluation Attribution
+
+Evaluation failure attribution uses the current plan when available:
+
+1. Changed files matching exactly one `Subtask.PlannedFiles` entry attribute the failure to that subtask.
+2. Otherwise, changed files under exactly one `Subtask.RepoPath` attribute the failure to that subtask.
+3. Otherwise, an existing `TestResult.SubtaskID` is used as a fallback.
+4. Ambiguous matches remain run-level with an empty subtask id.
 
 ## 11. CLI 使用方法
 
