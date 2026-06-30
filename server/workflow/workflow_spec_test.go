@@ -2,7 +2,7 @@ package workflow
 
 import "testing"
 
-func TestDefaultWorkflowSpecMatchesCurrentNodeOrder(t *testing.T) {
+func TestDefaultWorkflowSpecRunsReviewBeforeEvaluation(t *testing.T) {
 	spec := DefaultWorkflowSpec
 
 	want := []struct {
@@ -13,8 +13,8 @@ func TestDefaultWorkflowSpecMatchesCurrentNodeOrder(t *testing.T) {
 		{id: "clarification", kind: NodeKindClarification},
 		{id: "planning", kind: NodeKindPlanning, depends: []string{"clarification"}},
 		{id: "development", kind: NodeKindDevelopment, depends: []string{"planning"}},
-		{id: "evaluation", kind: NodeKindEvaluation, depends: []string{"development"}},
-		{id: "review", kind: NodeKindReview, depends: []string{"evaluation"}},
+		{id: "review", kind: NodeKindReview, depends: []string{"development"}},
+		{id: "evaluation", kind: NodeKindEvaluation, depends: []string{"review"}},
 	}
 
 	if len(spec.Nodes) != len(want) {
@@ -29,6 +29,21 @@ func TestDefaultWorkflowSpecMatchesCurrentNodeOrder(t *testing.T) {
 			t.Fatalf("node %q dependencies = %v, want %v", got.ID, got.DependsOn, expected.depends)
 		}
 	}
+}
+
+func TestDefaultWorkflowSpecHasNoEvaluationToReviewDependency(t *testing.T) {
+	for _, node := range DefaultWorkflowSpec.Nodes {
+		if node.ID != "review" {
+			continue
+		}
+		for _, dep := range node.DependsOn {
+			if dep == "evaluation" {
+				t.Fatal("review must not depend on evaluation in the default workflow")
+			}
+		}
+		return
+	}
+	t.Fatal("default workflow is missing review node")
 }
 
 func sameStrings(a, b []string) bool {
