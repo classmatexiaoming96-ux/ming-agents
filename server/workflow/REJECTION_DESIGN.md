@@ -322,6 +322,8 @@ Phase 2 did not change the default DAG. Phase 3 changes the default execution or
 
 Phase 3 review rejection behavior is scoped to review report revision, not development rerun. Subtask review sessions use `scope="review:subtask:<subtask_id>"` and artifacts under `.workflow/runs/<run_id>/review/subtasks/<safe_subtask_id>/review-<safe_subtask_id>.prompt.md`, `.out.md`, and `.exit`. Aggregate review uses `scope="review:aggregate"` and artifacts under `.workflow/runs/<run_id>/review/aggregate/review-aggregate.prompt.md`, `.out.md`, and `.exit`.
 
+Phase 3 review human-reject revision does **not** block waiting for a human decision. `runReviewHumanRejectRevision` reads `LatestReviewDecision` once after the review agent finishes and revises the report only when a `rejection` already exists in the session history. With no prior rejection the report is returned unchanged (no revision). This differs from the development node, which calls `waitForSubtaskApprovalAt` to block until a decision arrives. Review-time human gating (blocking on a human decision and writing the rejection before re-entering review) is delegated to the P4 orchestrator; the review node only owns the one-shot "revise if a rejection is already recorded" path. See the "P3 to P4 handoff" section.
+
 Evaluation remains a forward DAG node. Its coverage gate writes `.workflow/runs/<run_id>/coverage.out` and fails Go-code changes below 100% total coverage, with attribution routed by `planned_files`, then `repo_path`, then existing test subtask id.
 
 `RollbackRunner` only decides and records rollback decisions. It does not call agents, mutate sessions, or choose prompts by itself. Nodes still own the concrete execution:

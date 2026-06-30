@@ -887,6 +887,12 @@ Aggregate attempts use `scope="review:aggregate"` and do not set `SubtaskID`. `M
 
 Review contract errors are classified as `contract_error`. A malformed subtask review report gets at most one same-session report revision. Human rejection can also revise one subtask review or the aggregate review once, using `failure_class=human_reject`.
 
+#### P3 design choice: review human-reject revision does not block
+
+Unlike the development node (which calls `waitForSubtaskApprovalAt` to block until an approval or rejection appears), the review node does **not** wait for human input. `runReviewHumanRejectRevision` performs a one-shot revision only when a `rejection` decision already exists in the review session history at the moment the review agent finishes. With no prior rejection it leaves the report unchanged.
+
+This is intentional for P3: review-time human gating (presenting the report, blocking on a human decision, and routing the rejection) is the responsibility of the P4 orchestrator, not the review node itself. The review node only owns the mechanical "revise once if a rejection is already recorded" path. The P4 orchestrator will drive the wait and write the rejection before re-entering review. See the "P3 to P4 handoff" section below.
+
 ### Evaluation Coverage Gate
 
 Evaluation discovers changed files with `git diff --name-only` and `git diff --cached --name-only`. When changed files include Go code, it runs one run-level coverage command:

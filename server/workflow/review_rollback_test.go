@@ -163,6 +163,37 @@ func TestReviewNodeRunsSeparateReviewForEachSubtask(t *testing.T) {
 	}
 }
 
+func TestRunSubtaskReviewSkipsRevisionWithoutRejection(t *testing.T) {
+	repoRoot := t.TempDir()
+	plan := &Plan{TaskID: "run-no-reject", Subtasks: []Subtask{{ID: "api", RepoPath: "server/api"}}}
+	result := &SubtaskResult{Subtask: plan.Subtasks[0], SessionID: "session-api", Status: "completed"}
+	calls := 0
+	oldRunner := runReviewCodexPrompt
+	runReviewCodexPrompt = func(ctx context.Context, repoRoot, prompt string, timeout time.Duration) (string, error) {
+		calls++
+		return "## Summary\nfirst\n\n## Issues\n", nil
+	}
+	defer func() { runReviewCodexPrompt = oldRunner }()
+
+	report, _, _, err := RunSubtaskReview(context.Background(), repoRoot, plan.TaskID, plan, result, "/tmp/diff")
+	if err != nil {
+		t.Fatalf("RunSubtaskReview() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("runner calls = %d, want 1 (no human rejection in history)", calls)
+	}
+	if report.Summary != "first" {
+		t.Fatalf("Summary = %q, want original report when no rejection recorded", report.Summary)
+	}
+	events, err := ReadAttemptEvents(repoRoot, plan.TaskID, "review")
+	if err != nil {
+		t.Fatalf("ReadAttemptEvents() error = %v", err)
+	}
+	if len(events) != 1 || events[0].FailureClass == FailureClassHumanReject {
+		t.Fatalf("events = %#v, want a single non-human-reject initial attempt", events)
+	}
+}
+
 func TestRunSubtaskReviewRevisesOnHumanReject(t *testing.T) {
 	repoRoot := t.TempDir()
 	plan := &Plan{TaskID: "run-human-reject", Subtasks: []Subtask{{ID: "api", RepoPath: "server/api"}}}
