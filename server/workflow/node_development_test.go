@@ -65,7 +65,7 @@ func TestDevelopmentNodeIssuesBySubtask(t *testing.T) {
 	}
 }
 
-func TestDevelopmentNodeSkipsInternalReviewAndEvaluation(t *testing.T) {
+func TestDevelopmentNodeRunsOnlyModeWithoutConfigFlag(t *testing.T) {
 	repoRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repoRoot, "workflow"), 0755); err != nil {
 		t.Fatalf("mkdir workflow dir: %v", err)
@@ -108,7 +108,6 @@ done
 		RunID:    plan.TaskID,
 		RepoRoot: repoRoot,
 		Spec:     NodeSpec{ID: "development", Kind: NodeKindDevelopment},
-		Config:   map[string]any{ConfigSkipInternalReviewEvaluation: true},
 		Inputs: NodeInputs{
 			"planning": {NodeID: "planning", Values: map[string]any{"plan": json.RawMessage(planJSON)}},
 		},
@@ -121,6 +120,16 @@ done
 	}
 	if err := <-approvalDone; err != nil {
 		t.Fatalf("approval error = %v", err)
+	}
+	if _, ok := result.Values["subtask_results"]; !ok {
+		t.Fatal("development node result missing subtask_results")
+	}
+	state, _ := result.Values["state"].(*WorkflowState)
+	if state == nil {
+		t.Fatal("development node result missing state")
+	}
+	if _, ok := state.Details["subtask_results"]; !ok {
+		t.Fatal("development state details missing subtask_results")
 	}
 
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", plan.TaskID)

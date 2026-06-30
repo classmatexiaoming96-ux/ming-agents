@@ -44,18 +44,20 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 	if err := json.Unmarshal(planJSON, &plan); err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
-	runDevelopment := RunDevelopment
-	if skipInternalReviewEvaluation(req.Config) {
-		runDevelopment = RunDevelopmentOnly
-	}
-	state, err := runDevelopment(ctx, req.RepoRoot, &plan)
+	state, err := RunDevelopmentOnly(ctx, req.RepoRoot, &plan)
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+	}
+	subtaskResults := any([]*SubtaskResult{})
+	if state.Details != nil {
+		if results, ok := state.Details["subtask_results"]; ok {
+			subtaskResults = results
+		}
 	}
 	return &NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,
-		Values: map[string]any{"state": state},
+		Values: map[string]any{"state": state, "subtask_results": subtaskResults},
 	}, nil
 }
 
