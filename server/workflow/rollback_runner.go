@@ -124,3 +124,22 @@ func reuseSessionFor(policy SessionReusePolicy, fc FailureClass) bool {
 		return false
 	}
 }
+
+func rollbackBudgetEvents(events []AttemptEvent) []AttemptEvent {
+	filtered := make([]AttemptEvent, 0, len(events))
+	for _, event := range events {
+		if event.Trigger == "initial" {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
+func syntheticRollbackAttempts(scope string, revisions int) []AttemptEvent {
+	events := make([]AttemptEvent, 0, revisions)
+	for attempt := 1; attempt <= revisions; attempt++ {
+		events = append(events, AttemptEvent{Scope: scope, Attempt: attempt})
+	}
+	return events
+}

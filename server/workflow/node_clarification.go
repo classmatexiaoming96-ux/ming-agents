@@ -9,6 +9,31 @@ type clarificationNode struct{}
 
 func (n *clarificationNode) Kind() NodeKind { return NodeKindClarification }
 
+func (n *clarificationNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
+	spec := DefaultRollbackSpec(NodeKindClarification)
+	unit := rctx.Unit
+	if unit.Scope == "" {
+		unit = spec.DefaultUnit
+	}
+	var attempts []AttemptEvent
+	if rctx.Lineage != nil {
+		listed, err := rctx.Lineage.List(AttemptFilter{RunID: rctx.RunID, NodeID: rctx.NodeID, Scope: unit.Scope})
+		if err != nil {
+			return nil, err
+		}
+		attempts = rollbackBudgetEvents(listed)
+	}
+	decision := NewRollbackRunner().Decide(rctx, spec, unit, attempts, signal)
+	if signal.Reason != "" {
+		decision.Rationale = renderClarificationRevisionPrompt("", "", signal.Reason)
+	}
+	return decision, nil
+}
+
+func (n *clarificationNode) RollbackArtifacts(rctx RollbackContext) []ArtifactRef {
+	return nil
+}
+
 func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
 	userInputRaw, ok := req.Inputs["input"].Values["user_input"]
 	if !ok {

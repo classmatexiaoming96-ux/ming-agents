@@ -211,8 +211,6 @@ func executeClarificationAgentWithSession(ctx context.Context, repoRoot string, 
 
 // waitForAgentApproval 实现单个 agent 的审批门：等待通过，被拒时重跑（最多3次）
 func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificationOutput, run clarificationRun, agentNodeName string, execute clarificationAgentExecutor) error {
-	const maxRevisions = 3
-
 	revisions := 0
 	for {
 		session := out.Session
@@ -245,9 +243,6 @@ func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificati
 		if !errors.Is(approvalErr, ErrApprovalRejected) {
 			return approvalErr // 其他错误（非 rejection）
 		}
-		if revisions >= maxRevisions {
-			return fmt.Errorf("agent %s exceeded max revision attempts", out.AgentType)
-		}
 
 		// 被拒绝：读取修订指令，追加到 session，重新执行
 		decision, ok, err := LatestReviewDecision(out.SessionID, agentNodeName)
@@ -257,6 +252,36 @@ func waitForAgentApproval(ctx context.Context, repoRoot string, out *clarificati
 		revision := "Please revise your previous output."
 		if ok && !decision.Approved && strings.TrimSpace(decision.Reason) != "" {
 			revision = strings.TrimSpace(decision.Reason)
+		}
+		runID := runIDFromSessionID(out.SessionID)
+		lineage := NewFileLineageStore(repoRoot)
+		rctx := RollbackContext{
+			RunID:    runID,
+			NodeID:   clarificationLineageNodeID,
+			NodeKind: NodeKindClarification,
+			Unit: RollbackUnit{
+				Scope:       "clarification:" + out.AgentType,
+				MaxAttempts: DefaultRollbackSpec(NodeKindClarification).DefaultUnit.MaxAttempts,
+				ReusePolicy: SessionReuseSameSession,
+			},
+			Budget:  RollbackBudget{ExhaustedAction: RollbackActionBlocked},
+			Lineage: lineage,
+		}
+		attempts := syntheticRollbackAttempts(rctx.Unit.Scope, revisions)
+		if runID != "" {
+			listed, err := lineage.List(AttemptFilter{
+				RunID:  runID,
+				NodeID: clarificationLineageNodeID,
+				Scope:  rctx.Unit.Scope,
+			})
+			if err != nil {
+				return err
+			}
+			attempts = rollbackBudgetEvents(listed)
+		}
+		rollbackDecision := NewRollbackRunner().Decide(rctx, DefaultRollbackSpec(NodeKindClarification), rctx.Unit, attempts, HumanRejectSignal(rctx.Unit, decision))
+		if rollbackDecision.Action != RollbackActionFixClarification {
+			return fmt.Errorf("agent %s exceeded max revision attempts", out.AgentType)
 		}
 		if err := AppendAgentMessage(&SubtaskAgent{Session: session}, AgentMessage{
 			Role:    "user",
