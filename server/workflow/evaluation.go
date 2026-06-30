@@ -47,8 +47,8 @@ func RunEvaluationWithPlan(runCtx context.Context, repoRoot, runID string, plan 
 		result.Passed = true
 	}
 
-	changedFiles := changedFilesForAttribution(repoRoot)
-	applyCoverageGate(runCtx, repoRoot, runID, plan, changedFiles, result)
+	changedFiles, changedErr := changedFilesForAttribution(repoRoot)
+	applyCoverageGate(runCtx, repoRoot, runID, plan, changedFiles, changedErr, result)
 	result.Evidence = collectEvidence(repoRoot, runID)
 
 	if !result.Passed {
@@ -66,16 +66,30 @@ func RunEvaluationWithPlan(runCtx context.Context, repoRoot, runID string, plan 
 	return result, nil
 }
 
-func changedFilesForAttribution(repoRoot string) []string {
+func changedFilesForAttribution(repoRoot string) ([]string, error) {
 	changedFiles, err := ChangedFiles(repoRoot)
 	if err != nil {
-		log.Printf("RunEvaluation: ChangedFiles: %v", err)
-		return nil
+		return nil, err
 	}
-	return changedFiles
+	return changedFiles, nil
 }
 
-func applyCoverageGate(runCtx context.Context, repoRoot, runID string, plan *Plan, changedFiles []string, result *EvaluationResult) {
+func applyCoverageGate(runCtx context.Context, repoRoot, runID string, plan *Plan, changedFiles []string, changedErr error, result *EvaluationResult) {
+	if changedErr != nil {
+		// A failure to inspect git state is an environment problem, not "no Go changes".
+		// Surface it as a blocking environment_block instead of silently skipping the gate.
+		tr := TestResult{
+			TestID:       "coverage",
+			Command:      "git diff --name-only (changed file detection)",
+			Passed:       false,
+			ExitCode:     1,
+			FailureClass: failureClassFromError(changedErr, FailureClassEnvironmentBlock),
+		}
+		tr.SubtaskID = AttributeFailureToSubtask(plan, nil, tr)
+		result.Passed = false
+		result.TestResults = append(result.TestResults, tr)
+		return
+	}
 	if !changedFilesHaveGoCode(changedFiles) {
 		return
 	}

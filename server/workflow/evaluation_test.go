@@ -37,7 +37,7 @@ func TestEvaluationNodePrepareRollback(t *testing.T) {
 }
 
 func TestRunEvaluationWritesEvaluationJSONAndClassifiesFailure(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := initTempGitRepo(t)
 	runID := "run-eval"
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
 	subtaskDir := filepath.Join(runDir, "subtask-api")
@@ -88,7 +88,7 @@ func TestRunEvaluationWritesEvaluationJSONAndClassifiesFailure(t *testing.T) {
 }
 
 func TestRunEvaluationWritesCommandAttemptLineage(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := initTempGitRepo(t)
 	runID := "run-eval-lineage"
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
 	subtaskDir := filepath.Join(runDir, "subtask-api")
@@ -119,7 +119,7 @@ func TestRunEvaluationWritesCommandAttemptLineage(t *testing.T) {
 }
 
 func TestRunEvaluationDoesNotRetryProductDefect(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := initTempGitRepo(t)
 	runID := "run-eval-no-product-retry"
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
 	subtaskDir := filepath.Join(runDir, "subtask-api")
@@ -143,7 +143,7 @@ func TestRunEvaluationDoesNotRetryProductDefect(t *testing.T) {
 }
 
 func TestRunEvaluationPassesWhenNoSubtasks(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := initTempGitRepo(t)
 	runID := "run-no-subtasks"
 	if err := writePhaseStatusAt(repoRoot, runID, &PhaseStatus{Phase: "evaluation", GateStatus: "passed"}); err != nil {
 		t.Fatalf("writePhaseStatusAt() error = %v", err)
@@ -319,7 +319,7 @@ func TestNextActionFieldsUseStrongType(t *testing.T) {
 }
 
 func TestRunEvaluationPopulatesSubtaskFailureAttribution(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := initTempGitRepo(t)
 	runID := "run-attribution"
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
 	subtaskDir := filepath.Join(runDir, "subtask-api")
@@ -839,6 +839,37 @@ exit 7
 		if evidence.Type == EvidenceTypeCoverage {
 			t.Fatalf("Evidence contains coverage for docs-only change: %#v", result.Evidence)
 		}
+	}
+}
+
+func TestRunEvaluationRecordsEnvironmentBlockWhenChangedFilesFails(t *testing.T) {
+	// Non-git repoRoot makes ChangedFiles fail. The git environment error must surface
+	// as a blocking environment_block coverage gate, not get silently downgraded to
+	// "no Go changes" with a passing run.
+	repoRoot := t.TempDir()
+	runID := "run-changed-files-env-block"
+
+	result, err := RunEvaluation(context.Background(), repoRoot, runID)
+	if err != nil {
+		t.Fatalf("RunEvaluation() error = %v", err)
+	}
+	if result.Passed {
+		t.Fatal("RunEvaluation() Passed = true, want environment_block failure for git error")
+	}
+	var coverageResult *TestResult
+	for i := range result.TestResults {
+		if result.TestResults[i].TestID == "coverage" {
+			coverageResult = &result.TestResults[i]
+		}
+	}
+	if coverageResult == nil {
+		t.Fatalf("TestResults missing coverage environment_block entry: %#v", result.TestResults)
+	}
+	if coverageResult.Passed {
+		t.Fatalf("coverage TestResult Passed = true, want failing environment_block: %#v", coverageResult)
+	}
+	if coverageResult.FailureClass != FailureClassEnvironmentBlock {
+		t.Fatalf("coverage FailureClass = %q, want %q", coverageResult.FailureClass, FailureClassEnvironmentBlock)
 	}
 }
 

@@ -906,6 +906,13 @@ The required total coverage is exactly `100.0%`. Lower coverage produces a block
 
 The coverage commands run in the nearest Go module directory at or below the git top-level: if the top-level itself has a `go.mod` it is used directly, otherwise the shallowest `go.mod` found beneath it is used as the working directory (e.g. `server/go.mod`). The `-coverprofile` is written with an absolute path so it always lands under `.workflow/runs/<run_id>/coverage.out` regardless of the module directory. Repositories with multiple sibling submodules below the top-level are not fully supported (only the shallowest module is covered).
 
+#### Implicit contracts of changed-file detection and the coverage gate
+
+Two implicit contracts govern evaluation's git interaction:
+
+1. **`ChangedFiles` only inspects the working tree and index** (`git diff --name-only` plus `git diff --cached --name-only`). It does not look at commit history (no `HEAD~`/merge-base baseline). Development artifacts must therefore remain uncommitted in the working tree; if changes are committed, `ChangedFiles` returns empty and both the coverage gate and attribution become no-ops.
+2. **The coverage gate depends on a working git environment.** When `ChangedFiles` fails (e.g. git is unavailable, or `repoRoot` is not the git top-level), evaluation records a blocking `coverage` test result classified as `environment_block` and marks the run failed. The git error is **not** silently downgraded to "no Go changes".
+
 ### Evaluation Attribution
 
 Evaluation failure attribution uses the current plan when available:
