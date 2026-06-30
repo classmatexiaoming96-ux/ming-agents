@@ -12,6 +12,7 @@ import (
 
 func TestAttemptEventJSONRoundTrip(t *testing.T) {
 	started := time.Now().UTC().Truncate(time.Second)
+	parentAttempt := 0
 	event := AttemptEvent{
 		RunID:           "run-1",
 		NodeID:          "review",
@@ -21,7 +22,7 @@ func TestAttemptEventJSONRoundTrip(t *testing.T) {
 		Role:            "assistant",
 		SessionID:       "session-1",
 		Attempt:         0,
-		ParentAttempt:   0,
+		ParentAttempt:   &parentAttempt,
 		Trigger:         "contract_error",
 		FailureClass:    FailureClassContractError,
 		FailureReason:   "missing required_fixes",
@@ -76,6 +77,49 @@ func TestAttemptEventJSONRoundTrip(t *testing.T) {
 	}
 	if got.Outcome == nil || got.Outcome.FailureClass != FailureClassContractError {
 		t.Fatalf("Outcome = %+v, want contract error", got.Outcome)
+	}
+}
+
+func TestAttemptEventParentAttemptZeroRoundTrip(t *testing.T) {
+	parentAttempt := 0
+	withParent := AttemptEvent{
+		RunID:         "run-1",
+		NodeID:        "review",
+		NodeKind:      NodeKindReview,
+		Scope:         "review:subtask-api",
+		Attempt:       1,
+		ParentAttempt: &parentAttempt,
+		StartedAt:     time.Now().UTC(),
+	}
+	data, err := json.Marshal(withParent)
+	if err != nil {
+		t.Fatalf("Marshal(withParent) error = %v", err)
+	}
+	if !strings.Contains(string(data), `"parent_attempt":0`) {
+		t.Fatalf("marshaled event missing parent_attempt=0: %s", data)
+	}
+	var got AttemptEvent
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal(withParent) error = %v", err)
+	}
+	if got.ParentAttempt == nil || *got.ParentAttempt != 0 {
+		t.Fatalf("ParentAttempt = %v, want pointer to 0", got.ParentAttempt)
+	}
+
+	withoutParent := AttemptEvent{
+		RunID:     "run-1",
+		NodeID:    "review",
+		NodeKind:  NodeKindReview,
+		Scope:     "review:subtask-api",
+		Attempt:   0,
+		StartedAt: time.Now().UTC(),
+	}
+	data, err = json.Marshal(withoutParent)
+	if err != nil {
+		t.Fatalf("Marshal(withoutParent) error = %v", err)
+	}
+	if strings.Contains(string(data), "parent_attempt") {
+		t.Fatalf("marshaled initial event should omit parent_attempt: %s", data)
 	}
 }
 

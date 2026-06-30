@@ -11,7 +11,7 @@ type AttemptEvent struct {
 	Role            string              `json:"role"`
 	SessionID       string              `json:"session_id,omitempty"`
 	Attempt         int                 `json:"attempt"`
-	ParentAttempt   int                 `json:"parent_attempt,omitempty"`
+	ParentAttempt   *int                `json:"parent_attempt,omitempty"`
 	Trigger         string              `json:"trigger,omitempty"`
 	FailureClass    FailureClass        `json:"failure_class,omitempty"`
 	FailureReason   string              `json:"failure_reason,omitempty"`
