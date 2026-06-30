@@ -238,9 +238,18 @@ type SubtaskFailure struct {
 
 // EvidenceRef 是对 evidence 文件的引用
 type EvidenceRef struct {
-	Type string `json:"type"` // build_log/test_log/coverage/screenshot
-	Path string `json:"path"`
+	Type EvidenceType `json:"type"` // build_log/test_log/coverage/screenshot
+	Path string       `json:"path"`
 }
+
+type EvidenceType string
+
+const (
+	EvidenceTypeBuildLog   EvidenceType = "build_log"
+	EvidenceTypeTestLog    EvidenceType = "test_log"
+	EvidenceTypeCoverage   EvidenceType = "coverage"
+	EvidenceTypeScreenshot EvidenceType = "screenshot"
+)
 
 // FailureClass 可能的值：
 //   "none"             — 无失败

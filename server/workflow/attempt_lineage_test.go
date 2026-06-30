@@ -32,7 +32,7 @@ func TestAttemptEventJSONRoundTrip(t *testing.T) {
 		OutputPath:      "/tmp/out.md",
 		ExitPath:        "/tmp/exit",
 		ArtifactRefs: []ArtifactRef{
-			{Type: "prompt", Path: "/tmp/prompt.md", SubtaskID: "api", Description: "review prompt"},
+			{Type: ArtifactTypePrompt, Path: "/tmp/prompt.md", SubtaskID: "api", Description: "review prompt"},
 		},
 		PromptDelta: &AttemptPromptDelta{
 			AddedFeedback: "include required_fixes",
@@ -49,7 +49,7 @@ func TestAttemptEventJSONRoundTrip(t *testing.T) {
 			Status:       "failed",
 			FailureClass: FailureClassContractError,
 			Reason:       "contract error",
-			ArtifactRefs: []ArtifactRef{{Type: "output", Path: "/tmp/out.md", SubtaskID: "api"}},
+			ArtifactRefs: []ArtifactRef{{Type: ArtifactTypeOutput, Path: "/tmp/out.md", SubtaskID: "api"}},
 		},
 		StartedAt:  started,
 		FinishedAt: started.Add(time.Second),
@@ -124,13 +124,51 @@ func TestAttemptEventParentAttemptZeroRoundTrip(t *testing.T) {
 }
 
 func TestArtifactRefDistinctFromEvidenceRef(t *testing.T) {
-	evidence := EvidenceRef{Type: "test_log", Path: "/tmp/test.log"}
-	artifact := ArtifactRef{Type: "prompt", Path: "/tmp/prompt.md", SubtaskID: "api"}
-	if evidence.Type == artifact.Type {
-		t.Fatalf("EvidenceRef type %q should differ from ArtifactRef type %q", evidence.Type, artifact.Type)
+	artifactTypes := []ArtifactType{
+		ArtifactTypePrompt,
+		ArtifactTypeOutput,
+		ArtifactTypeExit,
+		ArtifactTypeSession,
+		ArtifactTypeDiff,
+		ArtifactTypeLog,
+		ArtifactTypeReviewReport,
 	}
+	evidenceTypes := []EvidenceType{
+		EvidenceTypeBuildLog,
+		EvidenceTypeTestLog,
+		EvidenceTypeCoverage,
+		EvidenceTypeScreenshot,
+	}
+	seenArtifacts := map[ArtifactType]bool{}
+	for _, typ := range artifactTypes {
+		if typ == "" {
+			t.Fatal("artifact type constant is empty")
+		}
+		if seenArtifacts[typ] {
+			t.Fatalf("duplicate artifact type constant %q", typ)
+		}
+		seenArtifacts[typ] = true
+	}
+	seenEvidence := map[EvidenceType]bool{}
+	for _, typ := range evidenceTypes {
+		if typ == "" {
+			t.Fatal("evidence type constant is empty")
+		}
+		if seenEvidence[typ] {
+			t.Fatalf("duplicate evidence type constant %q", typ)
+		}
+		seenEvidence[typ] = true
+		if seenArtifacts[ArtifactType(typ)] {
+			t.Fatalf("evidence type %q overlaps artifact types", typ)
+		}
+	}
+	evidence := EvidenceRef{Type: EvidenceTypeTestLog, Path: "/tmp/test.log"}
+	artifact := ArtifactRef{Type: ArtifactTypePrompt, Path: "/tmp/prompt.md", SubtaskID: "api"}
 	if artifact.SubtaskID != "api" {
 		t.Fatalf("ArtifactRef SubtaskID = %q, want api", artifact.SubtaskID)
+	}
+	if evidence.Type != EvidenceTypeTestLog || artifact.Type != ArtifactTypePrompt {
+		t.Fatalf("typed refs not preserved: evidence=%+v artifact=%+v", evidence, artifact)
 	}
 }
 

@@ -44,7 +44,7 @@ func TestRunEvaluationWritesEvaluationJSONAndClassifiesFailure(t *testing.T) {
 	if result.TestResults[0].StdoutPath == "" {
 		t.Fatalf("StdoutPath empty in result: %+v", result.TestResults[0])
 	}
-	if len(result.Evidence) != 1 || result.Evidence[0].Type != "test_log" {
+	if len(result.Evidence) != 1 || result.Evidence[0].Type != EvidenceTypeTestLog {
 		t.Fatalf("Evidence = %+v, want test_log", result.Evidence)
 	}
 
@@ -96,7 +96,7 @@ func TestEvaluationResultJSONRoundTrip(t *testing.T) {
 	original := EvaluationResult{
 		RunID:        "run-json",
 		TestResults:  []TestResult{{TestID: "subtask-api", Command: "go test ./...", ExitCode: 0, Passed: true}},
-		Evidence:     []EvidenceRef{{Type: "test_log", Path: "test.log"}},
+		Evidence:     []EvidenceRef{{Type: EvidenceTypeTestLog, Path: "test.log"}},
 		FailureClass: FailureClassNone,
 		Passed:       true,
 	}
@@ -111,7 +111,7 @@ func TestEvaluationResultJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	if decoded.RunID != original.RunID || decoded.Evidence[0].Type != "test_log" {
+	if decoded.RunID != original.RunID || decoded.Evidence[0].Type != EvidenceTypeTestLog {
 		t.Fatalf("decoded = %+v", decoded)
 	}
 }
@@ -272,7 +272,7 @@ func TestRunEvaluationPopulatesSubtaskFailureAttribution(t *testing.T) {
 	if got.RetryAdvice == "" || got.NextAction == "" {
 		t.Fatalf("SubtaskFailure missing retry routing: %+v", got)
 	}
-	if len(got.EvidenceRefs) != 1 || got.EvidenceRefs[0].Type != "test_log" {
+	if len(got.EvidenceRefs) != 1 || got.EvidenceRefs[0].Type != EvidenceTypeTestLog {
 		t.Fatalf("SubtaskFailure EvidenceRefs = %+v, want test_log evidence", got.EvidenceRefs)
 	}
 }

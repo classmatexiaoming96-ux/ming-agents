@@ -195,7 +195,7 @@ func evaluationResultFromVerification(result *adapter.VerificationResult) *Evalu
 		Passed:       failureClass == FailureClassNone,
 	}
 	for _, ref := range result.Evidence {
-		out.Evidence = append(out.Evidence, EvidenceRef{Type: ref.Type, Path: ref.Path})
+		out.Evidence = append(out.Evidence, EvidenceRef{Type: EvidenceType(ref.Type), Path: ref.Path})
 	}
 	return out
 }
@@ -300,10 +300,13 @@ func nextActionForFailure(failureClass FailureClass) NextAction {
 func collectEvidence(repoRoot, runID string) []EvidenceRef {
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
 	var refs []EvidenceRef
-	patterns := []struct{ t, p string }{
-		{"build_log", "build.log"},
-		{"test_log", "test.log"},
-		{"coverage", "coverage.out"},
+	patterns := []struct {
+		t EvidenceType
+		p string
+	}{
+		{EvidenceTypeBuildLog, "build.log"},
+		{EvidenceTypeTestLog, "test.log"},
+		{EvidenceTypeCoverage, "coverage.out"},
 	}
 	for _, p := range patterns {
 		path := filepath.Join(runDir, p.p)

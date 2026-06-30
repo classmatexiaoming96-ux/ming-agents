@@ -43,11 +43,23 @@ type AttemptOutcome struct {
 	ArtifactRefs []ArtifactRef `json:"artifact_refs,omitempty"`
 }
 
+type ArtifactType string
+
+const (
+	ArtifactTypePrompt       ArtifactType = "prompt"
+	ArtifactTypeOutput       ArtifactType = "output"
+	ArtifactTypeExit         ArtifactType = "exit"
+	ArtifactTypeSession      ArtifactType = "session"
+	ArtifactTypeDiff         ArtifactType = "diff"
+	ArtifactTypeLog          ArtifactType = "log"
+	ArtifactTypeReviewReport ArtifactType = "review_report"
+)
+
 type ArtifactRef struct {
-	Type        string `json:"type"`
-	Path        string `json:"path"`
-	SubtaskID   string `json:"subtask_id,omitempty"`
-	Description string `json:"description,omitempty"`
+	Type        ArtifactType `json:"type"`
+	Path        string       `json:"path"`
+	SubtaskID   string       `json:"subtask_id,omitempty"`
+	Description string       `json:"description,omitempty"`
 }
 
 type AttemptFilter struct {
