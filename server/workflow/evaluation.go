@@ -496,6 +496,8 @@ type CoverageCommandResult struct {
 }
 
 // RunCoverageCommand runs repository-wide Go coverage and parses the total percentage.
+// The go commands run in the nearest Go module directory at or below repoRoot, so
+// repositories whose go.mod lives in a subdirectory (not the git top-level) are supported.
 func RunCoverageCommand(ctx context.Context, repoRoot, runID string) (*CoverageCommandResult, error) {
 	runDir := filepath.Join(repoRoot, ".workflow", "runs", runID)
 	if err := os.MkdirAll(runDir, 0755); err != nil {
@@ -506,16 +508,16 @@ func RunCoverageCommand(ctx context.Context, repoRoot, runID string) (*CoverageC
 		}
 	}
 
-	coverageRelPath := filepath.ToSlash(filepath.Join(".workflow", "runs", runID, "coverage.out"))
+	moduleDir := goModuleDir(repoRoot)
 	coveragePath := filepath.Join(runDir, "coverage.out")
-	testArgs := []string{"test", "-cover", "-coverprofile=" + coverageRelPath, "./..."}
-	testOutput, err := runGoCommandOutput(ctx, repoRoot, testArgs...)
+	testArgs := []string{"test", "-cover", "-coverprofile=" + coveragePath, "./..."}
+	testOutput, err := runGoCommandOutput(ctx, moduleDir, testArgs...)
 	if err != nil {
 		return nil, err
 	}
 
 	toolArgs := []string{"tool", "cover", "-func=" + coveragePath}
-	toolOutput, err := runGoCommandOutput(ctx, repoRoot, toolArgs...)
+	toolOutput, err := runGoCommandOutput(ctx, moduleDir, toolArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -551,6 +553,44 @@ func runGoCommandOutput(ctx context.Context, repoRoot string, args ...string) ([
 		}
 	}
 	return out, nil
+}
+
+// goModuleDir returns the directory to run go commands in for coverage. It prefers
+// repoRoot when it directly contains a go.mod, otherwise it returns the shallowest
+// go.mod directory found below repoRoot. When no module is found it falls back to
+// repoRoot so the existing failure classification still applies.
+func goModuleDir(repoRoot string) string {
+	if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); err == nil {
+		return repoRoot
+	}
+	best := ""
+	bestDepth := -1
+	_ = filepath.WalkDir(repoRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != repoRoot && (name == ".git" || name == ".workflow" || name == "node_modules" || name == "vendor" || name == "testdata") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "go.mod" {
+			return nil
+		}
+		dir := filepath.Dir(path)
+		depth := strings.Count(filepath.ToSlash(strings.TrimPrefix(dir, repoRoot)), "/")
+		if bestDepth == -1 || depth < bestDepth {
+			best = dir
+			bestDepth = depth
+		}
+		return nil
+	})
+	if best != "" {
+		return best
+	}
+	return repoRoot
 }
 
 func classifyCoverageCommandFailure(exitCode int, command, output string) FailureClass {

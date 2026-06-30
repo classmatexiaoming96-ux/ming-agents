@@ -904,6 +904,8 @@ go tool cover -func=.workflow/runs/<run_id>/coverage.out
 
 The required total coverage is exactly `100.0%`. Lower coverage produces a blocking `product_defect` failure and a `coverage.out` evidence ref. Pure documentation or non-Go changes skip the coverage gate.
 
+The coverage commands run in the nearest Go module directory at or below the git top-level: if the top-level itself has a `go.mod` it is used directly, otherwise the shallowest `go.mod` found beneath it is used as the working directory (e.g. `server/go.mod`). The `-coverprofile` is written with an absolute path so it always lands under `.workflow/runs/<run_id>/coverage.out` regardless of the module directory. Repositories with multiple sibling submodules below the top-level are not fully supported (only the shallowest module is covered).
+
 ### Evaluation Attribution
 
 Evaluation failure attribution uses the current plan when available:

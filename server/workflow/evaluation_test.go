@@ -598,6 +598,59 @@ exit 2
 	}
 }
 
+func TestRunCoverageCommandRunsInSubdirectoryGoModule(t *testing.T) {
+	repoRoot := t.TempDir()
+	runID := "run-coverage-subdir"
+	// git top-level (repoRoot) has no go.mod; the module lives under app/.
+	appDir := filepath.Join(repoRoot, "app")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(app) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "go.mod"), []byte("module example.test/app\n\ngo 1.22\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(app/go.mod) error = %v", err)
+	}
+	fakeGo := installFakeGo(t, repoRoot, `#!/bin/sh
+set -eu
+if [ "$1" = "test" ]; then
+	profile=""
+	for arg in "$@"; do
+		case "$arg" in
+			-coverprofile=*) profile="${arg#-coverprofile=}" ;;
+		esac
+	done
+	mkdir -p "$(dirname "$profile")"
+	printf 'mode: set\n' > "$profile"
+	pwd > "$profile.cwd"
+	exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "cover" ]; then
+	printf 'total: (statements) 100.0%%\n'
+	exit 0
+fi
+exit 2
+`)
+	t.Setenv("PATH", fakeGo+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := RunCoverageCommand(context.Background(), repoRoot, runID)
+	if err != nil {
+		t.Fatalf("RunCoverageCommand() error = %v", err)
+	}
+	if result.TotalPercent != 100.0 {
+		t.Fatalf("TotalPercent = %v, want 100.0", result.TotalPercent)
+	}
+	wantPath := filepath.Join(repoRoot, ".workflow", "runs", runID, "coverage.out")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("coverage.out was not written at %s: %v", wantPath, err)
+	}
+	cwd, err := os.ReadFile(wantPath + ".cwd")
+	if err != nil {
+		t.Fatalf("ReadFile(coverage cwd) error = %v", err)
+	}
+	if strings.TrimSpace(string(cwd)) != appDir {
+		t.Fatalf("go test ran in %q, want subdirectory module %q", strings.TrimSpace(string(cwd)), appDir)
+	}
+}
+
 func TestRunCoverageCommandParsesBelowFullCoverage(t *testing.T) {
 	repoRoot := t.TempDir()
 	runID := "run-coverage-partial"
