@@ -17,6 +17,18 @@ type reviewCodexPromptRunner func(context.Context, string, string, time.Duration
 
 var runReviewCodexPrompt reviewCodexPromptRunner = runCodexPrompt
 
+type reviewContractError struct {
+	reason string
+}
+
+func (e *reviewContractError) Error() string {
+	return e.reason
+}
+
+func (e *reviewContractError) FailureClass() FailureClass {
+	return FailureClassContractError
+}
+
 type ReviewAttemptPaths struct {
 	PromptFile  string
 	OutFile     string
@@ -135,6 +147,10 @@ func ParseReviewReport(markdown string) *ReviewReport {
 			}
 			if strings.HasPrefix(line, "required_fixes:") || strings.HasPrefix(line, "Required fixes:") {
 				inRequiredFixes = true
+				_, value, _ := strings.Cut(line, ":")
+				if value = strings.TrimSpace(value); value != "" {
+					current.RequiredFixes = append(current.RequiredFixes, value)
+				}
 				continue
 			}
 			if strings.HasPrefix(line, "-") {
@@ -332,6 +348,58 @@ func renderSubtaskReviewPrompt(plan *Plan, result *SubtaskResult, diffFile strin
 	return b.String()
 }
 
+func ValidateReviewReport(report *ReviewReport, results []*SubtaskResult, expectedSubtaskID string) error {
+	if report == nil {
+		return &reviewContractError{reason: "review report is nil"}
+	}
+	sessionsBySubtask := map[string]string{}
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		sessionsBySubtask[result.Subtask.ID] = result.SessionID
+	}
+	for _, issue := range report.Issues {
+		if normalizeSeverity(issue.Severity) != "blocking" {
+			continue
+		}
+		if strings.TrimSpace(issue.SubtaskID) == "" {
+			return &reviewContractError{reason: "blocking review issue missing subtask_id"}
+		}
+		if expectedSubtaskID != "" && issue.SubtaskID != expectedSubtaskID {
+			return &reviewContractError{reason: "blocking review issue points at unexpected subtask_id"}
+		}
+		if strings.TrimSpace(issue.SessionID) == "" {
+			return &reviewContractError{reason: "blocking review issue missing session_id"}
+		}
+		if wantSession := sessionsBySubtask[issue.SubtaskID]; wantSession != "" && issue.SessionID != wantSession {
+			return &reviewContractError{reason: "blocking review issue points at unexpected session_id"}
+		}
+		if strings.TrimSpace(issue.Description) == "" {
+			return &reviewContractError{reason: "blocking review issue missing description"}
+		}
+		if len(issue.RequiredFixes) == 0 {
+			return &reviewContractError{reason: "blocking review issue missing required_fixes"}
+		}
+	}
+	return nil
+}
+
+func renderReviewContractRevisionPrompt(originalPrompt, output string, err error) string {
+	var b strings.Builder
+	b.WriteString("# Review Report Contract Revision\n")
+	b.WriteString("Fix only the review report contract. Do not request code changes and do not inspect or modify repository files.\n\n")
+	b.WriteString("# Contract Error\n")
+	b.WriteString(err.Error())
+	b.WriteString("\n\n# Previous Review Prompt\n")
+	b.WriteString(originalPrompt)
+	b.WriteString("\n\n# Previous Invalid Review Output\n")
+	b.WriteString(output)
+	b.WriteString("\n\n# Required Output\n")
+	b.WriteString("Return the same review result with valid fields. Every blocking issue must include subtask_id, session_id, description, and required_fixes.\n")
+	return b.String()
+}
+
 func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, result *SubtaskResult, diffFile string) (*ReviewReport, string, ReviewSubtaskPaths, error) {
 	if result == nil {
 		return nil, "", ReviewSubtaskPaths{}, fmt.Errorf("subtask result is nil")
@@ -374,6 +442,52 @@ func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, r
 			Severity:    "blocking",
 			Description: err.Error(),
 		})
+	}
+	if err == nil {
+		if contractErr := ValidateReviewReport(report, []*SubtaskResult{result}, result.Subtask.ID); contractErr != nil {
+			_ = writeReviewAttempt(repoRoot, runID, "review:subtask:"+result.Subtask.ID, paths.SessionID, result.Subtask.ID, 0, -1, "contract_error", FailureClassContractError, contractErr.Error(), paths.ReviewAttemptPaths)
+			revisionPromptPath, revisionOutPath, revisionExitPath := AttemptPathsForRevision(paths.PromptFile, paths.OutFile, paths.ExitFile, 1)
+			revisionPaths := ReviewAttemptPaths{
+				PromptFile:  revisionPromptPath,
+				OutFile:     revisionOutPath,
+				ExitFile:    revisionExitPath,
+				HistoryFile: paths.HistoryFile,
+			}
+			revisionPrompt := renderReviewContractRevisionPrompt(prompt, output, contractErr)
+			if writeErr := writeTextAtomic(revisionPaths.PromptFile, revisionPrompt); writeErr != nil {
+				return nil, "", paths, writeErr
+			}
+			_ = AppendAgentMessage(agent, AgentMessage{Role: "user", Content: revisionPrompt})
+			revisionOutput, revisionErr := runReviewCodexPrompt(ctx, repoRoot, revisionPrompt, 30*time.Minute)
+			revisionExitCode := 0
+			if revisionErr != nil {
+				revisionExitCode = 1
+				revisionOutput = revisionErr.Error()
+			}
+			_ = os.WriteFile(revisionPaths.OutFile, []byte(revisionOutput), 0644)
+			_ = os.WriteFile(revisionPaths.ExitFile, []byte(fmt.Sprintf("%d\n", revisionExitCode)), 0644)
+			_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: revisionOutput})
+			revisedReport := ParseReviewReport(revisionOutput)
+			revisionFailure := FailureClassNone
+			rejectionReason := ""
+			if revisionErr != nil {
+				revisedReport.Passed = false
+				rejectionReason = revisionErr.Error()
+			} else if secondContractErr := ValidateReviewReport(revisedReport, []*SubtaskResult{result}, result.Subtask.ID); secondContractErr != nil {
+				revisedReport.Passed = false
+				revisionFailure = FailureClassContractError
+				rejectionReason = secondContractErr.Error()
+				revisedReport.Issues = append(revisedReport.Issues, ReviewIssue{
+					SubtaskID:    result.Subtask.ID,
+					SessionID:    paths.SessionID,
+					Severity:     "blocking",
+					FailureClass: FailureClassContractError,
+					Description:  secondContractErr.Error(),
+				})
+			}
+			_ = writeReviewAttempt(repoRoot, runID, "review:subtask:"+result.Subtask.ID, paths.SessionID, result.Subtask.ID, 1, 0, "contract_error", revisionFailure, rejectionReason, revisionPaths)
+			return revisedReport, revisionOutput, paths, nil
+		}
 	}
 	_ = writeReviewAttempt(repoRoot, runID, "review:subtask:"+result.Subtask.ID, paths.SessionID, result.Subtask.ID, 0, -1, "initial", FailureClassNone, "", paths.ReviewAttemptPaths)
 	return report, output, paths, nil

@@ -49,6 +49,10 @@ func TestReviewSubtaskSessionIDIncludesRunReviewAndSubtask(t *testing.T) {
 	}
 }
 
+func TestReviewNodeImplementsRollbackCapableNode(t *testing.T) {
+	var _ RollbackCapableNode = (*reviewNode)(nil)
+}
+
 func TestReviewNodeRunsSeparateReviewForEachSubtask(t *testing.T) {
 	repoRoot := t.TempDir()
 	plan := &Plan{

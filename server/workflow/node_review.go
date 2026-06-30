@@ -10,6 +10,31 @@ type reviewNode struct{}
 
 func (n *reviewNode) Kind() NodeKind { return NodeKindReview }
 
+func (n *reviewNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
+	spec := DefaultRollbackSpec(NodeKindReview)
+	unit := rctx.Unit
+	if unit.Scope == "" {
+		unit = spec.DefaultUnit
+	}
+	var attempts []AttemptEvent
+	if rctx.Lineage != nil {
+		listed, err := rctx.Lineage.List(AttemptFilter{RunID: rctx.RunID, NodeID: rctx.NodeID, Scope: unit.Scope})
+		if err != nil {
+			return nil, err
+		}
+		attempts = rollbackBudgetEvents(listed)
+	}
+	decision := NewRollbackRunner().Decide(rctx, spec, unit, attempts, signal)
+	if signal.Reason != "" {
+		decision.Rationale = signal.Reason
+	}
+	return decision, nil
+}
+
+func (n *reviewNode) RollbackArtifacts(rctx RollbackContext) []ArtifactRef {
+	return nil
+}
+
 func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
 	devOutput := req.Inputs["development"]
 	state, ok := devOutput.Values["state"].(*WorkflowState)

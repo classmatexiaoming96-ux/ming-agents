@@ -30,6 +30,12 @@ func DefaultRollbackSpec(kind NodeKind) RollbackSpec {
 		return RollbackSpec{
 			DefaultUnit: RollbackUnit{Scope: "evaluation", MaxAttempts: 2, ReusePolicy: SessionReuseNewSession},
 		}
+	case NodeKindReview:
+		return RollbackSpec{
+			DefaultUnit:   RollbackUnit{Scope: "review", MaxAttempts: 2, ReusePolicy: SessionReuseSameSession},
+			OnContract:    RollbackActionRetryReport,
+			OnHumanReject: RollbackActionRetryReport,
+		}
 	default:
 		return RollbackSpec{
 			DefaultUnit: RollbackUnit{Scope: string(kind), MaxAttempts: 3, ReusePolicy: SessionReuseNewSession},
