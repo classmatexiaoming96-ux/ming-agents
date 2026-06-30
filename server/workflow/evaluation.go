@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -344,6 +345,117 @@ func collectEvidence(repoRoot, runID string) []EvidenceRef {
 		}
 	}
 	return refs
+}
+
+type classifiedEvaluationError struct {
+	op           string
+	err          error
+	output       string
+	failureClass FailureClass
+}
+
+func (e *classifiedEvaluationError) Error() string {
+	if e == nil {
+		return ""
+	}
+	msg := e.op
+	if e.err != nil {
+		msg += ": " + e.err.Error()
+	}
+	if strings.TrimSpace(e.output) != "" {
+		msg += ": " + strings.TrimSpace(e.output)
+	}
+	return msg
+}
+
+func (e *classifiedEvaluationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *classifiedEvaluationError) FailureClass() FailureClass {
+	if e == nil {
+		return FailureClassNone
+	}
+	return e.failureClass
+}
+
+// ChangedFiles returns staged and unstaged repo-relative paths changed from git state.
+func ChangedFiles(repoRoot string) ([]string, error) {
+	if err := ensureGitRepo(repoRoot); err != nil {
+		return nil, err
+	}
+
+	changed := map[string]struct{}{}
+	for _, args := range [][]string{
+		{"diff", "--name-only"},
+		{"diff", "--cached", "--name-only"},
+	} {
+		out, err := runGitOutput(repoRoot, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			path := normalizeGitRelativePath(line)
+			if path == "" {
+				continue
+			}
+			changed[path] = struct{}{}
+		}
+	}
+
+	paths := make([]string, 0, len(changed))
+	for path := range changed {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func ensureGitRepo(repoRoot string) error {
+	if _, err := runGitOutput(repoRoot, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runGitOutput(repoRoot string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, &classifiedEvaluationError{
+			op:           fmt.Sprintf("git %s", strings.Join(args, " ")),
+			err:          err,
+			output:       string(out),
+			failureClass: FailureClassEnvironmentBlock,
+		}
+	}
+	return out, nil
+}
+
+func normalizeGitRelativePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = filepath.ToSlash(filepath.Clean(path))
+	path = strings.TrimPrefix(path, "./")
+	if path == "." {
+		return ""
+	}
+	return path
+}
+
+func changedFilesHaveGoCode(paths []string) bool {
+	for _, path := range paths {
+		if strings.HasSuffix(normalizeGitRelativePath(path), ".go") {
+			return true
+		}
+	}
+	return false
 }
 
 func writeEvaluationResult(repoRoot, runID string, result *EvaluationResult) error {

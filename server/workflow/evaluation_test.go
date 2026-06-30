@@ -3,7 +3,9 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -355,5 +357,130 @@ func TestRunEvaluationPopulatesSubtaskFailureAttribution(t *testing.T) {
 	}
 	if len(got.EvidenceRefs) != 1 || got.EvidenceRefs[0].Type != EvidenceTypeTestLog {
 		t.Fatalf("SubtaskFailure EvidenceRefs = %+v, want test_log evidence", got.EvidenceRefs)
+	}
+}
+
+func TestChangedFilesReturnsUnstagedTrackedFile(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	writeFile(t, repoRoot, "pkg/feature/file.go", "package feature\n")
+	git(t, repoRoot, "add", ".")
+	git(t, repoRoot, "commit", "-m", "initial")
+
+	writeFile(t, repoRoot, "pkg/feature/file.go", "package feature\n\nfunc Changed() {}\n")
+
+	got, err := ChangedFiles(repoRoot)
+	if err != nil {
+		t.Fatalf("ChangedFiles() error = %v", err)
+	}
+	want := []string{"pkg/feature/file.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ChangedFiles() = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedFilesReturnsStagedFile(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	writeFile(t, repoRoot, "cmd/app/main.go", "package main\n")
+	git(t, repoRoot, "add", ".")
+	git(t, repoRoot, "commit", "-m", "initial")
+
+	writeFile(t, repoRoot, "cmd/app/main.go", "package main\n\nfunc main() {}\n")
+	git(t, repoRoot, "add", "cmd/app/main.go")
+
+	got, err := ChangedFiles(repoRoot)
+	if err != nil {
+		t.Fatalf("ChangedFiles() error = %v", err)
+	}
+	want := []string{"cmd/app/main.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ChangedFiles() = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedFilesSortsAndDedupesStagedAndUnstaged(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	writeFile(t, repoRoot, "zeta.go", "package main\n")
+	writeFile(t, repoRoot, "docs/readme.md", "# docs\n")
+	git(t, repoRoot, "add", ".")
+	git(t, repoRoot, "commit", "-m", "initial")
+
+	writeFile(t, repoRoot, "zeta.go", "package main\n\nfunc Staged() {}\n")
+	writeFile(t, repoRoot, "docs/readme.md", "# changed\n")
+	git(t, repoRoot, "add", "zeta.go", "docs/readme.md")
+	writeFile(t, repoRoot, "zeta.go", "package main\n\nfunc Staged() {}\nfunc Unstaged() {}\n")
+
+	got, err := ChangedFiles(repoRoot)
+	if err != nil {
+		t.Fatalf("ChangedFiles() error = %v", err)
+	}
+	want := []string{"docs/readme.md", "zeta.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ChangedFiles() = %#v, want sorted deduped %#v", got, want)
+	}
+}
+
+func TestChangedFilesNonGitRepoReturnsClassifiedError(t *testing.T) {
+	_, err := ChangedFiles(t.TempDir())
+	if err == nil {
+		t.Fatal("ChangedFiles() error = nil, want classified error")
+	}
+	var classified interface {
+		FailureClass() FailureClass
+	}
+	if !errors.As(err, &classified) {
+		t.Fatalf("ChangedFiles() error %T does not expose FailureClass()", err)
+	}
+	if classified.FailureClass() != FailureClassEnvironmentBlock {
+		t.Fatalf("FailureClass() = %q, want %q", classified.FailureClass(), FailureClassEnvironmentBlock)
+	}
+}
+
+func TestChangedFilesHaveGoCodeChanges(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want bool
+	}{
+		{name: "docs only", in: []string{"docs/output.md", "README.md"}, want: false},
+		{name: "no go code", in: []string{"scripts/setup.sh", "web/app.ts"}, want: false},
+		{name: "go code", in: []string{"server/workflow/evaluation.go"}, want: true},
+		{name: "go test", in: []string{"server/workflow/evaluation_test.go"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := changedFilesHaveGoCode(tt.in); got != tt.want {
+				t.Fatalf("changedFilesHaveGoCode(%#v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func initTempGitRepo(t *testing.T) string {
+	t.Helper()
+	repoRoot := t.TempDir()
+	git(t, repoRoot, "init")
+	git(t, repoRoot, "config", "user.email", "test@example.com")
+	git(t, repoRoot, "config", "user.name", "Test User")
+	return repoRoot
+}
+
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func writeFile(t *testing.T, repoRoot, relPath, contents string) {
+	t.Helper()
+	path := filepath.Join(repoRoot, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
 }
