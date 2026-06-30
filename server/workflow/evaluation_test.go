@@ -81,13 +81,16 @@ func TestRunEvaluationPassesWhenNoSubtasks(t *testing.T) {
 }
 
 func TestClassifyFailureDistinguishesEnvironmentAndValidatorIssues(t *testing.T) {
-	if got := classifyFailure([]TestResult{{ExitCode: -1}}); got != FailureClassValidatorIssue {
+	if got := classifyFailure([]TestResult{{ExitCode: -1, FailureClass: FailureClassValidatorIssue}}); got != FailureClassValidatorIssue {
 		t.Fatalf("classifyFailure(exit -1) = %q, want validator_issue", got)
 	}
-	if got := classifyFailure([]TestResult{{ExitCode: 127, StderrPath: "go: not found"}}); got != FailureClassEnvironmentBlock {
+	if got := classifyFailure([]TestResult{{ExitCode: 127, FailureClass: FailureClassEnvironmentBlock}}); got != FailureClassEnvironmentBlock {
 		t.Fatalf("classifyFailure(missing command) = %q, want environment_block", got)
 	}
-	if got := classifyFailure([]TestResult{{ExitCode: 1}}); got != FailureClassProductDefect {
+	if got := classifyFailure([]TestResult{{ExitCode: 1, FailureClass: FailureClassEnvironmentBlock, StderrPath: "/tmp/subtask-api_stderr.txt"}}); got != FailureClassEnvironmentBlock {
+		t.Fatalf("classifyFailure(exit 1 env class) = %q, want environment_block", got)
+	}
+	if got := classifyFailure([]TestResult{{ExitCode: 1, FailureClass: FailureClassProductDefect}}); got != FailureClassProductDefect {
 		t.Fatalf("classifyFailure(exit 1) = %q, want product_defect", got)
 	}
 }

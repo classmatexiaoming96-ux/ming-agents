@@ -137,34 +137,34 @@ func runTestForSubtask(runCtx context.Context, repoRoot, runID, subtaskDir strin
 }
 
 func classifyFailure(results []TestResult) FailureClass {
-	hasRealFailure := false
-	hasEnvError := false
-	hasValidatorError := false
-
+	highest := FailureClassNone
 	for _, r := range results {
-		failureText := strings.ToLower(r.Command + "\n" + r.StdoutPath + "\n" + r.StderrPath)
-		switch {
-		case r.ExitCode == -1:
-			hasValidatorError = true
-		case r.ExitCode == 2, r.ExitCode == 126, r.ExitCode == 127:
-			hasEnvError = true
-		case strings.Contains(failureText, "go: not found"), strings.Contains(failureText, "npm: not found"), strings.Contains(failureText, "command not found"), strings.Contains(failureText, "permission denied"):
-			hasEnvError = true
-		case r.ExitCode != 0:
-			hasRealFailure = true
+		failureClass := r.FailureClass
+		if failureClass == "" {
+			continue
+		}
+		if failureClassPriority(failureClass) > failureClassPriority(highest) {
+			highest = failureClass
 		}
 	}
+	return highest
+}
 
-	if hasValidatorError {
-		return FailureClassValidatorIssue
+func failureClassPriority(failureClass FailureClass) int {
+	switch failureClass {
+	case FailureClassValidatorIssue:
+		return 4
+	case FailureClassEnvironmentBlock:
+		return 3
+	case FailureClassProductDefect:
+		return 2
+	case FailureClassInconclusive:
+		return 1
+	case FailureClassNone, "":
+		return 0
+	default:
+		return 0
 	}
-	if hasEnvError {
-		return FailureClassEnvironmentBlock
-	}
-	if hasRealFailure {
-		return FailureClassProductDefect
-	}
-	return FailureClassInconclusive
 }
 
 func retryAdviceFor(fc FailureClass) string {
