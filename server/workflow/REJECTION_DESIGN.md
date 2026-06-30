@@ -304,6 +304,18 @@ Workflow 检测 rejection
 按 ResumePoint 重跑对应节点或子任务
 ```
 
+### P1 lineage 视角
+
+Phase 1 makes rejection decisions visible to later rollback orchestration by writing attempt lineage:
+
+- Clarification rejection writes a `clarification` attempt event with `scope=agent:{agentType}`.
+- Planning rejection writes a `planning` attempt event with `scope=node-agent`.
+- Development subtask rejection writes a `development` attempt event with `scope=subtask:{subtaskID}`.
+
+Each rejection attempt records `failure_class=human_reject`, `rejection_reason`, prompt/output/exit paths when available, and appears in both the node-local `attempts.jsonl` and run-level `attempts.index.jsonl`. Later orchestrator work can read this lineage to decide rollback targets without scraping session history.
+
+P1 lineage writes are best-effort: workflow execution should continue if `RecordAttemptEvent` cannot persist an event. P2 introduces the rollback runner and budgeted rollback decisions; that runner may choose stricter error handling for core rollback state, but P1 keeps lineage as an observable side channel rather than a hard dependency.
+
 ### 针对节点 Agent
 
 Node1 或 Node2 的拒绝不走 `RouteSubtaskMessage`，因为它们不是 SubtaskAgent，而是 workflow-level node session。
@@ -595,4 +607,3 @@ Chatbot 应重新加载 `agents.json` 或节点 session 信息。
 6. Subtask 拒绝后支持追加 user 指令并重跑该 subtask。
 7. Review 拒绝后支持回到指定 subtask。
 8. 为重复决策、非法 ResumePoint、重试上限补测试。
-

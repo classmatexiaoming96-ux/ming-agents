@@ -725,6 +725,86 @@ func ParseReviewReport(markdown string) *ReviewReport
 
 解析 Review markdown，识别 blocking issue。
 
+## P1: Lineage & Failure Attribution
+
+Phase 1 adds data contracts for attempt lineage and failure attribution while keeping the workflow DAG unchanged. The execution order remains the current MVP flow; P1 records richer metadata for later rollback orchestration, but it does not add DAG back-edges or change the `WorkflowNode` interface.
+
+### Attempt Lineage Paths
+
+Attempt lineage is stored under each run directory:
+
+```text
+.workflow/runs/{runID}/{nodeID}/attempts.jsonl
+.workflow/runs/{runID}/{nodeID}/attempts/{safeScope}.jsonl
+.workflow/runs/{runID}/attempts.index.jsonl
+```
+
+The per-node `attempts.jsonl` is the node-local stream. The `attempts/{safeScope}.jsonl` file is a per-scope shard, where unsafe filename characters are normalized. The run-level `attempts.index.jsonl` is the global index across nodes.
+
+Scope naming conventions:
+
+- `agent:{agentType}` for clarification agents, for example `agent:codex`.
+- `node-agent` for planning node agent attempts.
+- `subtask:{subtaskID}` for development subtask attempts.
+
+Completion evidence also recognizes `attempt_lineage` when `attempts.index.jsonl` exists. This is evidence indexing only; rollback decisions are handled by later phases.
+
+### AttemptEvent Schema
+
+`AttemptEvent` records one initial attempt or revision attempt. Attempt `0` is the initial run; attempts `1+` are revisions or retries. The current schema records:
+
+```text
+run_id
+node_id
+node_kind
+scope
+subtask_id
+role
+session_id
+attempt
+parent_attempt
+trigger
+failure_class
+failure_reason
+rejection_reason
+retry_advice
+prompt_path
+output_path
+exit_path
+artifact_refs
+prompt_delta
+decision
+next_action
+outcome
+started_at
+finished_at
+```
+
+Phase 1 writers use best-effort lineage recording for clarification, planning, and development so a lineage write failure does not stop the core workflow. `RecordAttemptEvent` is the shared wrapper that validates required fields and returns contextual errors; callers decide whether to treat those errors as fatal.
+
+### Failure Attribution Fields
+
+P1 adds strongly typed failure and attribution data:
+
+- `FailureClass` captures routing categories such as `human_reject`, `transient`, `missing_evidence`, `contract_error`, `product_defect`, `environment_block`, and `validator_issue`.
+- `Subtask.PlannedFiles` (`planned_files`) records expected files for later subtask attribution.
+- `TestResult.FailureClass` records the classified failure for a test command.
+- `SubtaskFailure` records `SubtaskID`, `FailureClass`, reason, evidence refs, retry advice, and next action.
+- `EvaluationResult.SubtaskResults` (`subtask_results`) records per-subtask evaluation attribution even though evaluation still runs at run scope.
+- `ReviewReport.SubtaskReports` (`subtask_reports`) reserves a structured place for later per-subtask review aggregation.
+
+`ArtifactRef` and `EvidenceRef` are deliberately separate. `ArtifactRef` points to workflow-produced files such as prompts, outputs, exits, logs, diffs, review reports, and attempt lineage. `EvidenceRef` points to verification evidence such as build logs, test logs, coverage, and screenshots. Their JSON contracts should not be merged or renamed.
+
+### Completion Evidence Compatibility
+
+Completion check keeps the existing `document` and `code_artifacts` evidence behavior and additionally recognizes:
+
+- `coverage` for `coverage.out`, so P3 can add a coverage gate without completion misclassifying the file.
+- `review_report` for review output reports.
+- `attempt_lineage` for `attempts.index.jsonl`.
+
+Completion check does not enforce 100% line coverage. Coverage pass/fail remains a P3 evaluation gate concern.
+
 ## 11. CLI 使用方法
 
 构建 CLI。由于仓库根目录已有 `workflow/` 目录，建议显式指定输出文件：
@@ -780,4 +860,3 @@ go build -o /tmp/ming-workflow ./cmd/workflow
 - workflow 包编译。
 - Go 静态检查。
 - CLI 入口编译。
-
