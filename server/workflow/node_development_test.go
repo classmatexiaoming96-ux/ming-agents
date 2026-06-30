@@ -41,6 +41,30 @@ func TestDevelopmentNodePrepareRollback(t *testing.T) {
 	}
 }
 
+func TestDevelopmentNodeIssuesBySubtask(t *testing.T) {
+	results := []*SubtaskResult{
+		{Subtask: Subtask{ID: "api"}, SessionID: "session-api"},
+		{Subtask: Subtask{ID: "web"}, SessionID: "session-web"},
+	}
+	issues := []ReviewIssue{
+		{SubtaskID: "api", Severity: "blocking", Description: "direct"},
+		{SessionID: "session-web", Severity: "BLOCKING", Description: "session"},
+		{Severity: "blocking", Description: "fallback"},
+		{SubtaskID: "api", Severity: "warning", Description: "skip"},
+	}
+
+	got := IssuesBySubtask(issues, results)
+	if len(got["api"]) != 2 {
+		t.Fatalf("api issues = %#v, want direct plus fallback", got["api"])
+	}
+	if got["api"][0].Description != "direct" || got["api"][1].Description != "fallback" {
+		t.Fatalf("api issue order = %#v", got["api"])
+	}
+	if len(got["web"]) != 1 || got["web"][0].Description != "session" {
+		t.Fatalf("web issues = %#v, want session issue", got["web"])
+	}
+}
+
 func TestDevelopmentNodeSkipsInternalReviewAndEvaluation(t *testing.T) {
 	repoRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repoRoot, "workflow"), 0755); err != nil {

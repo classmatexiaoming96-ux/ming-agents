@@ -606,21 +606,29 @@ func findCodeDirs(repoRoot, runID string) []string {
 }
 
 func blockingRetryTargets(report *ReviewReport, results []*SubtaskResult) map[string][]ReviewIssue {
-	targets := map[string][]ReviewIssue{}
 	if report == nil {
-		return targets
+		return map[string][]ReviewIssue{}
 	}
+	return IssuesBySubtask(report.Issues, results)
+}
+
+func IssuesBySubtask(issues []ReviewIssue, results []*SubtaskResult) map[string][]ReviewIssue {
+	targets := map[string][]ReviewIssue{}
 	bySession := map[string]string{}
 	for _, result := range results {
-		if result != nil {
-			bySession[result.SessionID] = result.Subtask.ID
+		if result == nil {
+			continue
 		}
+		bySession[result.SessionID] = result.Subtask.ID
 	}
 	fallback := ""
-	if len(results) > 0 && results[0] != nil {
-		fallback = results[0].Subtask.ID
+	for _, result := range results {
+		if result != nil && result.Subtask.ID != "" {
+			fallback = result.Subtask.ID
+			break
+		}
 	}
-	for _, issue := range report.Issues {
+	for _, issue := range issues {
 		if normalizeSeverity(issue.Severity) != "blocking" {
 			continue
 		}
