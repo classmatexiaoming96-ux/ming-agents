@@ -502,6 +502,31 @@ func TestEnsureGitRepoWrapsNonGitRepoAsEnvironmentBlock(t *testing.T) {
 	}
 }
 
+func TestEnsureGitRepoRejectsDirectoryInsideAnotherWorktree(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	child := filepath.Join(repoRoot, "nested")
+	if err := os.MkdirAll(child, 0755); err != nil {
+		t.Fatalf("MkdirAll(child) error = %v", err)
+	}
+
+	err := ensureGitRepo(child)
+	if err == nil {
+		t.Fatal("ensureGitRepo(child) error = nil, want classified error")
+	}
+	if !strings.Contains(err.Error(), "does not match git top-level") {
+		t.Fatalf("ensureGitRepo(child) error = %q, want top-level mismatch context", err.Error())
+	}
+	var classified interface {
+		FailureClass() FailureClass
+	}
+	if !errors.As(err, &classified) {
+		t.Fatalf("ensureGitRepo(child) error %T does not expose FailureClass()", err)
+	}
+	if classified.FailureClass() != FailureClassEnvironmentBlock {
+		t.Fatalf("FailureClass() = %q, want %q", classified.FailureClass(), FailureClassEnvironmentBlock)
+	}
+}
+
 func TestChangedFilesHaveGoCodeChanges(t *testing.T) {
 	tests := []struct {
 		name string

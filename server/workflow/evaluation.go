@@ -653,10 +653,34 @@ func ChangedFiles(repoRoot string) ([]string, error) {
 }
 
 func ensureGitRepo(repoRoot string) error {
-	if _, err := runGitOutput(repoRoot, "rev-parse", "--is-inside-work-tree"); err != nil {
+	out, err := runGitOutput(repoRoot, "rev-parse", "--show-toplevel")
+	if err != nil {
 		return &classifiedEvaluationError{
 			op:           "ensure git repo",
 			err:          err,
+			failureClass: FailureClassEnvironmentBlock,
+		}
+	}
+	topLevel, err := filepath.Abs(strings.TrimSpace(string(out)))
+	if err != nil {
+		return &classifiedEvaluationError{
+			op:           "ensure git repo top-level",
+			err:          err,
+			failureClass: FailureClassEnvironmentBlock,
+		}
+	}
+	root, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return &classifiedEvaluationError{
+			op:           "ensure git repo root",
+			err:          err,
+			failureClass: FailureClassEnvironmentBlock,
+		}
+	}
+	if filepath.Clean(topLevel) != filepath.Clean(root) {
+		return &classifiedEvaluationError{
+			op:           "ensure git repo top-level",
+			err:          fmt.Errorf("repoRoot %q does not match git top-level %q", filepath.Clean(root), filepath.Clean(topLevel)),
 			failureClass: FailureClassEnvironmentBlock,
 		}
 	}
