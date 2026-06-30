@@ -15,10 +15,8 @@ import (
 
 type WorkflowState = RunState
 
-const ConfigSkipInternalReviewEvaluation = "skip_internal_review_evaluation"
-
 type developmentOptions struct {
-	SkipInternalReviewEvaluation bool
+	DevelopmentOnly bool
 }
 
 func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *WorkflowState, err error) {
@@ -26,7 +24,7 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *Wo
 }
 
 func RunDevelopmentOnly(ctx context.Context, repoRoot string, plan *Plan) (state *WorkflowState, err error) {
-	return runDevelopment(ctx, repoRoot, plan, developmentOptions{SkipInternalReviewEvaluation: true})
+	return runDevelopment(ctx, repoRoot, plan, developmentOptions{DevelopmentOnly: true})
 }
 
 func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts developmentOptions) (state *WorkflowState, err error) {
@@ -67,7 +65,7 @@ func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts devel
 	}, map[string]any{"subtask_agents": filepath.Join(nodeDir, "agents.json")})
 
 	results := runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, nil, 0)
-	if opts.SkipInternalReviewEvaluation {
+	if opts.DevelopmentOnly {
 		return finishDevelopmentOnly(repoRoot, runID, nodeDir, nodeSession, agents, results)
 	}
 	report, reviewOut, err := RunReview(ctx, repoRoot, nodeDir, plan, results)

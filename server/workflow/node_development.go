@@ -60,12 +60,3 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 		Values: map[string]any{"state": state, "subtask_results": subtaskResults},
 	}, nil
 }
-
-func skipInternalReviewEvaluation(config map[string]any) bool {
-	value, ok := config[ConfigSkipInternalReviewEvaluation]
-	if !ok {
-		return false
-	}
-	skip, ok := value.(bool)
-	return ok && skip
-}

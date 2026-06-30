@@ -67,12 +67,11 @@ func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSp
 		}
 
 		statuses[ns.ID] = NodeStatusRunning
-		config := nodeRequestConfig(ns)
 		result, err := node.Execute(ctx, NodeRequest{
 			RunID:    runID,
 			RepoRoot: repoRoot,
 			Spec:     ns,
-			Config:   config,
+			Config:   nodeRequestConfig(ns),
 			Inputs:   inputs,
 			Services: e.services,
 		})
@@ -111,9 +110,6 @@ func nodeRequestConfig(ns NodeSpec) map[string]any {
 	config := map[string]any{}
 	for k, v := range ns.Config {
 		config[k] = v
-	}
-	if ns.Kind == NodeKindDevelopment {
-		config[ConfigSkipInternalReviewEvaluation] = true
 	}
 	return config
 }
