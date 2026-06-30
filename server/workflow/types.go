@@ -13,6 +13,7 @@ type Subtask struct {
 	RepoPath           string   `json:"repo_path"`
 	Description        string   `json:"description"`
 	AcceptanceCriteria []string `json:"acceptance_criteria"`
+	PlannedFiles       []string `json:"planned_files,omitempty"`
 }
 
 type SubtaskResult struct {
@@ -28,9 +29,10 @@ type SubtaskResult struct {
 }
 
 type ReviewReport struct {
-	Passed  bool          `json:"passed"`
-	Summary string        `json:"summary"`
-	Issues  []ReviewIssue `json:"issues"`
+	Passed         bool                     `json:"passed"`
+	Summary        string                   `json:"summary"`
+	Issues         []ReviewIssue            `json:"issues"`
+	SubtaskReports map[string]*ReviewReport `json:"subtask_reports,omitempty"`
 }
 
 type ReviewIssue struct {
@@ -202,25 +204,36 @@ type ReuseMiss struct {
 
 // EvaluationResult 是 Node 4 (Review/验证阶段) 的结构化输出
 type EvaluationResult struct {
-	RunID        string        `json:"run_id"`
-	EvaluatedAt  time.Time     `json:"evaluated_at"`
-	TestResults  []TestResult  `json:"test_results,omitempty"`
-	Evidence     []EvidenceRef `json:"evidence,omitempty"`
-	FailureClass string        `json:"failure_class,omitempty"` // 见下方分类
-	RetryAdvice  string        `json:"retry_advice,omitempty"`
-	Passed       bool          `json:"passed"`
+	RunID          string           `json:"run_id"`
+	EvaluatedAt    time.Time        `json:"evaluated_at"`
+	TestResults    []TestResult     `json:"test_results,omitempty"`
+	Evidence       []EvidenceRef    `json:"evidence,omitempty"`
+	FailureClass   string           `json:"failure_class,omitempty"` // 见下方分类
+	RetryAdvice    string           `json:"retry_advice,omitempty"`
+	Passed         bool             `json:"passed"`
+	SubtaskResults []SubtaskFailure `json:"subtask_results,omitempty"`
 }
 
 // TestResult 是单个验证命令的执行结果
 type TestResult struct {
-	TestID     string `json:"test_id"`
-	SubtaskID  string `json:"subtask_id,omitempty"`
-	Command    string `json:"command"`
-	ExitCode   int    `json:"exit_code"`
-	Passed     bool   `json:"passed"`
-	StdoutPath string `json:"stdout_path,omitempty"`
-	StderrPath string `json:"stderr_path,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
+	TestID       string `json:"test_id"`
+	SubtaskID    string `json:"subtask_id,omitempty"`
+	Command      string `json:"command"`
+	ExitCode     int    `json:"exit_code"`
+	Passed       bool   `json:"passed"`
+	StdoutPath   string `json:"stdout_path,omitempty"`
+	StderrPath   string `json:"stderr_path,omitempty"`
+	DurationMs   int64  `json:"duration_ms,omitempty"`
+	FailureClass string `json:"failure_class,omitempty"`
+}
+
+type SubtaskFailure struct {
+	SubtaskID    string        `json:"subtask_id"`
+	FailureClass FailureClass  `json:"failure_class"`
+	Reason       string        `json:"reason"`
+	EvidenceRefs []EvidenceRef `json:"evidence_refs,omitempty"`
+	RetryAdvice  string        `json:"retry_advice,omitempty"`
+	NextAction   string        `json:"next_action,omitempty"`
 }
 
 // EvidenceRef 是对 evidence 文件的引用

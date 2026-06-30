@@ -114,3 +114,69 @@ func TestEvaluationResultJSONRoundTrip(t *testing.T) {
 		t.Fatalf("decoded = %+v", decoded)
 	}
 }
+
+func TestEvaluationResultJSONRoundTripWithSubtaskResults(t *testing.T) {
+	original := EvaluationResult{
+		RunID:        "run-1",
+		Passed:       false,
+		FailureClass: "product_defect",
+		TestResults: []TestResult{
+			{TestID: "subtask-api", SubtaskID: "api", ExitCode: 1, Passed: false, FailureClass: "product_defect"},
+		},
+		SubtaskResults: []SubtaskFailure{
+			{
+				SubtaskID:    "api",
+				FailureClass: FailureClassProductDefect,
+				Reason:       "test failed: expected 200, got 500",
+				RetryAdvice:  "check server error in api handler",
+				NextAction:   "retry_subtask",
+			},
+		},
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var got EvaluationResult
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(got.SubtaskResults) != 1 {
+		t.Fatalf("len(SubtaskResults) = %d, want 1", len(got.SubtaskResults))
+	}
+	if got.SubtaskResults[0].SubtaskID != "api" {
+		t.Fatalf("SubtaskID = %q, want api", got.SubtaskResults[0].SubtaskID)
+	}
+	if got.SubtaskResults[0].FailureClass != FailureClassProductDefect {
+		t.Fatalf("FailureClass = %q, want %q", got.SubtaskResults[0].FailureClass, FailureClassProductDefect)
+	}
+	if got.TestResults[0].FailureClass != "product_defect" {
+		t.Fatalf("TestResult FailureClass = %q, want product_defect", got.TestResults[0].FailureClass)
+	}
+}
+
+func TestOldEvaluationResultJSONUnmarshalsBackwardCompatible(t *testing.T) {
+	oldJSON := `{
+		"run_id": "run-1",
+		"passed": true,
+		"test_results": []
+	}`
+	var got EvaluationResult
+	if err := json.Unmarshal([]byte(oldJSON), &got); err != nil {
+		t.Fatalf("old EvaluationResult JSON should unmarshal: %v", err)
+	}
+	if len(got.SubtaskResults) != 0 {
+		t.Fatalf("len(SubtaskResults) = %d, want 0", len(got.SubtaskResults))
+	}
+}
+
+func TestSubtaskPlannedFilesBackwardCompatible(t *testing.T) {
+	oldJSON := `{"id": "api", "description": "build API"}`
+	var got Subtask
+	if err := json.Unmarshal([]byte(oldJSON), &got); err != nil {
+		t.Fatalf("old Subtask JSON should unmarshal: %v", err)
+	}
+	if len(got.PlannedFiles) != 0 {
+		t.Fatalf("len(PlannedFiles) = %d, want 0", len(got.PlannedFiles))
+	}
+}
