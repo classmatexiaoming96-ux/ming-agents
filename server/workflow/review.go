@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,8 +9,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
+
+type reviewCodexPromptRunner func(context.Context, string, string, time.Duration) (string, error)
+
+var runReviewCodexPrompt reviewCodexPromptRunner = runCodexPrompt
 
 type ReviewAttemptPaths struct {
 	PromptFile  string
@@ -324,6 +330,90 @@ func renderSubtaskReviewPrompt(plan *Plan, result *SubtaskResult, diffFile strin
 	b.WriteString("  required_fixes:\n")
 	b.WriteString("  - concrete fix\n")
 	return b.String()
+}
+
+func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, result *SubtaskResult, diffFile string) (*ReviewReport, string, ReviewSubtaskPaths, error) {
+	if result == nil {
+		return nil, "", ReviewSubtaskPaths{}, fmt.Errorf("subtask result is nil")
+	}
+	paths := NewReviewSubtaskPaths(repoRoot, runID, result.Subtask.ID)
+	if err := os.MkdirAll(paths.Dir, 0755); err != nil {
+		return nil, "", paths, err
+	}
+	session := AgentSession{
+		ID:          paths.SessionID,
+		AgentType:   "review",
+		Status:      AgentSessionRunning,
+		HistoryFile: paths.HistoryFile,
+	}
+	RegisterAgentSession(session)
+
+	prompt := renderSubtaskReviewPrompt(plan, result, diffFile)
+	if err := writeTextAtomic(paths.PromptFile, prompt); err != nil {
+		return nil, "", paths, err
+	}
+	agent := &SubtaskAgent{SubtaskID: result.Subtask.ID, Session: session}
+	_ = AppendAgentMessage(agent, AgentMessage{Role: "system", Content: prompt})
+
+	output, err := runReviewCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		output = err.Error()
+	}
+	_ = os.WriteFile(paths.OutFile, []byte(output), 0644)
+	_ = os.WriteFile(paths.ExitFile, []byte(fmt.Sprintf("%d\n", exitCode)), 0644)
+	_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: output})
+
+	report := ParseReviewReport(output)
+	if err != nil {
+		report.Passed = false
+		report.Issues = append(report.Issues, ReviewIssue{
+			SubtaskID:   result.Subtask.ID,
+			SessionID:   paths.SessionID,
+			Severity:    "blocking",
+			Description: err.Error(),
+		})
+	}
+	_ = writeReviewAttempt(repoRoot, runID, "review:subtask:"+result.Subtask.ID, paths.SessionID, result.Subtask.ID, 0, -1, "initial", FailureClassNone, "", paths.ReviewAttemptPaths)
+	return report, output, paths, nil
+}
+
+func writeReviewAttempt(repoRoot, runID, scope, sessionID, subtaskID string, attempt, parentAttempt int, trigger string, failureClass FailureClass, rejectionReason string, paths ReviewAttemptPaths) error {
+	now := time.Now().UTC()
+	event := AttemptEvent{
+		RunID:      runID,
+		NodeID:     "review",
+		NodeKind:   NodeKindReview,
+		Scope:      scope,
+		SubtaskID:  subtaskID,
+		Role:       "review",
+		SessionID:  sessionID,
+		Attempt:    attempt,
+		Trigger:    trigger,
+		StartedAt:  now,
+		FinishedAt: now,
+		PromptPath: paths.PromptFile,
+		OutputPath: paths.OutFile,
+		ExitPath:   paths.ExitFile,
+		ArtifactRefs: []ArtifactRef{
+			{Type: ArtifactTypePrompt, Path: paths.PromptFile},
+			{Type: ArtifactTypeOutput, Path: paths.OutFile},
+			{Type: ArtifactTypeExit, Path: paths.ExitFile},
+			{Type: ArtifactTypeSession, Path: paths.HistoryFile},
+		},
+	}
+	if parentAttempt >= 0 {
+		event.ParentAttempt = &parentAttempt
+	}
+	if failureClass != "" && failureClass != FailureClassNone {
+		event.FailureClass = failureClass
+		event.FailureReason = string(failureClass)
+	}
+	if rejectionReason != "" {
+		event.RejectionReason = rejectionReason
+	}
+	return RecordAttemptEvent(repoRoot, event)
 }
 
 func writeReviewInputs(repoRoot, nodeDir string, plan *Plan, results []*SubtaskResult) (string, string, error) {

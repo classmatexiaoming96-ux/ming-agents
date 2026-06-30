@@ -511,7 +511,7 @@ func RunReview(ctx context.Context, repoRoot, nodeDir string, plan *Plan, result
 	outFile := filepath.Join(nodeDir, "review.out.md")
 	exitFile := filepath.Join(nodeDir, "review.exit")
 	_ = writeTextAtomic(promptFile, prompt)
-	output, err := runCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
+	output, err := runReviewCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
 	exitCode := 0
 	if err != nil {
 		exitCode = 1

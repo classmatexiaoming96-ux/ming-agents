@@ -34,14 +34,35 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 
 	runRoot := filepath.Join(req.RepoRoot, ".workflow", "runs", req.RunID)
 	nodeDir := filepath.Join(runRoot, req.Spec.ID)
-	report, reviewOut, err := RunReview(ctx, req.RepoRoot, nodeDir, &plan, results)
+	diffFile, _, err := writeReviewInputs(req.RepoRoot, nodeDir, &plan, results)
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+	}
+	report := &ReviewReport{Passed: true, SubtaskReports: map[string]*ReviewReport{}}
+	reviewOutBySubtask := map[string]string{}
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		subtaskReport, reviewOut, _, err := RunSubtaskReview(ctx, req.RepoRoot, req.RunID, &plan, result, diffFile)
+		if err != nil {
+			return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+		}
+		report.SubtaskReports[result.Subtask.ID] = subtaskReport
+		reviewOutBySubtask[result.Subtask.ID] = reviewOut
+		if subtaskReport == nil {
+			report.Passed = false
+			continue
+		}
+		if !subtaskReport.Passed {
+			report.Passed = false
+		}
+		report.Issues = append(report.Issues, subtaskReport.Issues...)
 	}
 	return &NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,
-		Values: map[string]any{"report": report, "review_out": reviewOut},
+		Values: map[string]any{"report": report, "review_out": reviewOutBySubtask},
 	}, nil
 }
 
