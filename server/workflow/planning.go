@@ -179,8 +179,6 @@ func executePlanningAgent(ctx context.Context, repoRoot string, run planningAgen
 }
 
 func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *planningAgentOutput, run planningAgentRun, execute planningAgentExecutor) error {
-	const maxRevisions = 3
-
 	revisions := 0
 	for {
 		session := out.Session
@@ -216,9 +214,6 @@ func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *pla
 		if !errors.Is(approvalErr, ErrApprovalRejected) {
 			return approvalErr
 		}
-		if revisions >= maxRevisions {
-			return fmt.Errorf("agent %s exceeded max revision attempts", run.AgentID)
-		}
 
 		decision, ok, err := LatestReviewDecision(out.SessionID, run.AgentID)
 		if err != nil {
@@ -227,6 +222,37 @@ func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *pla
 		revision := "Please revise your previous planning output."
 		if ok && !decision.Approved && strings.TrimSpace(decision.Reason) != "" {
 			revision = strings.TrimSpace(decision.Reason)
+		}
+		lineage := NewFileLineageStore(repoRoot)
+		rctx := RollbackContext{
+			RunID:    run.RunID,
+			NodeID:   planningLineageNodeID,
+			NodeKind: NodeKindPlanning,
+			Unit: RollbackUnit{
+				Scope:       "planning",
+				MaxAttempts: DefaultRollbackSpec(NodeKindPlanning).DefaultUnit.MaxAttempts,
+				ReusePolicy: SessionReuseSameSession,
+			},
+			Budget:  RollbackBudget{ExhaustedAction: RollbackActionBlocked},
+			Lineage: lineage,
+		}
+		attempts := syntheticRollbackAttempts(rctx.Unit.Scope, revisions)
+		if run.RunID != "" {
+			listed, err := lineage.List(AttemptFilter{
+				RunID:  run.RunID,
+				NodeID: planningLineageNodeID,
+				Scope:  rctx.Unit.Scope,
+			})
+			if err != nil {
+				return err
+			}
+			if budgetEvents := rollbackBudgetEvents(listed); len(budgetEvents) > 0 {
+				attempts = budgetEvents
+			}
+		}
+		rollbackDecision := NewRollbackRunner().Decide(rctx, DefaultRollbackSpec(NodeKindPlanning), rctx.Unit, attempts, HumanRejectSignal(rctx.Unit, decision))
+		if rollbackDecision.Action != RollbackActionRegeneratePlan {
+			return fmt.Errorf("agent %s exceeded max revision attempts", run.AgentID)
 		}
 		_ = AppendAgentMessage(&SubtaskAgent{Session: session}, AgentMessage{
 			Role:    "user",

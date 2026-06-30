@@ -10,6 +10,31 @@ type planningNode struct{}
 
 func (n *planningNode) Kind() NodeKind { return NodeKindPlanning }
 
+func (n *planningNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
+	spec := DefaultRollbackSpec(NodeKindPlanning)
+	unit := rctx.Unit
+	if unit.Scope == "" {
+		unit = spec.DefaultUnit
+	}
+	var attempts []AttemptEvent
+	if rctx.Lineage != nil {
+		listed, err := rctx.Lineage.List(AttemptFilter{RunID: rctx.RunID, NodeID: rctx.NodeID, Scope: unit.Scope})
+		if err != nil {
+			return nil, err
+		}
+		attempts = rollbackBudgetEvents(listed)
+	}
+	decision := NewRollbackRunner().Decide(rctx, spec, unit, attempts, signal)
+	if signal.Reason != "" {
+		decision.Rationale = renderPlanningRevisionPrompt("", "", signal.Reason)
+	}
+	return decision, nil
+}
+
+func (n *planningNode) RollbackArtifacts(rctx RollbackContext) []ArtifactRef {
+	return nil
+}
+
 func (n *planningNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
 	if req.RunID != "" {
 		accepted, err := CheckReuseAckAt(ctx, req.RepoRoot, req.RunID, string(req.Spec.Kind))
