@@ -201,6 +201,113 @@ func TestAppendAttemptEvent(t *testing.T) {
 	}
 }
 
+func TestRecordAttemptEventMissingRunID(t *testing.T) {
+	tmpDir := t.TempDir()
+	err := RecordAttemptEvent(tmpDir, AttemptEvent{
+		NodeID:   "development",
+		NodeKind: NodeKindDevelopment,
+		Scope:    "subtask:api",
+		Attempt:  0,
+	})
+	if err == nil {
+		t.Fatal("RecordAttemptEvent() error = nil, want missing runID error")
+	}
+	if !strings.Contains(err.Error(), "runID is required") {
+		t.Fatalf("RecordAttemptEvent() error = %q, want runID context", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, ".workflow")); !os.IsNotExist(statErr) {
+		t.Fatalf(".workflow stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestRecordAttemptEventMissingNodeID(t *testing.T) {
+	err := RecordAttemptEvent(t.TempDir(), AttemptEvent{
+		RunID:    "run-1",
+		NodeKind: NodeKindDevelopment,
+		Scope:    "subtask:api",
+		Attempt:  0,
+	})
+	if err == nil {
+		t.Fatal("RecordAttemptEvent() error = nil, want missing nodeID error")
+	}
+	if !strings.Contains(err.Error(), "runID=run-1 nodeID is required") {
+		t.Fatalf("RecordAttemptEvent() error = %q, want nodeID context", err)
+	}
+}
+
+func TestRecordAttemptEventMissingScope(t *testing.T) {
+	err := RecordAttemptEvent(t.TempDir(), AttemptEvent{
+		RunID:    "run-1",
+		NodeID:   "development",
+		NodeKind: NodeKindDevelopment,
+		Attempt:  0,
+	})
+	if err == nil {
+		t.Fatal("RecordAttemptEvent() error = nil, want missing scope error")
+	}
+	if !strings.Contains(err.Error(), "runID=run-1 nodeID=development scope is required") {
+		t.Fatalf("RecordAttemptEvent() error = %q, want scope context", err)
+	}
+}
+
+func TestRecordAttemptEventErrorIncludesContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoRoot := filepath.Join(tmpDir, "repo-file")
+	if err := os.WriteFile(repoRoot, []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RecordAttemptEvent(repoRoot, AttemptEvent{
+		RunID:    "run-1",
+		NodeID:   "development",
+		NodeKind: NodeKindDevelopment,
+		Scope:    "subtask:api",
+		Attempt:  0,
+	})
+	if err == nil {
+		t.Fatal("RecordAttemptEvent() error = nil, want write error")
+	}
+	for _, want := range []string{"runID=run-1", "nodeID=development", "scope=subtask:api", "attempts.jsonl", repoRoot} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("RecordAttemptEvent() error = %q, want containing %q", err, want)
+		}
+	}
+}
+
+func TestRecordAttemptEventSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	event := AttemptEvent{
+		RunID:    "run-1",
+		NodeID:   "development",
+		NodeKind: NodeKindDevelopment,
+		Scope:    "subtask:api",
+		Attempt:  0,
+	}
+	if err := RecordAttemptEvent(tmpDir, event); err != nil {
+		t.Fatalf("RecordAttemptEvent() error = %v", err)
+	}
+
+	events, err := ReadAttemptEvents(tmpDir, "run-1", "development")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if events[0].Scope != "subtask:api" {
+		t.Fatalf("Scope = %q, want subtask:api", events[0].Scope)
+	}
+	for _, path := range []string{
+		filepath.Join(tmpDir, ".workflow", "runs", "run-1", "development", "attempts.jsonl"),
+		filepath.Join(tmpDir, ".workflow", "runs", "run-1", "attempts.index.jsonl"),
+		filepath.Join(tmpDir, ".workflow", "runs", "run-1", "development", "attempts", "subtask_api.jsonl"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+	}
+}
+
 func TestAppendAttemptEventMultipleEvents(t *testing.T) {
 	tmpDir := t.TempDir()
 	runID := "run-1"

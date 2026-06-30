@@ -324,7 +324,7 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 
 	execute(promptFile, outFile, exitFile, issues)
 	if agent != nil && retry == 0 {
-		writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, 0, "initial", FailureClassNone, "", promptFile, outFile, exitFile)
+		_ = writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, 0, "initial", FailureClassNone, "", promptFile, outFile, exitFile)
 	}
 	if agent != nil {
 		_, approvalErr := waitForSubtaskApprovalRevisionsAt(ctx, repoRoot, agent, sessionID, "subtask:"+st.ID, st.ID, issues, func(revisionIssues []ReviewIssue, revision int) error {
@@ -340,7 +340,7 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 			if len(revisionIssues) > 0 {
 				rejectionReason = revisionIssues[len(revisionIssues)-1].Description
 			}
-			writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, revision, "human_reject", FailureClassHumanReject, rejectionReason, revPromptFile, revOutFile, revExitFile)
+			_ = writeDevelopmentAttempt(repoRoot, plan.TaskID, developmentLineageNodeID, sessionID, st.ID, revision, "human_reject", FailureClassHumanReject, rejectionReason, revPromptFile, revOutFile, revExitFile)
 			return nil
 		})
 		if approvalErr != nil {
@@ -654,10 +654,10 @@ const developmentLineageNodeID = "development"
 // writeDevelopmentAttempt 写 development subtask attempt event（best-effort）。
 // attempt 编号语义：0 = initial（agent 第一次跑完），1+ = revision（reject 后重跑）。
 // lineage 写入失败不中断主流程。
-func writeDevelopmentAttempt(repoRoot, runID, nodeID, sessionID, subtaskID string, attempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) {
+func writeDevelopmentAttempt(repoRoot, runID, nodeID, sessionID, subtaskID string, attempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) error {
 	if runID == "" {
 		// 没有有效 runID 时无法构造 lineage 路径，直接跳过（best-effort）。
-		return
+		return nil
 	}
 	now := time.Now().UTC()
 	event := AttemptEvent{
@@ -691,8 +691,5 @@ func writeDevelopmentAttempt(repoRoot, runID, nodeID, sessionID, subtaskID strin
 	if exitPath != "" {
 		event.ExitPath = exitPath
 	}
-	if err := AppendAttemptEvent(repoRoot, event); err != nil {
-		// best-effort：lineage 写入失败不中断主流程。
-		_ = err
-	}
+	return RecordAttemptEvent(repoRoot, event)
 }

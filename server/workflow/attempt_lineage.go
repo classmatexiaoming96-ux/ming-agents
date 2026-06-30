@@ -56,6 +56,26 @@ func AppendAttemptEvent(repoRoot string, event AttemptEvent) error {
 	return nil
 }
 
+// RecordAttemptEvent is the shared lineage write entry point.
+// It validates required fields before writing and returns contextual errors so
+// callers can decide whether lineage failure is fatal or best-effort.
+func RecordAttemptEvent(repoRoot string, event AttemptEvent) error {
+	if event.RunID == "" {
+		return fmt.Errorf("RecordAttemptEvent: runID is required")
+	}
+	if event.NodeID == "" {
+		return fmt.Errorf("RecordAttemptEvent: runID=%s nodeID is required", event.RunID)
+	}
+	if event.Scope == "" {
+		return fmt.Errorf("RecordAttemptEvent: runID=%s nodeID=%s scope is required", event.RunID, event.NodeID)
+	}
+	if err := AppendAttemptEvent(repoRoot, event); err != nil {
+		return fmt.Errorf("RecordAttemptEvent: runID=%s nodeID=%s scope=%s write attempts.jsonl at %s: %w",
+			event.RunID, event.NodeID, event.Scope, attemptNodePath(repoRoot, event.RunID, event.NodeID), err)
+	}
+	return nil
+}
+
 func ReadAttemptEvents(repoRoot, runID, nodeID string) ([]AttemptEvent, error) {
 	if err := validatePathID(runID, "run_id"); err != nil {
 		return nil, fmt.Errorf("read attempt events: %w", err)

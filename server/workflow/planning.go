@@ -206,7 +206,7 @@ func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *pla
 		// 写 initial attempt（attempt=0，best-effort，不中断主流程）。
 		// revision 后的 attempt 在重跑分支写入。
 		if revisions == 0 {
-			writePlanningAttempt(repoRoot, run.RunID, planningLineageNodeID, out.SessionID, revisions, "initial", FailureClassNone, "", out.PromptFile, out.OutFile, out.ExitFile)
+			_ = writePlanningAttempt(repoRoot, run.RunID, planningLineageNodeID, out.SessionID, revisions, "initial", FailureClassNone, "", out.PromptFile, out.OutFile, out.ExitFile)
 		}
 
 		approvalErr := WaitForApproval(ctx, out.SessionID, run.AgentID)
@@ -233,7 +233,7 @@ func waitForPlanningAgentApproval(ctx context.Context, repoRoot string, out *pla
 			Content: revision,
 		})
 
-		writePlanningAttempt(repoRoot, run.RunID, planningLineageNodeID, out.SessionID, revisions+1, "human_reject", FailureClassHumanReject, revision, out.PromptFile, out.OutFile, out.ExitFile)
+		_ = writePlanningAttempt(repoRoot, run.RunID, planningLineageNodeID, out.SessionID, revisions+1, "human_reject", FailureClassHumanReject, revision, out.PromptFile, out.OutFile, out.ExitFile)
 
 		_ = EmitNodeNotification(out.SessionID, NodeNotification{
 			RunID:    run.RunID,
@@ -453,10 +453,10 @@ const planningLineageNodeID = "planning"
 // writePlanningAttempt 写 planning attempt event（best-effort）。
 // attempt 编号语义：0 = initial（agent 第一次跑完），1+ = revision（reject 后重跑）。
 // lineage 写入失败不中断主流程。
-func writePlanningAttempt(repoRoot, runID, nodeID, sessionID string, attempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) {
+func writePlanningAttempt(repoRoot, runID, nodeID, sessionID string, attempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) error {
 	if runID == "" {
 		// 没有有效 runID 时无法构造 lineage 路径，直接跳过（best-effort）。
-		return
+		return nil
 	}
 	now := time.Now().UTC()
 	event := AttemptEvent{
@@ -489,8 +489,5 @@ func writePlanningAttempt(repoRoot, runID, nodeID, sessionID string, attempt int
 	if exitPath != "" {
 		event.ExitPath = exitPath
 	}
-	if err := AppendAttemptEvent(repoRoot, event); err != nil {
-		// best-effort：lineage 写入失败不中断主流程。
-		_ = err
-	}
+	return RecordAttemptEvent(repoRoot, event)
 }
