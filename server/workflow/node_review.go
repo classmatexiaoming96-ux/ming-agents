@@ -63,7 +63,7 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
-	report := &ReviewReport{Passed: true, SubtaskReports: map[string]*ReviewReport{}}
+	subtaskReports := map[string]*ReviewReport{}
 	reviewOutBySubtask := map[string]string{}
 	for _, result := range results {
 		if result == nil {
@@ -73,17 +73,15 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 		if err != nil {
 			return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 		}
-		report.SubtaskReports[result.Subtask.ID] = subtaskReport
+		subtaskReports[result.Subtask.ID] = subtaskReport
 		reviewOutBySubtask[result.Subtask.ID] = reviewOut
-		if subtaskReport == nil {
-			report.Passed = false
-			continue
-		}
-		if !subtaskReport.Passed {
-			report.Passed = false
-		}
-		report.Issues = append(report.Issues, subtaskReport.Issues...)
 	}
+	aggregateReport, aggregateOut, _, err := RunAggregateReview(ctx, req.RepoRoot, req.RunID, &plan, subtaskReports)
+	if err != nil {
+		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+	}
+	report := MergeReviewReports(subtaskReports, aggregateReport)
+	reviewOutBySubtask["aggregate"] = aggregateOut
 	return &NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,

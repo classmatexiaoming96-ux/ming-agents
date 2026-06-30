@@ -78,12 +78,22 @@ func TestReviewNodeRunsSeparateReviewForEachSubtask(t *testing.T) {
 	}
 
 	oldRunner := runReviewCodexPrompt
+	aggregateSeen := false
 	runReviewCodexPrompt = func(ctx context.Context, repoRoot, prompt string, timeout time.Duration) (string, error) {
 		if strings.Contains(prompt, "subtask_id: api") {
 			return "## Summary\napi passed\n\n## Issues\n", nil
 		}
 		if strings.Contains(prompt, "subtask_id: web ui") {
 			return "## Summary\nweb passed\n\n## Issues\n", nil
+		}
+		if strings.Contains(prompt, "# Aggregate Review") {
+			aggregateSeen = true
+			for _, want := range []string{"api", "web ui", "api passed", "web passed"} {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("aggregate prompt missing %q:\n%s", want, prompt)
+				}
+			}
+			return "## Summary\naggregate passed\n\n## Issues\n", nil
 		}
 		t.Fatalf("unexpected prompt:\n%s", prompt)
 		return "", nil
@@ -112,6 +122,9 @@ func TestReviewNodeRunsSeparateReviewForEachSubtask(t *testing.T) {
 	if len(report.SubtaskReports) != 2 {
 		t.Fatalf("SubtaskReports len = %d, want 2", len(report.SubtaskReports))
 	}
+	if !aggregateSeen {
+		t.Fatal("aggregate review was not run")
+	}
 	for _, st := range plan.Subtasks {
 		paths := NewReviewSubtaskPaths(repoRoot, plan.TaskID, st.ID)
 		if _, err := os.Stat(paths.OutFile); err != nil {
@@ -126,15 +139,26 @@ func TestReviewNodeRunsSeparateReviewForEachSubtask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAttemptEvents() error = %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("attempt events = %d, want 2: %#v", len(events), events)
+	if len(events) != 3 {
+		t.Fatalf("attempt events = %d, want 3: %#v", len(events), events)
 	}
+	aggregateAttempts := 0
 	for _, event := range events {
+		if event.Scope == "review:aggregate" {
+			aggregateAttempts++
+			if event.SubtaskID != "" {
+				t.Fatalf("aggregate attempt SubtaskID = %q, want empty", event.SubtaskID)
+			}
+			continue
+		}
 		if !strings.HasPrefix(event.Scope, "review:subtask:") {
-			t.Fatalf("attempt scope = %q, want review subtask scope", event.Scope)
+			t.Fatalf("attempt scope = %q, want review subtask or aggregate scope", event.Scope)
 		}
 		if event.SubtaskID == "" {
 			t.Fatalf("attempt missing SubtaskID: %#v", event)
 		}
+	}
+	if aggregateAttempts != 1 {
+		t.Fatalf("aggregate attempts = %d, want 1", aggregateAttempts)
 	}
 }

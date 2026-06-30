@@ -44,6 +44,12 @@ type ReviewSubtaskPaths struct {
 	ReviewAttemptPaths
 }
 
+type ReviewAggregatePaths struct {
+	SessionID string
+	Dir       string
+	ReviewAttemptPaths
+}
+
 func NewReviewSubtaskPaths(repoRoot, runID, subtaskID string) ReviewSubtaskPaths {
 	safeID := safeReviewSubtaskID(subtaskID)
 	dir := filepath.Join(repoRoot, ".workflow", "runs", runID, "review", "subtasks", safeID)
@@ -57,6 +63,20 @@ func NewReviewSubtaskPaths(repoRoot, runID, subtaskID string) ReviewSubtaskPaths
 			OutFile:     filepath.Join(dir, "review-"+safeID+".out.md"),
 			ExitFile:    filepath.Join(dir, "review-"+safeID+".exit"),
 			HistoryFile: filepath.Join(dir, "review-"+safeID+".messages.jsonl"),
+		},
+	}
+}
+
+func NewReviewAggregatePaths(repoRoot, runID string) ReviewAggregatePaths {
+	dir := filepath.Join(repoRoot, ".workflow", "runs", runID, "review", "aggregate")
+	return ReviewAggregatePaths{
+		SessionID: NewPTYSessionID(runID, "review", "aggregate", 1),
+		Dir:       dir,
+		ReviewAttemptPaths: ReviewAttemptPaths{
+			PromptFile:  filepath.Join(dir, "review-aggregate.prompt.md"),
+			OutFile:     filepath.Join(dir, "review-aggregate.out.md"),
+			ExitFile:    filepath.Join(dir, "review-aggregate.exit"),
+			HistoryFile: filepath.Join(dir, "review-aggregate.messages.jsonl"),
 		},
 	}
 }
@@ -400,6 +420,50 @@ func renderReviewContractRevisionPrompt(originalPrompt, output string, err error
 	return b.String()
 }
 
+func renderAggregateReviewPrompt(plan *Plan, subtaskReports map[string]*ReviewReport) string {
+	var ids []string
+	for id := range subtaskReports {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var b strings.Builder
+	b.WriteString("# Aggregate Review\n")
+	b.WriteString("Review cross-subtask consistency, shared files, documentation alignment, and integration risk across completed subtask review reports.\n\n")
+	if plan != nil {
+		fmt.Fprintf(&b, "task_id: %s\n\n", plan.TaskID)
+	}
+	b.WriteString("# Subtask Review Summaries\n")
+	for _, id := range ids {
+		report := subtaskReports[id]
+		fmt.Fprintf(&b, "## %s\n", id)
+		if report == nil {
+			b.WriteString("summary: missing report\n\n")
+			continue
+		}
+		fmt.Fprintf(&b, "passed: %t\n", report.Passed)
+		fmt.Fprintf(&b, "summary: %s\n", report.Summary)
+		if len(report.Issues) > 0 {
+			b.WriteString("issues:\n")
+			for _, issue := range report.Issues {
+				fmt.Fprintf(&b, "- %s: %s\n", normalizeSeverity(issue.Severity), issue.Description)
+			}
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("# Output Format\n")
+	b.WriteString("Return markdown with these exact headings:\n\n")
+	b.WriteString("## Summary\n")
+	b.WriteString("One concise aggregate review summary.\n\n")
+	b.WriteString("## Issues\n")
+	b.WriteString("For each issue use:\n")
+	b.WriteString("- severity: info|warning|blocking\n")
+	b.WriteString("  description: concrete cross-subtask issue\n")
+	b.WriteString("  required_fixes:\n")
+	b.WriteString("  - concrete fix\n")
+	return b.String()
+}
+
 func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, result *SubtaskResult, diffFile string) (*ReviewReport, string, ReviewSubtaskPaths, error) {
 	if result == nil {
 		return nil, "", ReviewSubtaskPaths{}, fmt.Errorf("subtask result is nil")
@@ -491,6 +555,87 @@ func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, r
 	}
 	_ = writeReviewAttempt(repoRoot, runID, "review:subtask:"+result.Subtask.ID, paths.SessionID, result.Subtask.ID, 0, -1, "initial", FailureClassNone, "", paths.ReviewAttemptPaths)
 	return report, output, paths, nil
+}
+
+func RunAggregateReview(ctx context.Context, repoRoot, runID string, plan *Plan, subtaskReports map[string]*ReviewReport) (*ReviewReport, string, ReviewAggregatePaths, error) {
+	paths := NewReviewAggregatePaths(repoRoot, runID)
+	if err := os.MkdirAll(paths.Dir, 0755); err != nil {
+		return nil, "", paths, err
+	}
+	session := AgentSession{
+		ID:          paths.SessionID,
+		AgentType:   "review",
+		Status:      AgentSessionRunning,
+		HistoryFile: paths.HistoryFile,
+	}
+	RegisterAgentSession(session)
+	prompt := renderAggregateReviewPrompt(plan, subtaskReports)
+	if err := writeTextAtomic(paths.PromptFile, prompt); err != nil {
+		return nil, "", paths, err
+	}
+	agent := &SubtaskAgent{Session: session}
+	_ = AppendAgentMessage(agent, AgentMessage{Role: "system", Content: prompt})
+	output, err := runReviewCodexPrompt(ctx, repoRoot, prompt, 30*time.Minute)
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		output = err.Error()
+	}
+	_ = os.WriteFile(paths.OutFile, []byte(output), 0644)
+	_ = os.WriteFile(paths.ExitFile, []byte(fmt.Sprintf("%d\n", exitCode)), 0644)
+	_ = AppendAgentMessage(agent, AgentMessage{Role: "assistant", Content: output})
+	report := ParseReviewReport(output)
+	if err != nil {
+		report.Passed = false
+		report.Issues = append(report.Issues, ReviewIssue{Severity: "blocking", Description: err.Error()})
+	}
+	_ = writeReviewAttempt(repoRoot, runID, "review:aggregate", paths.SessionID, "", 0, -1, "initial", FailureClassNone, "", paths.ReviewAttemptPaths)
+	return report, output, paths, nil
+}
+
+func MergeReviewReports(subtaskReports map[string]*ReviewReport, aggregate *ReviewReport) *ReviewReport {
+	merged := &ReviewReport{
+		Passed:         true,
+		SubtaskReports: map[string]*ReviewReport{},
+	}
+	var summaries []string
+	var ids []string
+	for id := range subtaskReports {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		report := subtaskReports[id]
+		merged.SubtaskReports[id] = report
+		if report == nil {
+			merged.Passed = false
+			continue
+		}
+		if strings.TrimSpace(report.Summary) != "" {
+			summaries = append(summaries, id+": "+report.Summary)
+		}
+		if !report.Passed {
+			merged.Passed = false
+		}
+		merged.Issues = append(merged.Issues, report.Issues...)
+	}
+	if aggregate != nil {
+		if strings.TrimSpace(aggregate.Summary) != "" {
+			summaries = append(summaries, "aggregate: "+aggregate.Summary)
+		}
+		if !aggregate.Passed {
+			merged.Passed = false
+		}
+		merged.Issues = append(merged.Issues, aggregate.Issues...)
+	}
+	merged.Summary = strings.Join(summaries, "\n")
+	for _, issue := range merged.Issues {
+		if normalizeSeverity(issue.Severity) == "blocking" {
+			merged.Passed = false
+			break
+		}
+	}
+	return merged
 }
 
 func writeReviewAttempt(repoRoot, runID, scope, sessionID, subtaskID string, attempt, parentAttempt int, trigger string, failureClass FailureClass, rejectionReason string, paths ReviewAttemptPaths) error {

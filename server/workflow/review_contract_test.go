@@ -141,3 +141,34 @@ func TestRunSubtaskReviewRevisesInvalidContractOnce(t *testing.T) {
 		t.Fatalf("revision event = %#v, want revision artifact and same session", events[1])
 	}
 }
+
+func TestMergeReviewReportsFailsOnAnyBlockingIssue(t *testing.T) {
+	subtaskReports := map[string]*ReviewReport{
+		"api": {Passed: true, Summary: "api ok"},
+		"web": {Passed: false, Summary: "web blocked", Issues: []ReviewIssue{{
+			SubtaskID:     "web",
+			Severity:      "blocking",
+			Description:   "web issue",
+			RequiredFixes: []string{"fix web"},
+		}}},
+	}
+	aggregate := &ReviewReport{Passed: false, Summary: "aggregate blocked", Issues: []ReviewIssue{{
+		Severity:      "blocking",
+		Description:   "shared docs mismatch",
+		RequiredFixes: []string{"update docs"},
+	}}}
+
+	merged := MergeReviewReports(subtaskReports, aggregate)
+	if merged.Passed {
+		t.Fatal("Merged Passed = true, want false")
+	}
+	if len(merged.Issues) != 2 {
+		t.Fatalf("merged issues = %d, want 2", len(merged.Issues))
+	}
+	if merged.Issues[1].SubtaskID != "" {
+		t.Fatalf("aggregate issue SubtaskID = %q, want run-level issue", merged.Issues[1].SubtaskID)
+	}
+	if len(merged.SubtaskReports) != 2 {
+		t.Fatalf("SubtaskReports len = %d, want 2", len(merged.SubtaskReports))
+	}
+}
