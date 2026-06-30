@@ -88,3 +88,90 @@ func TestCheckCompletionReportsMissingPhaseStatus(t *testing.T) {
 		t.Fatalf("Missing = %#v", check.Missing)
 	}
 }
+
+func TestCompletionCheckRecognizesCoverageEvidence(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-coverage"
+	writeCompletionCheckBaseFiles(t, dir, runID)
+	coveragePath := filepath.Join(dir, ".workflow", "runs", runID, "coverage.out")
+	if err := os.WriteFile(coveragePath, []byte("mode: set\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(coverage.out) error = %v", err)
+	}
+
+	check, err := checkCompletionAt(dir, runID)
+	if err != nil {
+		t.Fatalf("checkCompletionAt() error = %v", err)
+	}
+	if !check.Passed {
+		t.Fatalf("checkCompletionAt() Passed = false, missing = %v", check.Missing)
+	}
+	assertEvidenceType(t, check, "coverage", coveragePath)
+}
+
+func TestCompletionCheckRecognizesReviewReportEvidence(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-review-report"
+	writeCompletionCheckBaseFiles(t, dir, runID)
+	reviewPath := filepath.Join(dir, ".workflow", "runs", runID, "development", "review.out.md")
+	if err := os.MkdirAll(filepath.Dir(reviewPath), 0755); err != nil {
+		t.Fatalf("MkdirAll(review dir) error = %v", err)
+	}
+	if err := os.WriteFile(reviewPath, []byte("# Review\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(review.out.md) error = %v", err)
+	}
+
+	check, err := checkCompletionAt(dir, runID)
+	if err != nil {
+		t.Fatalf("checkCompletionAt() error = %v", err)
+	}
+	if !check.Passed {
+		t.Fatalf("checkCompletionAt() Passed = false, missing = %v", check.Missing)
+	}
+	assertEvidenceType(t, check, "review_report", reviewPath)
+}
+
+func TestCompletionCheckRecognizesAttemptLineageEvidence(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-attempt-lineage"
+	writeCompletionCheckBaseFiles(t, dir, runID)
+	lineagePath := filepath.Join(dir, ".workflow", "runs", runID, "attempts.index.jsonl")
+	if err := os.WriteFile(lineagePath, []byte(`{"run_id":"run-attempt-lineage"}`+"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(attempts.index.jsonl) error = %v", err)
+	}
+
+	check, err := checkCompletionAt(dir, runID)
+	if err != nil {
+		t.Fatalf("checkCompletionAt() error = %v", err)
+	}
+	if !check.Passed {
+		t.Fatalf("checkCompletionAt() Passed = false, missing = %v", check.Missing)
+	}
+	assertEvidenceType(t, check, "attempt_lineage", lineagePath)
+}
+
+func writeCompletionCheckBaseFiles(t *testing.T, dir, runID string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0755); err != nil {
+		t.Fatalf("MkdirAll(docs) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "output.md"), []byte("# output\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(output.md) error = %v", err)
+	}
+	if err := writePhaseStatusAt(dir, runID, &PhaseStatus{
+		Phase:      "development",
+		GateStatus: "passed",
+		NextAction: "finish",
+	}); err != nil {
+		t.Fatalf("writePhaseStatusAt() error = %v", err)
+	}
+}
+
+func assertEvidenceType(t *testing.T, check *CompletionCheck, evidenceType, path string) {
+	t.Helper()
+	for _, item := range check.EvidenceIndex {
+		if item.EvidenceType == evidenceType && item.Path == path && item.Verified {
+			return
+		}
+	}
+	t.Fatalf("EvidenceIndex = %+v, want verified %s at %s", check.EvidenceIndex, evidenceType, path)
+}

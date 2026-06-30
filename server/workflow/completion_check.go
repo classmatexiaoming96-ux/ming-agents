@@ -68,10 +68,39 @@ func checkCompletionAt(baseDir, runID string) (*CompletionCheck, error) {
 			})
 		}
 	}
+	addCompletionEvidenceIfExists(check, "coverage", "coverage", filepath.Join(runDir, "coverage.out"))
+	addCompletionEvidenceIfExists(check, "attempt_lineage", "attempt_lineage", filepath.Join(runDir, "attempts.index.jsonl"))
+	addReviewReportEvidence(check, runDir)
 
 	if len(check.Missing) > 0 {
 		check.Passed = false
 	}
 
 	return check, nil
+}
+
+func addCompletionEvidenceIfExists(check *CompletionCheck, subtaskID, evidenceType, path string) {
+	if _, err := os.Stat(path); err == nil {
+		check.EvidenceIndex = append(check.EvidenceIndex, EvidenceItem{
+			SubtaskID:    subtaskID,
+			EvidenceType: evidenceType,
+			Path:         path,
+			Verified:     true,
+		})
+	}
+}
+
+func addReviewReportEvidence(check *CompletionCheck, runDir string) {
+	_ = filepath.WalkDir(runDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || entry.Name() != "review.out.md" {
+			return nil
+		}
+		check.EvidenceIndex = append(check.EvidenceIndex, EvidenceItem{
+			SubtaskID:    "review",
+			EvidenceType: "review_report",
+			Path:         path,
+			Verified:     true,
+		})
+		return nil
+	})
 }
