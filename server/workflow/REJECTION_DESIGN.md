@@ -309,7 +309,7 @@ Workflow 检测 rejection
 Phase 1 makes rejection decisions visible to later rollback orchestration by writing attempt lineage:
 
 - Clarification rejection writes a `clarification` attempt event with `scope=clarification:{agentType}`.
-- Planning rejection writes a `planning` attempt event with `scope=node-agent`.
+- Planning rejection writes a `planning` attempt event with `scope=planning`.
 - Development subtask rejection writes a `development` attempt event with `scope=subtask:{subtaskID}`.
 
 Each rejection attempt records `failure_class=human_reject`, `rejection_reason`, prompt/output/exit paths when available, and appears in both the node-local `attempts.jsonl` and run-level `attempts.index.jsonl`. Later orchestrator work can read this lineage to decide rollback targets without scraping session history.

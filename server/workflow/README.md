@@ -744,7 +744,7 @@ The per-node `attempts.jsonl` is the node-local stream. The `attempts/{safeScope
 Scope naming conventions:
 
 - `clarification:{agentType}` for clarification agents, for example `clarification:codex`.
-- `node-agent` for planning node agent attempts.
+- `planning` for planning node agent attempts.
 - `subtask:{subtaskID}` for development subtask attempts.
 - `command:{testID}` for evaluation command attempts.
 
@@ -809,7 +809,7 @@ The runner returns a `RollbackDecision` with action, target scope, next attempt 
 Current Phase 2 units are:
 
 - Clarification: `clarification:{agentType}`, max 3 human-reject revisions, same session.
-- Planning: `planning` for contract-error retry decisions and `node-agent` for existing planning lineage, max 3 revisions, same session.
+- Planning: `planning` for planning lineage and contract-error retry decisions, max 3 revisions, same session.
 - Development: `subtask:{subtaskID}`, max 3 human-reject revisions, reuse on human reject.
 - Evaluation: `command:{testID}`, max 2 command attempts, new session/no session reuse.
 

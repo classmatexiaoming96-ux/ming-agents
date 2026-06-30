@@ -534,7 +534,7 @@ const planningLineageNodeID = "planning"
 // attempt 编号语义：0 = initial（agent 第一次跑完），1+ = revision（reject 后重跑）。
 // lineage 写入失败不中断主流程。
 func writePlanningAttempt(repoRoot, runID, nodeID, sessionID string, attempt int, parentAttempt int, trigger string, failureClass FailureClass, rejectionReason, promptPath, outputPath, exitPath string) error {
-	scope := "node-agent"
+	scope := "planning"
 	var outcome *AttemptOutcome
 	if failureClass != "" && failureClass != FailureClassNone {
 		status := "failed"

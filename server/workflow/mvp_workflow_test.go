@@ -497,7 +497,7 @@ func TestWaitForPlanningAgentApprovalRejectsAndRerunsUntilApproved(t *testing.T)
 	}()
 
 	executions := 0
-	err := waitForPlanningAgentApproval(ctx, "/repo", &out, run, func(ctx context.Context, repoRoot string, next planningAgentRun) planningAgentOutput {
+	err := waitForPlanningAgentApproval(ctx, dir, &out, run, func(ctx context.Context, repoRoot string, next planningAgentRun) planningAgentOutput {
 		executions++
 		if !strings.Contains(next.Prompt, "tighten the plan") {
 			return planningAgentOutput{Err: errors.New("revision prompt missing reviewer feedback"), Status: "failed"}
@@ -594,7 +594,7 @@ func TestWaitForPlanningAgentApprovalExceedsMaxRevisions(t *testing.T) {
 	}()
 
 	executions := 0
-	err := waitForPlanningAgentApproval(ctx, "/repo", &out, run, func(ctx context.Context, repoRoot string, next planningAgentRun) planningAgentOutput {
+	err := waitForPlanningAgentApproval(ctx, dir, &out, run, func(ctx context.Context, repoRoot string, next planningAgentRun) planningAgentOutput {
 		executions++
 		next.Session = run.Session
 		return planningAgentOutput{
@@ -671,7 +671,7 @@ func TestWaitForAgentApprovalRejectsAndRerunsUntilApproved(t *testing.T) {
 	}()
 
 	executions := 0
-	err := waitForAgentApproval(ctx, "/repo", &out, run, agentNodeName, func(ctx context.Context, repoRoot string, next clarificationRun) clarificationOutput {
+	err := waitForAgentApproval(ctx, dir, &out, run, agentNodeName, func(ctx context.Context, repoRoot string, next clarificationRun) clarificationOutput {
 		executions++
 		if !strings.Contains(next.Prompt, "initial clarification prompt") {
 			return clarificationOutput{Err: errors.New("revision prompt lost original prompt"), Status: "failed"}
@@ -810,8 +810,8 @@ func TestClarificationRevisionWritesLineage(t *testing.T) {
 	if events[0].NodeKind != NodeKindClarification {
 		t.Errorf("first event node_kind = %q, want %q", events[0].NodeKind, NodeKindClarification)
 	}
-	if events[0].Scope != "agent:codex" {
-		t.Errorf("first event scope = %q, want agent:codex", events[0].Scope)
+	if events[0].Scope != "clarification:codex" {
+		t.Errorf("first event scope = %q, want clarification:codex", events[0].Scope)
 	}
 
 	var foundReject bool
@@ -924,8 +924,8 @@ func TestPlanningRevisionWritesLineage(t *testing.T) {
 	if events[0].NodeKind != NodeKindPlanning {
 		t.Errorf("first event node_kind = %q, want %q", events[0].NodeKind, NodeKindPlanning)
 	}
-	if events[0].Scope != "node-agent" {
-		t.Errorf("first event scope = %q, want node-agent", events[0].Scope)
+	if events[0].Scope != "planning" {
+		t.Errorf("first event scope = %q, want planning", events[0].Scope)
 	}
 	if events[0].Role != "codex" {
 		t.Errorf("first event role = %q, want codex", events[0].Role)
