@@ -35,6 +35,12 @@ type runBundleManifest struct {
 	ArtifactCounts map[string]int `json:"artifact_counts"`
 }
 
+type runBundlePointer struct {
+	SourcePath string `json:"source_path"`
+	Size       int64  `json:"size"`
+	SHA256     string `json:"sha256"`
+}
+
 // RunBundleReceiver mirrors raw workflow artifacts into the L3 run bundle.
 // Receive methods return write errors to callers for observability, but callers
 // should treat those errors as soft failures and continue the workflow.
@@ -108,9 +114,15 @@ func (r *RunBundleReceiver) ReceiveEvidencePointer(name, sourcePath string) erro
 	if err := r.ensureOpen(); err != nil {
 		return err
 	}
+	filePointer, err := pointerForFile(sourcePath)
+	if err != nil {
+		return err
+	}
 	pointer := map[string]any{
 		"name":        name,
 		"source_path": sourcePath,
+		"size":        filePointer.Size,
+		"sha256":      filePointer.SHA256,
 		"received_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	line, err := json.Marshal(pointer)
@@ -184,6 +196,15 @@ func (r *RunBundleReceiver) ensureOpen() error {
 func (r *RunBundleReceiver) writeArtifact(rel string, data []byte) error {
 	if err := os.MkdirAll(r.root, 0755); err != nil {
 		return err
+	}
+	if len(data) > RunBundleLargeFileThreshold {
+		pointer := runBundlePointer{
+			Size:   int64(len(data)),
+			SHA256: sha256Hex(data),
+		}
+		ext := filepath.Ext(rel)
+		pointerRel := strings.TrimSuffix(rel, ext) + ".pointer.json"
+		return r.writeJSONArtifact(pointerRel, pointer)
 	}
 	path := filepath.Join(r.root, rel)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -278,4 +299,16 @@ func safeBundleName(name string) string {
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func pointerForFile(path string) (runBundlePointer, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return runBundlePointer{}, err
+	}
+	return runBundlePointer{
+		SourcePath: path,
+		Size:       int64(len(data)),
+		SHA256:     sha256Hex(data),
+	}, nil
 }
