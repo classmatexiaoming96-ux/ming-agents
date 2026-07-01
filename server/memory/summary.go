@@ -70,6 +70,13 @@ type SummaryImportResult struct {
 	Inbox  int
 }
 
+// ImportSummary receives one batch-produced AutoMind task summary and routes it
+// without changing Brief, reuse, or implicit feedback paths. Dry-run is the
+// default: unless options.Accept is true, it reports the L2, L3, and inbox
+// routes that would be used but writes nothing. Accepted imports send durable
+// lessons to project L2, raw evidence to the immutable L3 run bundle, and
+// cross-project candidates to the human-curated inbox unless policy rejects
+// them.
 func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportResult, error) {
 	input, err := LoadSummary(path)
 	if err != nil {
@@ -126,6 +133,10 @@ func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportRes
 	return result, nil
 }
 
+// SummaryClassifier maps summary item kinds to storage routes:
+// durable_lesson -> L2 project notes, raw_evidence -> L3 run summary bundle,
+// and cross_project_candidate -> L2 inbox for human curation. Unknown kinds are
+// rejected instead of being guessed into a storage layer.
 func (SummaryClassifier) Classify(input *SummaryInput) (*ClassifiedSummary, error) {
 	if input == nil {
 		return nil, fmt.Errorf("summary input is required")
@@ -146,6 +157,9 @@ func (SummaryClassifier) Classify(input *SummaryInput) (*ClassifiedSummary, erro
 	return &classified, nil
 }
 
+// IngestDurableLessons writes AutoMind durable lessons into L2 project memory
+// only when accept is true. In dry-run mode it returns planned L2 routes but
+// writes nothing, preserving the receiver's conservative default.
 func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([]SummaryRoute, error) {
 	if project == "" {
 		return nil, fmt.Errorf("project is required")
@@ -179,6 +193,11 @@ func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([
 	return routes, nil
 }
 
+// ArchiveRawBundle stores raw AutoMind summary evidence under the Phase 5 L3
+// run bundle namespace, reusing RunBundleReceiver manifest, hash, and freeze
+// behavior. It writes summary/items.jsonl plus the raw summary copy under
+// summary/, never archive/ or notes/, and returns ErrBundleFrozen when the run
+// bundle was already finalized.
 func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath string) ([]SummaryRoute, error) {
 	receiver, err := NewRunBundleReceiver(project, runID)
 	if err != nil {
