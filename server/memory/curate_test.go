@@ -166,6 +166,70 @@ func TestCurate_SupersedeModeAtomicallyReplaces(t *testing.T) {
 	}
 }
 
+func TestCurate_RejectsNonPromotedSources(t *testing.T) {
+	cases := []struct {
+		name  string
+		layer string
+		state PromotionState
+		dir   string
+	}{
+		{"l2_inbox candidate", "l2_inbox", PromotionCandidate, filepath.Join("notes", "_inbox", "cross_project_candidates")},
+		{"l2 under_review", "l2", PromotionUnderReview, filepath.Join("notes", "ming-agents")},
+		{"l2 rejected", "l2", PromotionRejected, filepath.Join("notes", "ming-agents")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempVault(t)
+			fixedNow(t, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+			mem := Memory{
+				ID:             "src-1",
+				Type:           "decision",
+				Project:        "ming-agents",
+				Tags:           []string{"db"},
+				Title:          "Use connection pooling",
+				Body:           "Pool DB connections to reuse handles.",
+				Score:          5,
+				Status:         "active",
+				Layer:          tc.layer,
+				PromotionState: tc.state,
+				CreatedAt:      now().Format(dateLayout),
+				ExpiresAt:      neverExpires,
+			}
+			if _, err := writeMemory(mem, filepath.Join(VaultDir, tc.dir)); err != nil {
+				t.Fatalf("writeMemory: %v", err)
+			}
+			_, err := Curate(CurationRequest{SourceID: "src-1", Rationale: "global", Approver: PromotionActor{Kind: "human", Name: "alice"}})
+			if err == nil {
+				t.Fatalf("Curate must reject non-promoted L2 source (%s)", tc.name)
+			}
+		})
+	}
+}
+
+func TestCurate_RejectsArchivedSource(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+	mem := Memory{
+		ID:        "src-arch",
+		Type:      "decision",
+		Project:   "ming-agents",
+		Tags:      []string{"db"},
+		Title:     "Use connection pooling",
+		Body:      "Pool DB connections to reuse handles.",
+		Score:     5,
+		Status:    "archived",
+		Layer:     "l2",
+		CreatedAt: now().Format(dateLayout),
+		ExpiresAt: neverExpires,
+	}
+	if _, err := writeMemory(mem, filepath.Join(VaultDir, "archive", "ming-agents")); err != nil {
+		t.Fatalf("writeMemory: %v", err)
+	}
+	if _, err := Curate(CurationRequest{SourceID: "src-arch", Rationale: "global", Approver: PromotionActor{Kind: "human", Name: "alice"}}); err == nil {
+		t.Fatal("Curate must reject an archived L2 source")
+	}
+}
+
 func TestDetectL1Conflicts_DuplicateNotBlocking(t *testing.T) {
 	existing := []Memory{{
 		ID: "l1-a", Layer: "l1", Status: "active", PromotionState: PromotionPromoted,

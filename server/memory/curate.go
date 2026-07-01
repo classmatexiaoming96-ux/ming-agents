@@ -138,8 +138,14 @@ func Curate(req CurationRequest) (*PromotionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if source.Layer == "l1" {
-		return nil, fmt.Errorf("memory %q is already an L1 global memory", req.SourceID)
+	// L1 is the global authority layer: only an active, promoted L2 project
+	// memory may be curated into it. This rejects l1 (already global), l2_inbox
+	// candidates, archived/superseded memories, and under_review/rejected items,
+	// enforcing the design rule that there is no direct candidate -> L1 path.
+	if sourceState := ResolvePromotionState(source); source.Layer != "l2" || source.Status != "active" || sourceState != PromotionPromoted {
+		return nil, fmt.Errorf(
+			"curation source %q must be an active, promoted L2 memory (got layer=%q status=%q promotion_state=%q)",
+			req.SourceID, source.Layer, source.Status, sourceState)
 	}
 
 	existing, err := activeL1Memories()
