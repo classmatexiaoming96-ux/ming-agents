@@ -184,6 +184,11 @@ func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath st
 	if err != nil {
 		return nil, err
 	}
+	if _, err := os.Stat(filepath.Join(receiver.Root(), "_frozen")); err == nil {
+		return nil, ErrBundleFrozen
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
 	routes := make([]SummaryRoute, 0, len(items))
 	for _, item := range items {
 		if item.Kind != SummaryKindRawEvidence {
