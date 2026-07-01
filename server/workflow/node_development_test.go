@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ming-agents/server/memory"
 )
 
 func TestDevelopmentNodeImplementsRollbackCapableNode(t *testing.T) {
@@ -138,5 +140,45 @@ done
 	}
 	if _, err := os.Stat(filepath.Join(runDir, "evaluation.json")); !os.IsNotExist(err) {
 		t.Fatalf("development node wrote evaluation output, err=%v", err)
+	}
+}
+
+func TestDevelopmentNodeExecuteReturnsBriefAudit(t *testing.T) {
+	restoreBrief := stubWorkflowBrief(t, "development memory", memory.BriefAudit{InjectedIDs: []string{"mem_node_dev"}})
+	defer restoreBrief()
+	prevRun := runDevelopmentOnlyWithMemoryForNode
+	var gotMemory string
+	runDevelopmentOnlyWithMemoryForNode = func(ctx context.Context, repoRoot string, plan *Plan, memoryBySubtask map[string]string) (*WorkflowState, error) {
+		gotMemory = memoryBySubtask["api"]
+		return &WorkflowState{
+			RunID:   plan.TaskID,
+			Nodes:   map[string]NodeStatus{"development": NodeStatusCompleted},
+			Details: map[string]any{"subtask_results": []*SubtaskResult{{Subtask: plan.Subtasks[0], Status: "completed"}}},
+		}, nil
+	}
+	defer func() { runDevelopmentOnlyWithMemoryForNode = prevRun }()
+
+	plan := &Plan{TaskID: "run-node-dev-brief", Subtasks: []Subtask{validSubtask("api")}}
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("Marshal(plan) error = %v", err)
+	}
+	result, err := (&developmentNode{}).Execute(context.Background(), NodeRequest{
+		RunID:    plan.TaskID,
+		RepoRoot: t.TempDir(),
+		Spec:     NodeSpec{ID: "development", Kind: NodeKindDevelopment},
+		Inputs:   NodeInputs{"planning": {Values: map[string]any{"plan": json.RawMessage(planJSON)}}},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.BriefAudit == nil {
+		t.Fatal("BriefAudit = nil, want audit")
+	}
+	if result.BriefPath == "" {
+		t.Fatal("BriefPath empty")
+	}
+	if !strings.Contains(gotMemory, "mem_node_dev") {
+		t.Fatalf("memoryBlock = %q, want injected ID", gotMemory)
 	}
 }

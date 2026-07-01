@@ -7,6 +7,8 @@ import (
 
 type clarificationNode struct{}
 
+var runClarificationWithMemoryForNode = RunClarificationWithMemory
+
 func (n *clarificationNode) Kind() NodeKind { return NodeKindClarification }
 
 func (n *clarificationNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
@@ -44,6 +46,15 @@ func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*Node
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: "user_input is not a string"}, nil
 	}
 	runID := req.RunID
+	brief, err := InjectBrief(ctx, BriefInjectContext{
+		RunID:    runID,
+		RepoRoot: req.RepoRoot,
+		Kind:     req.Spec.Kind,
+		Query:    userInput,
+	})
+	if err != nil {
+		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+	}
 	var reusePath string
 	if runID != "" {
 		query := userInput
@@ -67,9 +78,9 @@ func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*Node
 			log.Printf("WriteReuseAckAt failed: %v", err)
 		}
 	}
-	outputPath, err := RunClarification(ctx, req.RepoRoot, userInput)
+	outputPath, err := runClarificationWithMemoryForNode(ctx, req.RepoRoot, userInput, briefMarkdown(brief))
 	if err != nil {
-		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
 	}
 	paths := []string{outputPath}
 	values := map[string]any{}
@@ -77,5 +88,5 @@ func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*Node
 		paths = append(paths, reusePath)
 		values["reuse_path"] = reusePath
 	}
-	return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusCompleted, Values: values, OutputPaths: paths}, nil
+	return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusCompleted, Values: values, OutputPaths: paths}, brief), nil
 }

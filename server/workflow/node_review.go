@@ -8,6 +8,9 @@ import (
 
 type reviewNode struct{}
 
+var runSubtaskReviewWithMemoryForNode = RunSubtaskReviewWithMemory
+var runAggregateReviewWithMemoryForNode = RunAggregateReviewWithMemory
+
 func (n *reviewNode) Kind() NodeKind { return NodeKindReview }
 
 func (n *reviewNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
@@ -56,6 +59,15 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 	if !ok {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: "subtask results not found in development output"}, nil
 	}
+	brief, err := InjectBrief(ctx, BriefInjectContext{
+		RunID:    req.RunID,
+		RepoRoot: req.RepoRoot,
+		Kind:     req.Spec.Kind,
+		Query:    reviewBriefQuery(&plan, results),
+	})
+	if err != nil {
+		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+	}
 
 	runRoot := filepath.Join(req.RepoRoot, ".workflow", "runs", req.RunID)
 	nodeDir := filepath.Join(runRoot, req.Spec.ID)
@@ -69,24 +81,24 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 		if result == nil {
 			continue
 		}
-		subtaskReport, reviewOut, _, err := RunSubtaskReview(ctx, req.RepoRoot, req.RunID, &plan, result, diffFile)
+		subtaskReport, reviewOut, _, err := runSubtaskReviewWithMemoryForNode(ctx, req.RepoRoot, req.RunID, &plan, result, diffFile, briefMarkdown(brief))
 		if err != nil {
-			return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+			return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
 		}
 		subtaskReports[result.Subtask.ID] = subtaskReport
 		reviewOutBySubtask[result.Subtask.ID] = reviewOut
 	}
-	aggregateReport, aggregateOut, _, err := RunAggregateReview(ctx, req.RepoRoot, req.RunID, &plan, subtaskReports)
+	aggregateReport, aggregateOut, _, err := runAggregateReviewWithMemoryForNode(ctx, req.RepoRoot, req.RunID, &plan, subtaskReports, briefMarkdown(brief))
 	if err != nil {
-		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
 	}
 	report := MergeReviewReports(subtaskReports, aggregateReport)
 	reviewOutBySubtask["aggregate"] = aggregateOut
-	return &NodeResult{
+	return nodeResultWithBrief(&NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,
 		Values: map[string]any{"report": report, "review_out": reviewOutBySubtask},
-	}, nil
+	}, brief), nil
 }
 
 func subtaskResultsFromState(state *WorkflowState) ([]*SubtaskResult, bool) {

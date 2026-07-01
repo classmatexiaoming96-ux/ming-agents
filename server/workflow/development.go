@@ -17,6 +17,7 @@ type WorkflowState = RunState
 
 type developmentOptions struct {
 	DevelopmentOnly bool
+	MemoryBySubtask map[string]string
 }
 
 func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *WorkflowState, err error) {
@@ -25,6 +26,10 @@ func RunDevelopment(ctx context.Context, repoRoot string, plan *Plan) (state *Wo
 
 func RunDevelopmentOnly(ctx context.Context, repoRoot string, plan *Plan) (state *WorkflowState, err error) {
 	return runDevelopment(ctx, repoRoot, plan, developmentOptions{DevelopmentOnly: true})
+}
+
+func RunDevelopmentOnlyWithMemory(ctx context.Context, repoRoot string, plan *Plan, memoryBySubtask map[string]string) (state *WorkflowState, err error) {
+	return runDevelopment(ctx, repoRoot, plan, developmentOptions{DevelopmentOnly: true, MemoryBySubtask: memoryBySubtask})
 }
 
 func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts developmentOptions) (state *WorkflowState, err error) {
@@ -64,7 +69,7 @@ func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts devel
 		"node3": NodeRunning,
 	}, map[string]any{"subtask_agents": filepath.Join(nodeDir, "agents.json")})
 
-	results := runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, nil, 0)
+	results := runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, nil, 0, opts.MemoryBySubtask)
 	if opts.DevelopmentOnly {
 		return finishDevelopmentOnly(repoRoot, runID, nodeDir, nodeSession, agents, results)
 	}
@@ -76,7 +81,7 @@ func runDevelopment(ctx context.Context, repoRoot string, plan *Plan, opts devel
 	if !report.Passed {
 		retryTargets := blockingRetryTargets(report, results)
 		if len(retryTargets) > 0 {
-			results = append(results, runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, retryTargets, 1)...)
+			results = append(results, runDevelopmentSubtasks(ctx, repoRoot, nodeDir, plan, agentsBySubtask, retryTargets, 1, opts.MemoryBySubtask)...)
 			report, reviewOut, err = RunReview(ctx, repoRoot, nodeDir, plan, results)
 			if err != nil {
 				_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node3", Status: NotificationFailed})
@@ -218,7 +223,7 @@ func subtaskAgentsByID(agents []SubtaskAgent) map[string]*SubtaskAgent {
 	return byID
 }
 
-func runDevelopmentSubtasks(ctx context.Context, repoRoot, nodeDir string, plan *Plan, agents map[string]*SubtaskAgent, only map[string][]ReviewIssue, retry int) []*SubtaskResult {
+func runDevelopmentSubtasks(ctx context.Context, repoRoot, nodeDir string, plan *Plan, agents map[string]*SubtaskAgent, only map[string][]ReviewIssue, retry int, memoryBySubtask map[string]string) []*SubtaskResult {
 	var subtasks []Subtask
 	for _, st := range plan.Subtasks {
 		if only == nil {
@@ -231,12 +236,12 @@ func runDevelopmentSubtasks(ctx context.Context, repoRoot, nodeDir string, plan 
 	}
 	results := make([]*SubtaskResult, len(subtasks))
 	for i, st := range subtasks {
-		results[i] = runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agents[st.ID], st, i+1, retry, only[st.ID])
+		results[i] = runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agents[st.ID], st, i+1, retry, only[st.ID], memoryBySubtask[st.ID])
 	}
 	return results
 }
 
-func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *Plan, agent *SubtaskAgent, st Subtask, index, retry int, issues []ReviewIssue) *SubtaskResult {
+func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *Plan, agent *SubtaskAgent, st Subtask, index, retry int, issues []ReviewIssue, memoryBlock string) *SubtaskResult {
 	suffix := fmt.Sprintf("dev-%d", index)
 	if retry > 0 {
 		suffix = fmt.Sprintf("dev-%d-r%d", index, retry)
@@ -260,7 +265,7 @@ func runDevelopmentSubtask(ctx context.Context, repoRoot, nodeDir string, plan *
 
 	result := &SubtaskResult{Subtask: st, SessionID: sessionID, Agent: agent, OutFile: outFile, ExitFile: exitFile, Status: "completed"}
 	execute := func(currentPromptFile, currentOutFile, currentExitFile string, currentIssues []ReviewIssue) {
-		prompt := renderDevelopmentPrompt(repoRoot, st, sessionID, plan, currentIssues)
+		prompt := prependRelevantMemory(memoryBlock, renderDevelopmentPrompt(repoRoot, st, sessionID, plan, currentIssues))
 		_ = writeTextAtomic(currentPromptFile, prompt)
 		if agent != nil {
 			agent.Session.Status = AgentSessionRunning

@@ -480,6 +480,10 @@ func renderAggregateReviewPrompt(plan *Plan, subtaskReports map[string]*ReviewRe
 }
 
 func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, result *SubtaskResult, diffFile string) (*ReviewReport, string, ReviewSubtaskPaths, error) {
+	return RunSubtaskReviewWithMemory(ctx, repoRoot, runID, plan, result, diffFile, "")
+}
+
+func RunSubtaskReviewWithMemory(ctx context.Context, repoRoot, runID string, plan *Plan, result *SubtaskResult, diffFile, memoryBlock string) (*ReviewReport, string, ReviewSubtaskPaths, error) {
 	if result == nil {
 		return nil, "", ReviewSubtaskPaths{}, fmt.Errorf("subtask result is nil")
 	}
@@ -495,7 +499,7 @@ func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, r
 	}
 	RegisterAgentSession(session)
 
-	prompt := renderSubtaskReviewPrompt(plan, result, diffFile)
+	prompt := prependRelevantMemory(memoryBlock, renderSubtaskReviewPrompt(plan, result, diffFile))
 	if err := writeTextAtomic(paths.PromptFile, prompt); err != nil {
 		return nil, "", paths, err
 	}
@@ -581,6 +585,10 @@ func RunSubtaskReview(ctx context.Context, repoRoot, runID string, plan *Plan, r
 }
 
 func RunAggregateReview(ctx context.Context, repoRoot, runID string, plan *Plan, subtaskReports map[string]*ReviewReport) (*ReviewReport, string, ReviewAggregatePaths, error) {
+	return RunAggregateReviewWithMemory(ctx, repoRoot, runID, plan, subtaskReports, "")
+}
+
+func RunAggregateReviewWithMemory(ctx context.Context, repoRoot, runID string, plan *Plan, subtaskReports map[string]*ReviewReport, memoryBlock string) (*ReviewReport, string, ReviewAggregatePaths, error) {
 	paths := NewReviewAggregatePaths(repoRoot, runID)
 	if err := os.MkdirAll(paths.Dir, 0755); err != nil {
 		return nil, "", paths, err
@@ -592,7 +600,7 @@ func RunAggregateReview(ctx context.Context, repoRoot, runID string, plan *Plan,
 		HistoryFile: paths.HistoryFile,
 	}
 	RegisterAgentSession(session)
-	prompt := renderAggregateReviewPrompt(plan, subtaskReports)
+	prompt := prependRelevantMemory(memoryBlock, renderAggregateReviewPrompt(plan, subtaskReports))
 	if err := writeTextAtomic(paths.PromptFile, prompt); err != nil {
 		return nil, "", paths, err
 	}

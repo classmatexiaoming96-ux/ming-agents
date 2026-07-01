@@ -8,6 +8,8 @@ import (
 
 type evaluationNode struct{}
 
+var runEvaluationWithPlanForNode = RunEvaluationWithPlan
+
 func (n *evaluationNode) Kind() NodeKind { return NodeKindEvaluation }
 
 func (n *evaluationNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
@@ -39,17 +41,26 @@ func (n *evaluationNode) Execute(ctx context.Context, req NodeRequest) (*NodeRes
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
-	result, err := RunEvaluationWithPlan(ctx, req.RepoRoot, req.RunID, plan)
+	brief, err := InjectBrief(ctx, BriefInjectContext{
+		RunID:    req.RunID,
+		RepoRoot: req.RepoRoot,
+		Kind:     req.Spec.Kind,
+		Query:    req.Spec.ID,
+	})
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
+	result, err := runEvaluationWithPlanForNode(ctx, req.RepoRoot, req.RunID, plan)
+	if err != nil {
+		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
+	}
 	resultJSON, _ := json.Marshal(result)
-	return &NodeResult{
+	return nodeResultWithBrief(&NodeResult{
 		NodeID:      req.Spec.ID,
 		Status:      NodeStatusCompleted,
 		Values:      map[string]any{"evaluation": json.RawMessage(resultJSON)},
 		OutputPaths: []string{filepath.Join(req.RepoRoot, ".workflow", "runs", req.RunID, "evaluation.json")},
-	}, nil
+	}, brief), nil
 }
 
 func evaluationPlanFromInputs(inputs NodeInputs) (*Plan, error) {

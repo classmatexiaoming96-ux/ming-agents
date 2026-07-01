@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
 )
 
 type planningNode struct{}
+
+var runPlanningWithMemoryForNode = RunPlanningWithMemory
 
 func (n *planningNode) Kind() NodeKind { return NodeKindPlanning }
 
@@ -50,14 +53,27 @@ func (n *planningNode) Execute(ctx context.Context, req NodeRequest) (*NodeResul
 	}
 	clarOutput := req.Inputs["clarification"]
 	clarFile := clarOutput.Outputs["clarification_output"]
-	plan, err := RunPlanning(ctx, req.RepoRoot, clarFile)
+	briefQuery := req.Spec.ID
+	if data, err := os.ReadFile(clarFile); err == nil {
+		briefQuery = string(data)
+	}
+	brief, err := InjectBrief(ctx, BriefInjectContext{
+		RunID:    req.RunID,
+		RepoRoot: req.RepoRoot,
+		Kind:     req.Spec.Kind,
+		Query:    briefQuery,
+	})
 	if err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
+	plan, err := runPlanningWithMemoryForNode(ctx, req.RepoRoot, clarFile, briefMarkdown(brief))
+	if err != nil {
+		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
+	}
 	planJSON, _ := json.Marshal(plan)
-	return &NodeResult{
+	return nodeResultWithBrief(&NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,
 		Values: map[string]any{"plan": json.RawMessage(planJSON)},
-	}, nil
+	}, brief), nil
 }

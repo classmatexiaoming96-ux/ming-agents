@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ming-agents/server/memory"
 )
 
 func TestReviewSubtaskPathsUseSafeDirectoryAndReadableArtifacts(t *testing.T) {
@@ -51,6 +53,57 @@ func TestReviewSubtaskSessionIDIncludesRunReviewAndSubtask(t *testing.T) {
 
 func TestReviewNodeImplementsRollbackCapableNode(t *testing.T) {
 	var _ RollbackCapableNode = (*reviewNode)(nil)
+}
+
+func TestReviewNodeExecuteReturnsBriefAudit(t *testing.T) {
+	restoreBrief := stubWorkflowBrief(t, "review memory", memory.BriefAudit{InjectedIDs: []string{"mem_node_review"}})
+	defer restoreBrief()
+	prevSubtask := runSubtaskReviewWithMemoryForNode
+	prevAggregate := runAggregateReviewWithMemoryForNode
+	var gotSubtaskMemory string
+	var gotAggregateMemory string
+	runSubtaskReviewWithMemoryForNode = func(ctx context.Context, repoRoot, runID string, plan *Plan, result *SubtaskResult, diffFile, memoryBlock string) (*ReviewReport, string, ReviewSubtaskPaths, error) {
+		gotSubtaskMemory = memoryBlock
+		return &ReviewReport{Passed: true, Summary: "ok"}, "subtask ok", ReviewSubtaskPaths{}, nil
+	}
+	runAggregateReviewWithMemoryForNode = func(ctx context.Context, repoRoot, runID string, plan *Plan, subtaskReports map[string]*ReviewReport, memoryBlock string) (*ReviewReport, string, ReviewAggregatePaths, error) {
+		gotAggregateMemory = memoryBlock
+		return &ReviewReport{Passed: true, Summary: "aggregate ok"}, "aggregate ok", ReviewAggregatePaths{}, nil
+	}
+	defer func() {
+		runSubtaskReviewWithMemoryForNode = prevSubtask
+		runAggregateReviewWithMemoryForNode = prevAggregate
+	}()
+
+	plan := &Plan{TaskID: "run-node-review-brief", Subtasks: []Subtask{validSubtask("api")}}
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("Marshal(plan) error = %v", err)
+	}
+	state := &WorkflowState{RunID: plan.TaskID, Details: map[string]any{
+		"subtask_results": []*SubtaskResult{{Subtask: plan.Subtasks[0], Status: "completed", Output: "done"}},
+	}}
+	result, err := (&reviewNode{}).Execute(context.Background(), NodeRequest{
+		RunID:    plan.TaskID,
+		RepoRoot: t.TempDir(),
+		Spec:     NodeSpec{ID: "review", Kind: NodeKindReview},
+		Inputs: NodeInputs{
+			"planning":    {Values: map[string]any{"plan": json.RawMessage(planJSON)}},
+			"development": {Values: map[string]any{"state": state}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.BriefAudit == nil {
+		t.Fatal("BriefAudit = nil, want audit")
+	}
+	if result.BriefPath == "" {
+		t.Fatal("BriefPath empty")
+	}
+	if !strings.Contains(gotSubtaskMemory, "mem_node_review") || !strings.Contains(gotAggregateMemory, "mem_node_review") {
+		t.Fatalf("memory blocks = %q / %q, want injected ID", gotSubtaskMemory, gotAggregateMemory)
+	}
 }
 
 func TestReviewNodeRunsSeparateReviewForEachSubtask(t *testing.T) {

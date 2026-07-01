@@ -42,6 +42,10 @@ type clarificationOutput struct {
 type clarificationAgentExecutor func(context.Context, string, clarificationRun) clarificationOutput
 
 func RunClarification(ctx context.Context, repoRoot, userInput string) (string, error) {
+	return RunClarificationWithMemory(ctx, repoRoot, userInput, "")
+}
+
+func RunClarificationWithMemory(ctx context.Context, repoRoot, userInput, memoryBlock string) (string, error) {
 	runID := time.Now().Format("20060102-150405")
 	runRoot := filepath.Join(repoRoot, ".workflow", "runs", runID)
 	nodeDir := filepath.Join(runRoot, "node1")
@@ -57,8 +61,8 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 	}, nil)
 
 	runs := []clarificationRun{
-		newClarificationRun(runID, nodeDir, "codex", userInput, 1),
-		newClarificationRun(runID, nodeDir, "claude-code", userInput, 2),
+		newClarificationRun(runID, nodeDir, "codex", userInput, memoryBlock, 1),
+		newClarificationRun(runID, nodeDir, "claude-code", userInput, memoryBlock, 2),
 	}
 
 	// 注册每个 agent session，以便 WaitForApproval 能找到对应 session
@@ -131,13 +135,13 @@ func RunClarification(ctx context.Context, repoRoot, userInput string) (string, 
 	return target, err
 }
 
-func newClarificationRun(runID, nodeDir, agentType, userInput string, index int) clarificationRun {
+func newClarificationRun(runID, nodeDir, agentType, userInput, memoryBlock string, index int) clarificationRun {
 	sessionID := NewPTYSessionID(runID, "node1", agentType, index)
 	base := agentType
 	return clarificationRun{
 		AgentType:  agentType,
 		SessionID:  sessionID,
-		Prompt:     renderClarificationPrompt(agentType, userInput),
+		Prompt:     prependRelevantMemory(memoryBlock, renderClarificationPrompt(agentType, userInput)),
 		PromptFile: filepath.Join(nodeDir, base+".prompt.md"),
 		OutFile:    filepath.Join(nodeDir, base+".out.md"),
 		ExitFile:   filepath.Join(nodeDir, base+".exit"),

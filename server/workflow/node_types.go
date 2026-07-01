@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/ming-agents/server/memory"
 )
 
 type NodeKind string
@@ -157,6 +159,8 @@ type NodeResult struct {
 	Status         NodeStatus
 	Values         map[string]any
 	OutputPaths    []string
+	BriefAudit     *memory.BriefAudit
+	BriefPath      string
 	Error          string
 	BlockedItems   []BlockedItem
 	FailureClass   FailureClass

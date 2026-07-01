@@ -51,6 +51,10 @@ type planningAgentOutput struct {
 type planningAgentExecutor func(context.Context, string, planningAgentRun) planningAgentOutput
 
 func RunPlanning(ctx context.Context, repoRoot, clarFile string) (*Plan, error) {
+	return RunPlanningWithMemory(ctx, repoRoot, clarFile, "")
+}
+
+func RunPlanningWithMemory(ctx context.Context, repoRoot, clarFile, memoryBlock string) (*Plan, error) {
 	data, err := os.ReadFile(clarFile)
 	if err != nil {
 		return nil, fmt.Errorf("read clarification file: %w", err)
@@ -67,7 +71,7 @@ func RunPlanning(ctx context.Context, repoRoot, clarFile string) (*Plan, error) 
 	nodeSession := WorkflowNodeSession(repoRoot, runID, "node2")
 	_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationStarted})
 
-	prompt := renderPlanningPrompt(clar)
+	prompt := prependRelevantMemory(memoryBlock, renderPlanningPrompt(clar))
 	nodeDir := filepath.Join(repoRoot, ".workflow", "runs", runID, "node2")
 	if err := os.MkdirAll(nodeDir, 0755); err != nil {
 		_ = EmitNodeNotification(nodeSession.ID, NodeNotification{RunID: runID, NodeName: "node2", Status: NotificationFailed})

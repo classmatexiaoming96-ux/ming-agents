@@ -36,6 +36,29 @@ func TestEvaluationNodePrepareRollback(t *testing.T) {
 	}
 }
 
+func TestEvaluationNodeExecuteReturnsBriefAudit(t *testing.T) {
+	prevRun := runEvaluationWithPlanForNode
+	runEvaluationWithPlanForNode = func(ctx context.Context, repoRoot, runID string, plan *Plan) (*EvaluationResult, error) {
+		return &EvaluationResult{RunID: runID, Passed: true}, nil
+	}
+	defer func() { runEvaluationWithPlanForNode = prevRun }()
+
+	result, err := (&evaluationNode{}).Execute(context.Background(), NodeRequest{
+		RunID:    "run-node-eval-brief",
+		RepoRoot: t.TempDir(),
+		Spec:     NodeSpec{ID: "evaluation", Kind: NodeKindEvaluation},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.BriefAudit == nil {
+		t.Fatal("BriefAudit = nil, want audit")
+	}
+	if result.BriefPath == "" {
+		t.Fatal("BriefPath empty")
+	}
+}
+
 func TestRunEvaluationWritesEvaluationJSONAndClassifiesFailure(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	runID := "run-eval"

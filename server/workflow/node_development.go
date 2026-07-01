@@ -7,6 +7,8 @@ import (
 
 type developmentNode struct{}
 
+var runDevelopmentOnlyWithMemoryForNode = RunDevelopmentOnlyWithMemory
+
 func (n *developmentNode) Kind() NodeKind { return NodeKindDevelopment }
 
 func (n *developmentNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
@@ -44,9 +46,28 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 	if err := json.Unmarshal(planJSON, &plan); err != nil {
 		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
 	}
-	state, err := RunDevelopmentOnly(ctx, req.RepoRoot, &plan)
+	briefs := map[string]*BriefInjectResult{}
+	memoryBySubtask := map[string]string{}
+	for _, st := range plan.Subtasks {
+		brief, err := InjectBrief(ctx, BriefInjectContext{
+			RunID:     req.RunID,
+			RepoRoot:  req.RepoRoot,
+			Kind:      req.Spec.Kind,
+			Query:     developmentBriefQuery(st),
+			AuditName: st.ID,
+		})
+		if err != nil {
+			return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+		}
+		if brief != nil {
+			briefs[st.ID] = brief
+			memoryBySubtask[st.ID] = brief.Markdown
+		}
+	}
+	firstBrief := firstBriefResult(briefs, plan.Subtasks)
+	state, err := runDevelopmentOnlyWithMemoryForNode(ctx, req.RepoRoot, &plan, memoryBySubtask)
 	if err != nil {
-		return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, err
+		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, firstBrief), err
 	}
 	subtaskResults := any([]*SubtaskResult{})
 	if state.Details != nil {
@@ -54,9 +75,17 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 			subtaskResults = results
 		}
 	}
-	return &NodeResult{
+	result := &NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,
 		Values: map[string]any{"state": state, "subtask_results": subtaskResults},
-	}, nil
+	}
+	if len(briefs) > 0 {
+		paths := map[string]string{}
+		for id, brief := range briefs {
+			paths[id] = brief.Path
+		}
+		result.Values["brief_paths"] = paths
+	}
+	return nodeResultWithBrief(result, firstBrief), nil
 }

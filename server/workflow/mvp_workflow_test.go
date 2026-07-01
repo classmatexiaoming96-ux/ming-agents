@@ -1179,7 +1179,7 @@ done
 		approvalDone <- ApproveSession(agent.Session.ID, "subtask:api", "approved")
 	}()
 
-	result := runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agent, plan.Subtasks[0], 1, 0, nil)
+	result := runDevelopmentSubtask(ctx, repoRoot, nodeDir, plan, agent, plan.Subtasks[0], 1, 0, nil, "")
 	if err := <-approvalDone; err != nil {
 		t.Fatalf("approval error = %v", err)
 	}
