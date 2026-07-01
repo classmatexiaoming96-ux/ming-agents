@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadSummary_ParsesAutoMindInput(t *testing.T) {
@@ -150,6 +151,68 @@ func TestSummaryClassifier_RejectsUnknownKind(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "kind") {
 		t.Fatalf("Classify() error = %v, want kind rejection", err)
+	}
+}
+
+func TestIngestDurableLessons_DryRunDoesNotWriteL2(t *testing.T) {
+	vault := useTempVault(t)
+	lessons := []SummaryItem{{
+		Kind:  SummaryKindDurableLesson,
+		Title: "Prefer focused receiver tests",
+		Body:  "Run package tests before wiring the CLI because receiver behavior is isolated.",
+		Tags:  []string{"tests"},
+	}}
+
+	routes, err := IngestDurableLessons("ming-agents", lessons, false)
+	if err != nil {
+		t.Fatalf("IngestDurableLessons() error = %v", err)
+	}
+	if len(routes) != 1 || routes[0].Written {
+		t.Fatalf("routes = %+v, want one dry-run route", routes)
+	}
+	if _, err := os.Stat(filepath.Join(vault, "notes", "ming-agents")); !os.IsNotExist(err) {
+		t.Fatalf("notes dir exists after dry-run: err=%v", err)
+	}
+}
+
+func TestIngestDurableLessons_AcceptWritesL2WithProvenance(t *testing.T) {
+	vault := useTempVault(t)
+	fixedNow(t, time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC))
+	lessons := []SummaryItem{{
+		Kind:        SummaryKindDurableLesson,
+		Title:       "Prefer focused receiver tests",
+		Body:        "Run package tests before wiring the CLI because receiver behavior is isolated.",
+		Tags:        []string{"tests"},
+		EvidenceRef: ".automind/tasks/001/log.md",
+	}}
+
+	routes, err := IngestDurableLessons("ming-agents", lessons, true)
+	if err != nil {
+		t.Fatalf("IngestDurableLessons() error = %v", err)
+	}
+	if len(routes) != 1 || !routes[0].Written {
+		t.Fatalf("routes = %+v, want one written route", routes)
+	}
+	if filepath.Dir(routes[0].Path) != filepath.Join(vault, "notes", "ming-agents") {
+		t.Fatalf("path = %s, want L2 notes project dir", routes[0].Path)
+	}
+
+	raw, err := os.ReadFile(routes[0].Path)
+	if err != nil {
+		t.Fatalf("read memory: %v", err)
+	}
+	mem, body, err := parseFrontmatter(string(raw))
+	if err != nil {
+		t.Fatalf("parse memory: %v", err)
+	}
+	if body != lessons[0].Body {
+		t.Fatalf("body = %q, want %q", body, lessons[0].Body)
+	}
+	if mem.Layer != "l2" || mem.SourceSystem != "automind" || mem.SourceGranularity != "task_summary" {
+		t.Fatalf("provenance = layer %q source_system %q granularity %q", mem.Layer, mem.SourceSystem, mem.SourceGranularity)
+	}
+	if mem.ID == "" || !strings.Contains(mem.ID, "automind_") {
+		t.Fatalf("id = %q, want automind-derived id", mem.ID)
 	}
 }
 

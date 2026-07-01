@@ -1,8 +1,12 @@
 package memory
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -43,6 +47,14 @@ type ClassifiedSummary struct {
 
 type SummaryClassifier struct{}
 
+type SummaryRoute struct {
+	Kind    string `json:"kind"`
+	Title   string `json:"title"`
+	Target  string `json:"target"`
+	Path    string `json:"path,omitempty"`
+	Written bool   `json:"written"`
+}
+
 func (SummaryClassifier) Classify(input *SummaryInput) (*ClassifiedSummary, error) {
 	if input == nil {
 		return nil, fmt.Errorf("summary input is required")
@@ -61,6 +73,39 @@ func (SummaryClassifier) Classify(input *SummaryInput) (*ClassifiedSummary, erro
 		}
 	}
 	return &classified, nil
+}
+
+func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([]SummaryRoute, error) {
+	if project == "" {
+		return nil, fmt.Errorf("project is required")
+	}
+	routes := make([]SummaryRoute, 0, len(lessons))
+	for _, lesson := range lessons {
+		if lesson.Kind != SummaryKindDurableLesson {
+			return nil, fmt.Errorf("durable lesson kind %q is not supported", lesson.Kind)
+		}
+		id := summaryMemoryID(project, lesson.Title)
+		targetPath := filepath.Join(VaultDir, "notes", project, id+".md")
+		route := SummaryRoute{
+			Kind:   lesson.Kind,
+			Title:  lesson.Title,
+			Target: "l2",
+			Path:   targetPath,
+		}
+		if !accept {
+			routes = append(routes, route)
+			continue
+		}
+		mem := summaryMemory(project, lesson, id, "l2")
+		path, err := writeMemory(mem, filepath.Join(VaultDir, "notes", project))
+		if err != nil {
+			return nil, err
+		}
+		route.Path = path
+		route.Written = true
+		routes = append(routes, route)
+	}
+	return routes, nil
 }
 
 func LoadSummary(path string) (*SummaryInput, error) {
@@ -90,4 +135,35 @@ func LoadSummary(path string) (*SummaryInput, error) {
 		}
 	}
 	return &input, nil
+}
+
+func summaryMemory(project string, item SummaryItem, id, layer string) Memory {
+	tags := append([]string(nil), item.Tags...)
+	return Memory{
+		ID:                id,
+		Type:              "decision",
+		Project:           project,
+		Tags:              tags,
+		Title:             item.Title,
+		Score:             5,
+		Novelty:           1,
+		Specificity:       1,
+		Reusability:       1,
+		CreatedAt:         now().Format(dateLayout),
+		ExpiresAt:         neverExpires,
+		Status:            "active",
+		Source:            "automind",
+		Links:             []string{},
+		Layer:             layer,
+		SourceSystem:      "automind",
+		SourceGranularity: "task_summary",
+		EvidenceRef:       item.EvidenceRef,
+		Inject:            "query",
+		Body:              item.Body,
+	}
+}
+
+func summaryMemoryID(project, title string) string {
+	sum := sha256.Sum256([]byte(project + "\x00" + strings.TrimSpace(title)))
+	return "automind_" + hex.EncodeToString(sum[:])[:16]
 }

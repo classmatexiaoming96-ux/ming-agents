@@ -119,6 +119,12 @@ type Memory struct {
 	Status      string   `yaml:"status"` // active/archived/superseded
 	Source      string   `yaml:"source"`
 	Links       []string `yaml:"links"`
+	Layer       string   `yaml:"layer,omitempty"`
+
+	SourceSystem      string `yaml:"source_system,omitempty"`
+	SourceGranularity string `yaml:"source_granularity,omitempty"`
+	EvidenceRef       string `yaml:"evidence_ref,omitempty"`
+	CrossProject      bool   `yaml:"_cross_project,omitempty"`
 
 	// §SHRIMP inject controls whether this memory is auto-injected into context.
 	// "always" = inject on every recall regardless of query (token-capped by budget).
