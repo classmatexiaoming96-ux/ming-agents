@@ -110,6 +110,18 @@ func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportRes
 		return result, nil
 	}
 
+	receiver, err := NewRunBundleReceiver(input.Project, input.RunID)
+	if err != nil {
+		return nil, err
+	}
+	frozen, err := receiver.IsFrozen()
+	if err != nil {
+		return nil, err
+	}
+	if frozen {
+		return nil, ErrBundleFrozen
+	}
+
 	l2Routes, err := IngestDurableLessons(input.Project, classified.DurableLessons, true)
 	if err != nil {
 		return nil, err
@@ -128,6 +140,11 @@ func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportRes
 			return nil, err
 		}
 		result.Routes = append(result.Routes, inboxRoutes...)
+	}
+	if len(classified.RawEvidence) == 0 {
+		if err := receiver.Freeze(); err != nil {
+			return nil, err
+		}
 	}
 	result.countRoutes()
 	return result, nil

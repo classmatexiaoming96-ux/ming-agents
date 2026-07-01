@@ -118,6 +118,30 @@ func (r *RunBundleReceiver) Root() string {
 	return r.root
 }
 
+func (r *RunBundleReceiver) IsFrozen() (bool, error) {
+	if r == nil {
+		return false, errors.New("nil run bundle receiver")
+	}
+	if r.frozen {
+		return true, nil
+	}
+	if _, err := os.Stat(filepath.Join(r.root, "_frozen")); err == nil {
+		r.frozen = true
+		return true, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	manifest, err := r.loadManifest()
+	if err != nil {
+		return false, err
+	}
+	if manifest.State == "frozen" {
+		r.frozen = true
+		return true, nil
+	}
+	return false, nil
+}
+
 func (r *RunBundleReceiver) ReceivePhaseReuse(phase, content string) error {
 	return r.receivePhaseReuse(phase, []byte(content), "")
 }
@@ -415,21 +439,11 @@ func (r *RunBundleReceiver) ensureOpen() error {
 	if r == nil {
 		return errors.New("nil run bundle receiver")
 	}
-	if r.frozen {
-		return ErrBundleFrozen
-	}
-	if _, err := os.Stat(filepath.Join(r.root, "_frozen")); err == nil {
-		r.frozen = true
-		return ErrBundleFrozen
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	manifest, err := r.loadManifest()
+	frozen, err := r.IsFrozen()
 	if err != nil {
 		return err
 	}
-	if manifest.State == "frozen" {
-		r.frozen = true
+	if frozen {
 		return ErrBundleFrozen
 	}
 	return nil

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,6 +215,62 @@ func TestIngestDurableLessons_AcceptWritesL2WithProvenance(t *testing.T) {
 	}
 	if mem.ID == "" || !strings.Contains(mem.ID, "automind_") {
 		t.Fatalf("id = %q, want automind-derived id", mem.ID)
+	}
+}
+
+func TestImportSummary_DurableOnlyRejectsDuplicateWithoutRewritingL2(t *testing.T) {
+	useTempVault(t)
+	firstImport := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	secondImport := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+	summary := writeSummaryFixture(t, `
+run_id: run-durable-only
+project: ming-agents
+source_system: automind
+items:
+  - kind: durable_lesson
+    title: Keep summary imports one-shot
+    body: Durable only summaries still need an import marker because replay resets metadata.
+    tags: [receiver]
+`)
+
+	fixedNow(t, firstImport)
+	result, err := ImportSummary(summary, SummaryImportOptions{Accept: true})
+	if err != nil {
+		t.Fatalf("first ImportSummary() error = %v", err)
+	}
+	if result.L2 != 1 || result.L3 != 0 || result.Inbox != 0 {
+		t.Fatalf("first ImportSummary() result = %+v, want one L2 route only", result)
+	}
+
+	memPath := result.Routes[0].Path
+	raw, err := os.ReadFile(memPath)
+	if err != nil {
+		t.Fatalf("read first memory: %v", err)
+	}
+	firstMem, _, err := parseFrontmatter(string(raw))
+	if err != nil {
+		t.Fatalf("parse first memory: %v", err)
+	}
+	if firstMem.CreatedAt != firstImport.Format(dateLayout) {
+		t.Fatalf("first CreatedAt = %q, want %q", firstMem.CreatedAt, firstImport.Format(dateLayout))
+	}
+
+	fixedNow(t, secondImport)
+	_, err = ImportSummary(summary, SummaryImportOptions{Accept: true})
+	if !errors.Is(err, ErrBundleFrozen) {
+		t.Fatalf("second ImportSummary() error = %v, want ErrBundleFrozen", err)
+	}
+
+	raw, err = os.ReadFile(memPath)
+	if err != nil {
+		t.Fatalf("read memory after duplicate: %v", err)
+	}
+	secondMem, _, err := parseFrontmatter(string(raw))
+	if err != nil {
+		t.Fatalf("parse memory after duplicate: %v", err)
+	}
+	if secondMem.CreatedAt != firstMem.CreatedAt {
+		t.Fatalf("CreatedAt after duplicate = %q, want preserved %q", secondMem.CreatedAt, firstMem.CreatedAt)
 	}
 }
 
