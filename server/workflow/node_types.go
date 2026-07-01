@@ -147,12 +147,18 @@ type NodeOutput struct {
 }
 
 type NodeResult struct {
-	NodeID       string
-	Status       NodeStatus
-	Values       map[string]any
-	OutputPaths  []string
-	Error        string
-	BlockedItems []BlockedItem
+	NodeID         string
+	Status         NodeStatus
+	Values         map[string]any
+	OutputPaths    []string
+	Error          string
+	BlockedItems   []BlockedItem
+	FailureClass   FailureClass
+	RetryAdvice    string
+	NextAction     string
+	RetryExhausted bool
+	ArtifactRefs   []ArtifactRef
+	AttemptCount   int
 }
 
 type NodeSpec struct {

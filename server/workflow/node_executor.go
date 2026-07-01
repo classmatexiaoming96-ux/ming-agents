@@ -85,12 +85,7 @@ func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSp
 		normalizeDevelopmentOutput(ns, output)
 		outputs[ns.ID] = output
 		statuses[ns.ID] = result.Status
-		e.writeState(repoRoot, runID, statuses, map[string]any{
-			"node_id":       result.NodeID,
-			"error":         result.Error,
-			"blocked_items": result.BlockedItems,
-			"output_paths":  result.OutputPaths,
-		})
+		e.writeState(repoRoot, runID, statuses, nodeStateDetails(result))
 
 		if err != nil {
 			return outputs, fmt.Errorf("node %s (%s): %w", ns.ID, ns.Kind, err)
@@ -154,6 +149,34 @@ func nodeOutputFromResult(nodeID string, result *NodeResult) NodeOutput {
 		Values:  result.Values,
 		Outputs: outputs,
 	}
+}
+
+func nodeStateDetails(result *NodeResult) map[string]any {
+	details := map[string]any{
+		"node_id":       result.NodeID,
+		"error":         result.Error,
+		"blocked_items": result.BlockedItems,
+		"output_paths":  result.OutputPaths,
+	}
+	if result.FailureClass != "" {
+		details["failure_class"] = result.FailureClass
+	}
+	if result.RetryAdvice != "" {
+		details["retry_advice"] = result.RetryAdvice
+	}
+	if result.NextAction != "" {
+		details["next_action"] = result.NextAction
+	}
+	if result.RetryExhausted {
+		details["retry_exhausted"] = result.RetryExhausted
+	}
+	if len(result.ArtifactRefs) > 0 {
+		details["artifact_refs"] = result.ArtifactRefs
+	}
+	if result.AttemptCount > 0 {
+		details["attempt_count"] = result.AttemptCount
+	}
+	return details
 }
 
 func normalizeDevelopmentOutput(spec NodeSpec, output NodeOutput) {
