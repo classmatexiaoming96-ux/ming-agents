@@ -529,7 +529,10 @@ func Brief(project, query string, budget Budget) (string, BriefAudit, error) {
 	}
 	var alwaysList []Memory
 	for _, m := range always {
-		if m.Inject == "always" {
+		// The always-inject path must respect promotion authority just like
+		// query recall: a candidate/under_review/rejected memory (or l2_inbox)
+		// must never be force-injected into context.
+		if m.Inject == "always" && isRecallVisibleMemory(m) {
 			alwaysList = append(alwaysList, m)
 		}
 	}
@@ -1170,11 +1173,14 @@ func Stats() (total, active, archived, superseded int, byType map[string]int, er
 	}
 	byType = map[string]int{}
 	for _, m := range all {
-		if !isRecallVisibleMemory(m) {
-			continue
-		}
 		switch m.Status {
 		case "active":
+			// Only authoritative (promoted) memories count as active; candidates,
+			// under_review, rejected, and the l2_inbox namespace are excluded so
+			// stats never overstate authoritative recall content.
+			if !isRecallVisibleMemory(m) {
+				continue
+			}
 			active++
 			byType[m.Type]++
 		case "archived":
@@ -1187,5 +1193,5 @@ func Stats() (total, active, archived, superseded int, byType map[string]int, er
 }
 
 func isRecallVisibleMemory(m Memory) bool {
-	return m.Layer != "l2_inbox"
+	return m.Status == "active" && IsRecallVisiblePromotionState(ResolvePromotionState(m), m.Layer)
 }
