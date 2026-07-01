@@ -83,6 +83,17 @@ func mirrorReuseAckToRunBundle(req NodeRequest, phase string, ack ReuseAck) {
 	if receiver == nil {
 		return
 	}
+	mirrorReuseAck(receiver, req, phase, ack)
+}
+
+func mirrorReuseAck(receiver *memory.RunBundleReceiver, req NodeRequest, phase string, ack ReuseAck) {
+	if ack.Phase != "" && ack.Phase != phase {
+		reason := "ack phase " + ack.Phase + " does not match target phase " + phase
+		if err := receiver.RecordSkippedArtifact("reuse_ack", reason); err != nil {
+			log.Printf("RunBundleReceiver reuse-ack skip status failed: %v", err)
+		}
+		return
+	}
 	bundleAck := memory.ReuseAck{
 		RunID:     firstNonEmpty(ack.RunID, req.RunID),
 		Phase:     firstNonEmpty(ack.Phase, phase),

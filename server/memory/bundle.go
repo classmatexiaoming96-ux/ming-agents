@@ -48,6 +48,7 @@ type runBundleArtifactStatus struct {
 	Status    string   `json:"status"`
 	Files     []string `json:"files,omitempty"`
 	Error     string   `json:"error,omitempty"`
+	Reason    string   `json:"reason,omitempty"`
 	UpdatedAt string   `json:"updated_at"`
 }
 
@@ -402,8 +403,13 @@ func (r *RunBundleReceiver) recordReceiveStatus(artifact string, files []string,
 }
 
 func (r *RunBundleReceiver) recordSkippedStatus(artifact string) error {
+	return r.RecordSkippedArtifact(artifact, "")
+}
+
+func (r *RunBundleReceiver) RecordSkippedArtifact(artifact, reason string) error {
 	return r.writeReceiverStatus(artifact, runBundleArtifactStatus{
 		Status:    "skipped",
+		Reason:    reason,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	})
 }

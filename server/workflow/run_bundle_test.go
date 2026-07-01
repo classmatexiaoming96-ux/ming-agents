@@ -51,6 +51,50 @@ func TestRunBundleReceiver_FreezeOnRunEnd(t *testing.T) {
 	}
 }
 
+func TestMirrorReuseAck_RejectsPhaseMismatch(t *testing.T) {
+	oldVault := memory.VaultDir
+	memory.VaultDir = t.TempDir()
+	t.Cleanup(func() { memory.VaultDir = oldVault })
+
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll repoRoot error = %v", err)
+	}
+	req := NodeRequest{
+		RunID:    "run-ack",
+		RepoRoot: repoRoot,
+		Spec:     NodeSpec{ID: "planning", Kind: NodeKindPlanning},
+	}
+
+	mirrorReuseAckToRunBundle(req, "planning", ReuseAck{
+		RunID:    "run-ack",
+		Phase:    "clarification",
+		Accepted: true,
+	})
+
+	root, err := memory.RunBundlePath("repo", "run-ack")
+	if err != nil {
+		t.Fatalf("RunBundlePath error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "reuse-ack", "planning.json")); !os.IsNotExist(err) {
+		t.Fatalf("phase-mismatched reuse ack write err = %v, want not exist", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "receiver-status.json"))
+	if err != nil {
+		t.Fatalf("receiver-status.json missing: %v", err)
+	}
+	var status map[string]struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatalf("receiver-status.json decode error = %v", err)
+	}
+	if status["reuse_ack"].Status != "skipped" || status["reuse_ack"].Reason == "" {
+		t.Fatalf("reuse_ack status = %+v, want skipped with reason", status["reuse_ack"])
+	}
+}
+
 func TestRunBundleEndToEnd_IsolatedFromL2AndArchive(t *testing.T) {
 	oldVault := memory.VaultDir
 	memory.VaultDir = t.TempDir()
