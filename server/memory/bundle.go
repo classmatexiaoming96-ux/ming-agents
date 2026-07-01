@@ -16,6 +16,11 @@ import (
 
 const RunBundleLargeFileThreshold = 5 * 1024 * 1024
 
+var (
+	ErrAckContextMismatch      = errors.New("reuse ack context mismatch")
+	ErrArtifactContextMismatch = errors.New("artifact context mismatch")
+)
+
 type NodeKind string
 
 type ReuseAck struct {
@@ -154,6 +159,9 @@ func (r *RunBundleReceiver) ReceiveReuseAck(phase string, ack ReuseAck) error {
 		if ack.Phase == "" {
 			ack.Phase = phase
 		}
+		if err := r.validateAgainstContext("reuse_ack", ack.RunID, ack.Phase, phase, ErrAckContextMismatch); err != nil {
+			return err
+		}
 		if ack.Timestamp.IsZero() {
 			ack.Timestamp = time.Now().UTC()
 		}
@@ -173,11 +181,21 @@ func (r *RunBundleReceiver) ReceiveBriefAudit(kind NodeKind, audit *BriefAudit, 
 		if audit == nil {
 			return nil
 		}
+		auditCopy := *audit
+		if auditCopy.RunID == "" {
+			auditCopy.RunID = r.runID
+		}
+		if auditCopy.Kind == "" {
+			auditCopy.Kind = string(kind)
+		}
+		if err := r.validateAgainstContext("brief_audit", auditCopy.RunID, auditCopy.Kind, string(kind), ErrArtifactContextMismatch); err != nil {
+			return err
+		}
 		name := string(kind) + "-brief"
 		if auditName != "" {
 			name = safeBundleName(auditName) + "-brief"
 		}
-		written, err := r.writeJSONArtifact(filepath.Join("brief-audit", name+".json"), audit)
+		written, err := r.writeJSONArtifact(filepath.Join("brief-audit", name+".json"), auditCopy)
 		files = append(files, written)
 		return err
 	}()
@@ -248,12 +266,21 @@ func (r *RunBundleReceiver) ReceiveAutoMindSummary(rawContent []byte, format str
 	return r.receiveAutoMindSummary(rawContent, format, "")
 }
 
-func (r *RunBundleReceiver) ReceiveAutoMindSummaryFromSource(sourcePath string, format string) error {
-	source, err := filepath.Abs(sourcePath)
-	if err != nil {
-		return err
+func (r *RunBundleReceiver) ReceiveAutoMindSummaryFromSource(sourcePath string, format string, allowedRoots ...[]string) error {
+	var source string
+	var err error
+	if len(allowedRoots) > 0 {
+		source, err = cleanAllowedSourcePath(sourcePath, allowedRoots[0])
+		if err != nil {
+			return err
+		}
+	} else {
+		source, err = filepath.Abs(sourcePath)
+		if err != nil {
+			return err
+		}
+		source = filepath.Clean(source)
 	}
-	source = filepath.Clean(source)
 	data, err := os.ReadFile(source)
 	if err != nil {
 		return err
@@ -364,6 +391,16 @@ func (r *RunBundleReceiver) VerifyIntegrity() error {
 		if got := sha256Hex(data); got != artifact.SHA256 {
 			return fmt.Errorf("artifact %s sha256 = %s, want %s", artifact.Path, got, artifact.SHA256)
 		}
+	}
+	return nil
+}
+
+func (r *RunBundleReceiver) validateAgainstContext(kind, runID, actual string, expected string, mismatch error) error {
+	if runID != "" && runID != r.runID {
+		return fmt.Errorf("%w: %s run_id %q does not match bundle run_id %q", mismatch, kind, runID, r.runID)
+	}
+	if actual != "" && actual != expected {
+		return fmt.Errorf("%w: %s phase %q does not match %q", mismatch, kind, actual, expected)
 	}
 	return nil
 }

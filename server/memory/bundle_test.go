@@ -3,6 +3,7 @@ package memory
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +87,18 @@ func TestRunBundleReceiver_ReceiveReuseAck(t *testing.T) {
 	}
 }
 
+func TestReceiveReuseAck_RejectsContextMismatch(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+
+	err := receiver.ReceiveReuseAck("review", ReuseAck{RunID: "other-run", Phase: "review", Accepted: true})
+	if !errors.Is(err, ErrAckContextMismatch) {
+		t.Fatalf("ReceiveReuseAck error = %v, want ErrAckContextMismatch", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(receiver.Root(), "reuse-ack", "review.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("mismatched reuse ack write err = %v, want not exist", statErr)
+	}
+}
+
 func TestRunBundleReceiver_ReceiveBriefAudit(t *testing.T) {
 	receiver := newTestRunBundleReceiver(t)
 	audit := &BriefAudit{InjectedIDs: []string{"mem-1"}}
@@ -103,6 +116,19 @@ func TestRunBundleReceiver_ReceiveBriefAudit(t *testing.T) {
 	}
 	if len(got.InjectedIDs) != 1 || got.InjectedIDs[0] != "mem-1" {
 		t.Fatalf("brief audit = %+v", got)
+	}
+}
+
+func TestReceiveBriefAudit_RejectsContextMismatch(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	audit := &BriefAudit{RunID: "other-run", Kind: "development", InjectedIDs: []string{"mem-1"}}
+
+	err := receiver.ReceiveBriefAudit(NodeKind("development"), audit, "")
+	if !errors.Is(err, ErrArtifactContextMismatch) {
+		t.Fatalf("ReceiveBriefAudit error = %v, want ErrArtifactContextMismatch", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(receiver.Root(), "brief-audit", "development-brief.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("mismatched brief audit write err = %v, want not exist", statErr)
 	}
 }
 

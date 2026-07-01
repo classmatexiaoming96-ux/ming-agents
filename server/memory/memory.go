@@ -134,10 +134,10 @@ type Memory struct {
 	LastExplicit string `yaml:"last_explicit,omitempty"`
 
 	// §7 implicit（Phase 3 依赖，提前加字段，本期不加逻辑）。
-	ImplicitHits  int     `yaml:"implicit_hits,omitempty"`
-	PendingScore  float64 `yaml:"pending_score,omitempty"`
-	LastImplicit  string  `yaml:"last_implicit,omitempty"`
-	PromotedHits  int     `yaml:"promoted_hits,omitempty"` // §13: implicit hits that survived probation → score
+	ImplicitHits int     `yaml:"implicit_hits,omitempty"`
+	PendingScore float64 `yaml:"pending_score,omitempty"`
+	LastImplicit string  `yaml:"last_implicit,omitempty"`
+	PromotedHits int     `yaml:"promoted_hits,omitempty"` // §13: implicit hits that survived probation → score
 
 	// §13 矛盾淘汰（Phase 0）。全部 omitempty：旧文件缺失 → 零值，向后兼容。
 	ConflictsWith    []string `yaml:"conflicts_with,omitempty"`    // 待裁决冲突伙伴 id（§7 在线标记写入）
@@ -484,13 +484,15 @@ const DefaultBudgetTokens = 32000
 
 // BriefAudit records what Brief did for observability.
 type BriefAudit struct {
-	AlwaysCount   int      // how many inject=always memories were injected
-	QueryCount     int      // how many query-matched memories were injected
-	TotalTokens    int      // rough token estimate of injected content
-	Truncated      bool     // true if budget forced an early stop
-	TruncatedAt    string   // id of the memory where truncation occurred
-	ConflictsDownrank int   // how many memories were down-ranked due to conflicts_with
-	InjectedIDs    []string // ids actually injected, in order (for the implicit-feedback loop)
+	RunID             string   // workflow run id that produced this audit
+	Kind              string   // workflow node kind that produced this audit
+	AlwaysCount       int      // how many inject=always memories were injected
+	QueryCount        int      // how many query-matched memories were injected
+	TotalTokens       int      // rough token estimate of injected content
+	Truncated         bool     // true if budget forced an early stop
+	TruncatedAt       string   // id of the memory where truncation occurred
+	ConflictsDownrank int      // how many memories were down-ranked due to conflicts_with
+	InjectedIDs       []string // ids actually injected, in order (for the implicit-feedback loop)
 }
 
 // Brief assembles a memory block for injection, subject to a token budget.
