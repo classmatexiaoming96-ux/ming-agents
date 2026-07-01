@@ -35,6 +35,34 @@ type SummaryItem struct {
 	EvidenceRef string   `yaml:"evidence_ref,omitempty"`
 }
 
+type ClassifiedSummary struct {
+	DurableLessons         []SummaryItem
+	RawEvidence            []SummaryItem
+	CrossProjectCandidates []SummaryItem
+}
+
+type SummaryClassifier struct{}
+
+func (SummaryClassifier) Classify(input *SummaryInput) (*ClassifiedSummary, error) {
+	if input == nil {
+		return nil, fmt.Errorf("summary input is required")
+	}
+	var classified ClassifiedSummary
+	for i, item := range input.Items {
+		switch item.Kind {
+		case SummaryKindDurableLesson:
+			classified.DurableLessons = append(classified.DurableLessons, item)
+		case SummaryKindRawEvidence:
+			classified.RawEvidence = append(classified.RawEvidence, item)
+		case SummaryKindCrossProjectCandidate:
+			classified.CrossProjectCandidates = append(classified.CrossProjectCandidates, item)
+		default:
+			return nil, fmt.Errorf("summary items[%d] kind %q is not supported", i, item.Kind)
+		}
+	}
+	return &classified, nil
+}
+
 func LoadSummary(path string) (*SummaryInput, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

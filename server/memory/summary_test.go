@@ -107,6 +107,52 @@ items:
 	}
 }
 
+func TestSummaryClassifier_ClassifiesItemsByKind(t *testing.T) {
+	input := &SummaryInput{
+		RunID:        "run-001",
+		Project:      "ming-agents",
+		SourceSystem: "automind",
+		Items: []SummaryItem{
+			{Kind: SummaryKindDurableLesson, Title: "lesson", Body: "body"},
+			{Kind: SummaryKindRawEvidence, Title: "raw", Body: "body"},
+			{Kind: SummaryKindCrossProjectCandidate, Title: "cross", Body: "body"},
+		},
+	}
+
+	classified, err := SummaryClassifier{}.Classify(input)
+	if err != nil {
+		t.Fatalf("Classify() error = %v", err)
+	}
+	if len(classified.DurableLessons) != 1 {
+		t.Fatalf("durable lessons = %d, want 1", len(classified.DurableLessons))
+	}
+	if len(classified.RawEvidence) != 1 {
+		t.Fatalf("raw evidence = %d, want 1", len(classified.RawEvidence))
+	}
+	if len(classified.CrossProjectCandidates) != 1 {
+		t.Fatalf("cross-project candidates = %d, want 1", len(classified.CrossProjectCandidates))
+	}
+}
+
+func TestSummaryClassifier_RejectsUnknownKind(t *testing.T) {
+	input := &SummaryInput{
+		RunID:        "run-001",
+		Project:      "ming-agents",
+		SourceSystem: "automind",
+		Items: []SummaryItem{
+			{Kind: "mystery", Title: "unknown", Body: "body"},
+		},
+	}
+
+	_, err := SummaryClassifier{}.Classify(input)
+	if err == nil {
+		t.Fatal("Classify() error = nil, want rejection")
+	}
+	if !strings.Contains(err.Error(), "kind") {
+		t.Fatalf("Classify() error = %v, want kind rejection", err)
+	}
+}
+
 func writeSummaryFixture(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "summary.yaml")
