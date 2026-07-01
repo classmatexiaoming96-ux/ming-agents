@@ -16,6 +16,10 @@ const (
 	SummaryKindDurableLesson         = "durable_lesson"
 	SummaryKindRawEvidence           = "raw_evidence"
 	SummaryKindCrossProjectCandidate = "cross_project_candidate"
+
+	SummaryExperienceDecision    = "decision"
+	SummaryExperienceSuccessPath = "success_path"
+	SummaryExperienceAvoidPath   = "avoid_path"
 )
 
 var allowedSummaryKinds = map[string]bool{
@@ -33,11 +37,12 @@ type SummaryInput struct {
 }
 
 type SummaryItem struct {
-	Kind        string   `yaml:"kind"`
-	Title       string   `yaml:"title"`
-	Body        string   `yaml:"body"`
-	Tags        []string `yaml:"tags,omitempty"`
-	EvidenceRef string   `yaml:"evidence_ref,omitempty"`
+	Kind           string   `yaml:"kind"`
+	Title          string   `yaml:"title"`
+	Body           string   `yaml:"body"`
+	ExperienceKind string   `yaml:"experience_kind,omitempty"`
+	Tags           []string `yaml:"tags,omitempty"`
+	EvidenceRef    string   `yaml:"evidence_ref,omitempty"`
 }
 
 type ClassifiedSummary struct {
@@ -329,6 +334,15 @@ func LoadSummary(path string) (*SummaryInput, error) {
 		if !allowedSummaryKinds[item.Kind] {
 			return nil, fmt.Errorf("summary items[%d] kind %q is not supported", i, item.Kind)
 		}
+		if item.ExperienceKind == "" {
+			input.Items[i].ExperienceKind = SummaryExperienceDecision
+			continue
+		}
+		switch item.ExperienceKind {
+		case SummaryExperienceDecision, SummaryExperienceSuccessPath, SummaryExperienceAvoidPath:
+		default:
+			return nil, fmt.Errorf("summary items[%d] experience_kind %q is not supported", i, item.ExperienceKind)
+		}
 	}
 	return &input, nil
 }
@@ -337,7 +351,7 @@ func summaryMemory(project string, item SummaryItem, id, layer string) Memory {
 	tags := append([]string(nil), item.Tags...)
 	return Memory{
 		ID:                id,
-		Type:              "decision",
+		Type:              summaryMemoryType(item),
 		Project:           project,
 		Tags:              tags,
 		Title:             item.Title,
@@ -362,6 +376,15 @@ func summaryMemory(project string, item SummaryItem, id, layer string) Memory {
 func summaryMemoryID(project, title string) string {
 	sum := sha256.Sum256([]byte(project + "\x00" + strings.TrimSpace(title)))
 	return "automind_" + hex.EncodeToString(sum[:])[:16]
+}
+
+func summaryMemoryType(item SummaryItem) string {
+	switch item.ExperienceKind {
+	case SummaryExperienceAvoidPath:
+		return "gotcha"
+	default:
+		return "decision"
+	}
 }
 
 func importSummarySource(importPath, summaryPath string) (string, []string, error) {

@@ -20,6 +20,7 @@ items:
   - kind: durable_lesson
     title: Build verification command
     body: Run go test ./memory/... because it covers receiver behavior.
+    experience_kind: avoid_path
     tags: [go, memory]
     evidence_ref: .automind/tasks/001/log.md
 `)
@@ -35,8 +36,28 @@ items:
 		t.Fatalf("items len = %d, want 1", len(input.Items))
 	}
 	item := input.Items[0]
-	if item.Kind != "durable_lesson" || item.Title != "Build verification command" || item.EvidenceRef == "" {
+	if item.Kind != "durable_lesson" || item.Title != "Build verification command" || item.ExperienceKind != "avoid_path" || item.EvidenceRef == "" {
 		t.Fatalf("unexpected item: %+v", item)
+	}
+}
+
+func TestLoadSummary_DefaultsMissingExperienceKindToDecision(t *testing.T) {
+	path := writeSummaryFixture(t, `
+run_id: run-001
+project: ming-agents
+source_system: automind
+items:
+  - kind: durable_lesson
+    title: Backward compatible lesson
+    body: Older AutoMind summaries did not include experience_kind.
+`)
+
+	input, err := LoadSummary(path)
+	if err != nil {
+		t.Fatalf("LoadSummary() error = %v", err)
+	}
+	if got := input.Items[0].ExperienceKind; got != "decision" {
+		t.Fatalf("ExperienceKind = %q, want decision", got)
 	}
 }
 
@@ -215,6 +236,47 @@ func TestIngestDurableLessons_AcceptWritesL2WithProvenance(t *testing.T) {
 	}
 	if mem.ID == "" || !strings.Contains(mem.ID, "automind_") {
 		t.Fatalf("id = %q, want automind-derived id", mem.ID)
+	}
+}
+
+func TestIngestDurableLessons_MapsExperienceKindToMemoryType(t *testing.T) {
+	useTempVault(t)
+	lessons := []SummaryItem{
+		{
+			Kind:           SummaryKindDurableLesson,
+			Title:          "Keep the success path",
+			Body:           "Repeat the command sequence that produced the stable result.",
+			ExperienceKind: "success_path",
+		},
+		{
+			Kind:           SummaryKindDurableLesson,
+			Title:          "Avoid brittle setup",
+			Body:           "Do not skip receiver setup because later writes depend on it.",
+			ExperienceKind: "avoid_path",
+		},
+	}
+
+	routes, err := IngestDurableLessons("ming-agents", lessons, true)
+	if err != nil {
+		t.Fatalf("IngestDurableLessons() error = %v", err)
+	}
+	got := map[string]string{}
+	for _, route := range routes {
+		raw, err := os.ReadFile(route.Path)
+		if err != nil {
+			t.Fatalf("read memory: %v", err)
+		}
+		mem, _, err := parseFrontmatter(string(raw))
+		if err != nil {
+			t.Fatalf("parse memory: %v", err)
+		}
+		got[mem.Title] = mem.Type
+	}
+	if got["Keep the success path"] != "decision" {
+		t.Fatalf("success_path type = %q, want decision", got["Keep the success path"])
+	}
+	if got["Avoid brittle setup"] != "gotcha" {
+		t.Fatalf("avoid_path type = %q, want gotcha", got["Avoid brittle setup"])
 	}
 }
 
