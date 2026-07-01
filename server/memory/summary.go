@@ -158,6 +158,31 @@ func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath st
 	return routes, nil
 }
 
+func IngestCrossProjectCandidates(candidates []SummaryItem) ([]SummaryRoute, error) {
+	routes := make([]SummaryRoute, 0, len(candidates))
+	targetDir := filepath.Join(VaultDir, "notes", "_inbox", "cross_project_candidates")
+	for _, candidate := range candidates {
+		if candidate.Kind != SummaryKindCrossProjectCandidate {
+			return nil, fmt.Errorf("cross-project candidate kind %q is not supported", candidate.Kind)
+		}
+		id := summaryMemoryID("_cross_project", candidate.Title)
+		mem := summaryMemory("_cross_project", candidate, id, "l2_inbox")
+		mem.CrossProject = true
+		path, err := writeMemory(mem, targetDir)
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, SummaryRoute{
+			Kind:    candidate.Kind,
+			Title:   candidate.Title,
+			Target:  "l2_inbox",
+			Path:    path,
+			Written: true,
+		})
+	}
+	return routes, nil
+}
+
 func LoadSummary(path string) (*SummaryInput, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

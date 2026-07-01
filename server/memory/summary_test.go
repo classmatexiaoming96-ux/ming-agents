@@ -273,6 +273,42 @@ func TestArchiveRawBundle_WritesSummaryBundleToL3(t *testing.T) {
 	}
 }
 
+func TestIngestCrossProjectCandidates_WritesInboxNotMainL2(t *testing.T) {
+	vault := useTempVault(t)
+	candidates := []SummaryItem{{
+		Kind:  SummaryKindCrossProjectCandidate,
+		Title: "Always verify generated summaries",
+		Body:  "Summary receivers should keep raw evidence because cross-project rules need curation.",
+		Tags:  []string{"curation"},
+	}}
+
+	routes, err := IngestCrossProjectCandidates(candidates)
+	if err != nil {
+		t.Fatalf("IngestCrossProjectCandidates() error = %v", err)
+	}
+	if len(routes) != 1 || !routes[0].Written {
+		t.Fatalf("routes = %+v, want one written route", routes)
+	}
+	wantDir := filepath.Join(vault, "notes", "_inbox", "cross_project_candidates")
+	if filepath.Dir(routes[0].Path) != wantDir {
+		t.Fatalf("path = %s, want %s", routes[0].Path, wantDir)
+	}
+	if strings.Contains(routes[0].Path, filepath.Join("notes", "ming-agents")) {
+		t.Fatalf("candidate wrote to main project L2: %s", routes[0].Path)
+	}
+	raw, err := os.ReadFile(routes[0].Path)
+	if err != nil {
+		t.Fatalf("read candidate: %v", err)
+	}
+	mem, _, err := parseFrontmatter(string(raw))
+	if err != nil {
+		t.Fatalf("parse candidate: %v", err)
+	}
+	if mem.Layer != "l2_inbox" || !mem.CrossProject || mem.SourceSystem != "automind" {
+		t.Fatalf("candidate metadata = %+v", mem)
+	}
+}
+
 func writeSummaryFixture(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "summary.yaml")
