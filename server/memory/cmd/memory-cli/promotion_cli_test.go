@@ -36,8 +36,10 @@ func seedCandidate(t *testing.T, id, project string, runIDs []string) {
 		t.Fatalf("mkdir candidate dir: %v", err)
 	}
 	var runs strings.Builder
+	var evidence strings.Builder
 	for _, r := range runIDs {
 		fmt.Fprintf(&runs, "\n- %s", r)
+		fmt.Fprintf(&evidence, "\n- runs/%s/%s/summary/items.jsonl#sha256=abc", project, r)
 	}
 	content := fmt.Sprintf(`---
 id: %s
@@ -49,11 +51,11 @@ title: Retry review node
 status: active
 layer: l2_inbox
 promotion_state: candidate
-evidence_ref: runs/%s/%s/summary/items.jsonl#sha256=abc
+evidence_refs:%s
 source_run_ids:%s
 ---
 Retry once before fallback when the review node times out.`,
-		id, project, project, runIDs[0], runs.String())
+		id, project, evidence.String(), runs.String())
 	if err := os.WriteFile(filepath.Join(dir, id+".md"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write candidate: %v", err)
 	}

@@ -7,10 +7,15 @@ import (
 	"time"
 )
 
-// writeCandidate writes an active l2_inbox candidate memory with the given
-// provenance and returns its id.
+// writeCandidate writes an active l2_inbox candidate memory with one evidence
+// ref per run id (each ref naming the run bundle that backs it) and returns its
+// id. The evidence argument seeds the legacy single EvidenceRef field.
 func writeCandidate(t *testing.T, id, project string, runIDs []string, evidence string) string {
 	t.Helper()
+	evidenceRefs := make([]string, 0, len(runIDs))
+	for _, r := range runIDs {
+		evidenceRefs = append(evidenceRefs, "runs/"+project+"/"+r+"/summary/items.jsonl#sha256=abc")
+	}
 	mem := Memory{
 		ID:                id,
 		Type:              "decision",
@@ -22,6 +27,7 @@ func writeCandidate(t *testing.T, id, project string, runIDs []string, evidence 
 		Layer:             "l2_inbox",
 		PromotionState:    PromotionCandidate,
 		EvidenceRef:       evidence,
+		EvidenceRefs:      evidenceRefs,
 		SourceRunIDs:      runIDs,
 		SourceSystem:      "automind",
 		SourceGranularity: "task_summary",

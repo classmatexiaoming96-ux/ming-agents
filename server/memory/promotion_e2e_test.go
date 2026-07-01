@@ -43,10 +43,13 @@ items:
 
 	// Back the candidate with three independent frozen runs so it is eligible.
 	runs := []string{"run-a", "run-b", "run-c"}
+	evidenceRefs := make([]string, 0, len(runs))
 	for _, r := range runs {
 		makeFrozenRun(t, "ming-agents", r)
+		evidenceRefs = append(evidenceRefs, "runs/ming-agents/"+r+"/summary/items.jsonl#sha256=abc")
 	}
 	cand.SourceRunIDs = runs
+	cand.EvidenceRefs = evidenceRefs
 	cand.Project = "ming-agents"
 	if _, err := writeMemory(cand, inboxDir); err != nil {
 		t.Fatalf("update candidate provenance: %v", err)

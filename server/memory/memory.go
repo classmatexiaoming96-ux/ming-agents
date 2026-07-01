@@ -121,10 +121,11 @@ type Memory struct {
 	Links       []string `yaml:"links"`
 	Layer       string   `yaml:"layer,omitempty"`
 
-	SourceSystem      string `yaml:"source_system,omitempty"`
-	SourceGranularity string `yaml:"source_granularity,omitempty"`
-	EvidenceRef       string `yaml:"evidence_ref,omitempty"`
-	CrossProject      bool   `yaml:"_cross_project,omitempty"`
+	SourceSystem      string   `yaml:"source_system,omitempty"`
+	SourceGranularity string   `yaml:"source_granularity,omitempty"`
+	EvidenceRef       string   `yaml:"evidence_ref,omitempty"`
+	EvidenceRefs      []string `yaml:"evidence_refs,omitempty"`
+	CrossProject      bool     `yaml:"_cross_project,omitempty"`
 
 	// §Phase 7 promotion authority workflow. Status answers "is this memory
 	// active in recall?"; PromotionState answers "where is this item in the

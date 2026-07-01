@@ -19,6 +19,10 @@ func makeFrozenRun(t *testing.T, project, runID string) {
 }
 
 func candidateMemory(project string, runIDs []string) Memory {
+	evidenceRefs := make([]string, 0, len(runIDs))
+	for _, r := range runIDs {
+		evidenceRefs = append(evidenceRefs, "runs/"+project+"/"+r+"/summary/items.jsonl#sha256=abc")
+	}
 	return Memory{
 		ID:                "cand-1",
 		Project:           project,
@@ -28,18 +32,11 @@ func candidateMemory(project string, runIDs []string) Memory {
 		Layer:             "l2_inbox",
 		Status:            "active",
 		PromotionState:    PromotionCandidate,
-		EvidenceRef:       "runs/ming-agents/" + firstOr(runIDs, "run-a") + "/summary/items.jsonl#sha256=abc",
+		EvidenceRefs:      evidenceRefs,
 		SourceRunIDs:      runIDs,
 		SourceSystem:      "automind",
 		SourceGranularity: "task_summary",
 	}
-}
-
-func firstOr(s []string, fallback string) string {
-	if len(s) > 0 {
-		return s[0]
-	}
-	return fallback
 }
 
 func TestEvaluateL3ToL2_ThreeIndependentFrozenRunsPass(t *testing.T) {
@@ -102,10 +99,32 @@ func TestEvaluateL3ToL2_MissingFieldsBlock(t *testing.T) {
 	if report.Eligible {
 		t.Fatalf("report = %+v, want ineligible", report)
 	}
-	for _, want := range []string{"missing_body", "missing_tags", "missing_evidence_ref", "missing_provenance"} {
+	for _, want := range []string{"missing_body", "missing_tags", "missing_evidence_ref"} {
 		if !containsReason(report.BlockingReasons, want) {
 			t.Fatalf("BlockingReasons = %v, want %s", report.BlockingReasons, want)
 		}
+	}
+}
+
+func TestEvaluateL3ToL2_OneEvidenceRefWithExtraRunIDsFails(t *testing.T) {
+	useTempVault(t)
+	runs := []string{"run-a", "run-b", "run-c"}
+	for _, r := range runs {
+		makeFrozenRun(t, "ming-agents", r)
+	}
+	// One evidence ref (run-a) but three source run ids: the two unevidenced
+	// runs must not count toward independence.
+	mem := candidateMemory("ming-agents", runs)
+	mem.EvidenceRefs = []string{"runs/ming-agents/run-a/summary/items.jsonl#sha256=abc"}
+	report := evaluateL3ToL2(mem, DefaultL3ToL2Threshold)
+	if report.Eligible {
+		t.Fatalf("report = %+v, want ineligible (only 1 evidenced run)", report)
+	}
+	if report.IndependentRuns != 1 {
+		t.Fatalf("IndependentRuns = %d, want 1", report.IndependentRuns)
+	}
+	if !containsReason(report.BlockingReasons, "insufficient_independent_runs:1<3") {
+		t.Fatalf("BlockingReasons = %v, want insufficient_independent_runs:1<3", report.BlockingReasons)
 	}
 }
 

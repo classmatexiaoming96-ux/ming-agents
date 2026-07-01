@@ -94,13 +94,21 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Merge any operator-supplied evidence/run ids so the promoted memory and the
-	// eligibility check see the complete provenance.
-	if len(req.EvidenceRefs) > 0 && source.EvidenceRef == "" {
-		source.EvidenceRef = req.EvidenceRefs[0]
+	// Merge any operator-supplied evidence so the promoted memory and the
+	// eligibility check see the complete provenance. SourceRunIDs are derived
+	// from the evidence refs (each ref names the run that backs it) so the count
+	// reflects evidenced runs, not bare run ids.
+	for _, ref := range req.EvidenceRefs {
+		source.EvidenceRefs = appendUnique(source.EvidenceRefs, ref)
 	}
-	for _, r := range req.SourceRunIDs {
-		source.SourceRunIDs = appendUnique(source.SourceRunIDs, r)
+	if source.EvidenceRef != "" {
+		source.EvidenceRefs = appendUnique(source.EvidenceRefs, source.EvidenceRef)
+	}
+	source.SourceRunIDs = nil
+	for _, ref := range allEvidenceRefs(source) {
+		if runID := runIDFromEvidenceRef(ref); runID != "" {
+			source.SourceRunIDs = appendUnique(source.SourceRunIDs, runID)
+		}
 	}
 
 	report := evaluateL3ToL2(source, DefaultL3ToL2Threshold)
@@ -112,7 +120,7 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 
 	// The single-run human override still requires a rationale, a human actor,
 	// and at least one evidence ref, per the high-severity incident path.
-	override := req.HumanOverride && req.Actor.Kind == "human" && source.EvidenceRef != ""
+	override := req.HumanOverride && req.Actor.Kind == "human" && len(allEvidenceRefs(source)) > 0
 	if !report.Eligible && !override {
 		if !req.DryRun {
 			eventID, auditErr := appendPromotionAudit(PromotionAuditEvent{
@@ -123,7 +131,7 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 				ToState:      fromState,
 				Outcome:      "blocked",
 				Rationale:    req.Rationale,
-				EvidenceRefs: nonEmpty(source.EvidenceRef),
+				EvidenceRefs: allEvidenceRefs(source),
 				SourceRunIDs: source.SourceRunIDs,
 			})
 			if auditErr != nil {
@@ -151,7 +159,7 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 		ToState:      PromotionPromoted,
 		Outcome:      "promoted",
 		Rationale:    req.Rationale,
-		EvidenceRefs: nonEmpty(source.EvidenceRef),
+		EvidenceRefs: allEvidenceRefs(source),
 		SourceRunIDs: source.SourceRunIDs,
 	})
 	if err != nil {
@@ -292,7 +300,7 @@ func ListPending(filter PromotionFilter) ([]PendingPromotion, error) {
 			out = append(out, PendingPromotion{
 				ID: m.ID, Project: m.Project, Title: m.Title,
 				FromLayer: "l3", ToLayer: "l2", State: state,
-				EvidenceRefs: nonEmpty(m.EvidenceRef), SourceRunIDs: m.SourceRunIDs,
+				EvidenceRefs: allEvidenceRefs(m), SourceRunIDs: m.SourceRunIDs,
 				Eligible: report.Eligible, ReadyForReview: report.ReadyForReview,
 				BlockingReasons: report.BlockingReasons,
 			})
@@ -303,7 +311,7 @@ func ListPending(filter PromotionFilter) ([]PendingPromotion, error) {
 			out = append(out, PendingPromotion{
 				ID: m.ID, Project: m.Project, Title: m.Title,
 				FromLayer: "l2", ToLayer: "l1", State: state,
-				EvidenceRefs: nonEmpty(m.EvidenceRef), SourceRunIDs: m.SourceRunIDs,
+				EvidenceRefs: allEvidenceRefs(m), SourceRunIDs: m.SourceRunIDs,
 				Eligible: true, ReadyForReview: true,
 			})
 		default:

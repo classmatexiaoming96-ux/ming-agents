@@ -2,6 +2,7 @@ package memory
 
 import (
 	"fmt"
+	"strings"
 )
 
 // PromotionThreshold captures the conservative L3 -> L2 defaults from the Phase 7
@@ -33,6 +34,67 @@ type EligibilityReport struct {
 	BlockingReasons []string
 	IndependentRuns int
 	Checks          map[string]bool
+}
+
+// allEvidenceRefs returns the full set of evidence refs backing a memory,
+// merging the legacy single EvidenceRef field with the EvidenceRefs slice and
+// de-duplicating. Older candidates that only set EvidenceRef keep working.
+func allEvidenceRefs(mem Memory) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || seen[ref] {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	add(mem.EvidenceRef)
+	for _, ref := range mem.EvidenceRefs {
+		add(ref)
+	}
+	return out
+}
+
+// runIDFromEvidenceRef extracts the L3 run id from an evidence ref of the form
+// "runs/{project}/{run_id}/...". It returns "" when the ref does not point at a
+// run bundle, so a bare log path cannot be miscounted as run provenance.
+func runIDFromEvidenceRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if i := strings.IndexAny(ref, "#?"); i >= 0 {
+		ref = ref[:i]
+	}
+	ref = strings.TrimPrefix(ref, "/")
+	parts := strings.Split(ref, "/")
+	if len(parts) >= 3 && parts[0] == "runs" {
+		return parts[2]
+	}
+	return ""
+}
+
+// evidenceBackedRuns returns the distinct run ids that are (a) referenced by at
+// least one evidence ref and (b) backed by a frozen, integrity-verified L3 run
+// bundle. This is stricter than counting SourceRunIDs: a run only counts when an
+// evidence ref actually ties the lesson to that run's bundle. allVerified is
+// false when any evidence-referenced run is open or fails verification.
+func evidenceBackedRuns(project string, evidenceRefs []string) (count int, allVerified bool) {
+	runIDs := make([]string, 0, len(evidenceRefs))
+	sawRunRef := false
+	for _, ref := range evidenceRefs {
+		runID := runIDFromEvidenceRef(ref)
+		if runID == "" {
+			continue
+		}
+		sawRunRef = true
+		runIDs = append(runIDs, runID)
+	}
+	count, allVerified = independentFrozenRuns(project, runIDs)
+	// If no evidence ref pointed at a run bundle we cannot vouch for any run.
+	if !sawRunRef {
+		return 0, false
+	}
+	return count, allVerified
 }
 
 // loadMemoryByID finds a single memory anywhere in the vault (notes, inbox,
@@ -112,9 +174,10 @@ func EvaluateEligibility(sourceID, targetLayer string) (*EligibilityReport, erro
 func evaluateL3ToL2(mem Memory, threshold PromotionThreshold) *EligibilityReport {
 	report := &EligibilityReport{Checks: map[string]bool{}}
 
+	evidenceRefs := allEvidenceRefs(mem)
 	hasBody := mem.Body != ""
 	hasTags := len(mem.Tags) > 0
-	hasEvidence := mem.EvidenceRef != ""
+	hasEvidence := len(evidenceRefs) > 0
 	hasRunIDs := len(mem.SourceRunIDs) > 0
 
 	report.Checks["has_body"] = hasBody
@@ -131,17 +194,18 @@ func evaluateL3ToL2(mem Memory, threshold PromotionThreshold) *EligibilityReport
 	if threshold.RequireEvidenceRef && !hasEvidence {
 		report.BlockingReasons = append(report.BlockingReasons, "missing_evidence_ref")
 	}
-	if !hasRunIDs {
-		report.BlockingReasons = append(report.BlockingReasons, "missing_provenance")
-	}
 
-	independent, allVerified := independentFrozenRuns(mem.Project, mem.SourceRunIDs)
+	// Independence is measured by distinct runs that each have an evidence ref
+	// pointing at their frozen L3 bundle — not by a bare SourceRunIDs count. A
+	// candidate with one evidence ref and three unbacked run ids no longer
+	// qualifies; every counted run must be evidenced and verified.
+	independent, allVerified := evidenceBackedRuns(mem.Project, evidenceRefs)
 	report.IndependentRuns = independent
-	report.Checks["all_runs_frozen"] = allVerified && hasRunIDs
+	report.Checks["all_runs_frozen"] = allVerified && hasEvidence
 	report.Checks["meets_independent_run_threshold"] = independent >= threshold.MinIndependentRuns
 
-	if hasRunIDs && !allVerified {
-		// A referenced run is open or failed integrity verification.
+	if hasEvidence && !allVerified {
+		// A referenced run is open, missing, or failed integrity verification.
 		report.BlockingReasons = append(report.BlockingReasons, "bundle_unverified")
 	}
 	if independent < threshold.MinIndependentRuns {
@@ -153,6 +217,6 @@ func evaluateL3ToL2(mem Memory, threshold PromotionThreshold) *EligibilityReport
 	// A candidate is reviewable when it has the quality fields even if it has not
 	// yet reached the automatic independent-run threshold: a reviewer may then
 	// apply the single-run override.
-	report.ReadyForReview = hasBody && hasTags && hasEvidence && hasRunIDs && allVerified
+	report.ReadyForReview = hasBody && hasTags && hasEvidence && allVerified
 	return report
 }
