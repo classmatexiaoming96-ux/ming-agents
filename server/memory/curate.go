@@ -7,7 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// promotionMu serialises the file-commit critical section of promotion and
+// curation so a supersede + write + index sequence cannot interleave with a
+// concurrent promotion, migration, or another curation of the same vault.
+var promotionMu sync.Mutex
 
 // CurationRequest is the input for an L2 -> L1 promotion. L1 affects every
 // project, so the workflow is human-only: Approver.Kind must be "human" and
@@ -198,7 +204,27 @@ func Curate(req CurationRequest) (*PromotionResult, error) {
 		}
 	}
 
-	eventID, err := appendPromotionAudit(PromotionAuditEvent{
+	// The file mutations below must be atomic relative to other promotion,
+	// curation, and migration work: hold the vault promotion lock for the whole
+	// commit so no concurrent writer can observe a half-applied supersession.
+	promotionMu.Lock()
+	defer promotionMu.Unlock()
+
+	// Load the memories this promotion supersedes before mutating anything so a
+	// missing/invalid id fails the whole curation before the old L1 is touched.
+	olds := make([]Memory, 0, len(supersededIDs))
+	for _, oldID := range supersededIDs {
+		old, err := loadMemoryByID(oldID)
+		if err != nil {
+			return nil, err
+		}
+		olds = append(olds, old)
+	}
+
+	// Pre-compute the audit event so the new L1 can reference it, but do not
+	// append it until every file write has succeeded (the audit must not claim a
+	// promotion that did not commit).
+	promotedEvent := PromotionAuditEvent{
 		EventType:    PromotionEventPromoted,
 		Actor:        req.Approver,
 		SourceID:     req.SourceID,
@@ -210,19 +236,8 @@ func Curate(req CurationRequest) (*PromotionResult, error) {
 		EvidenceRefs: nonEmpty(source.EvidenceRef),
 		SourceRunIDs: source.SourceRunIDs,
 		ConflictIDs:  supersededIDs,
-	})
-	if err != nil {
-		return nil, err
 	}
-	result.AuditEventID = eventID
-
-	// Supersede first so a partial failure leaves the old memory intact rather
-	// than producing two active, contradictory L1 memories.
-	for _, oldID := range supersededIDs {
-		if err := markL1Superseded(oldID, targetID, req); err != nil {
-			return nil, err
-		}
-	}
+	promotedEvent = prepareAuditEvent(promotedEvent)
 
 	l1 := source
 	l1.ID = targetID
@@ -232,28 +247,55 @@ func Curate(req CurationRequest) (*PromotionResult, error) {
 	l1.PromotionState = PromotionPromoted
 	l1.PromotedBy = req.Approver.Name
 	l1.PromotedAt = now().UTC().Format(dateLayout)
-	l1.PromotionAudit = auditReference(eventID)
+	l1.PromotionAudit = auditReferenceForEvent(promotedEvent)
 	l1.SourceRunIDs = source.SourceRunIDs
 	if len(supersededIDs) > 0 {
 		l1.Supersedes = supersededIDs
 	}
 	l1.Body = source.Body
+
+	// Commit the new L1 first. If this fails, no old memory has been retired and
+	// no audit has been written, so the vault is unchanged and the previous L1s
+	// stay active.
 	if _, err := writeMemory(l1, L1NotesPath()); err != nil {
 		return nil, err
 	}
+
+	// Now retire the superseded memories. Each write is followed by the index
+	// delete; the pre-loaded olds guarantee we never mutate a memory we could
+	// not read.
+	supersededEvents := make([]PromotionAuditEvent, 0, len(olds))
+	for _, old := range olds {
+		event, err := commitL1Supersession(old, targetID, req)
+		if err != nil {
+			return nil, err
+		}
+		supersededEvents = append(supersededEvents, event)
+	}
+
 	if err := IndexMemory(l1.ID, l1.Title, l1.Body, l1.Project, l1.Type, l1.Tags); err != nil {
 		fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", l1.ID, err)
+	}
+
+	// All file state committed: append audit last so a mid-commit failure never
+	// leaves an audit record for a promotion that did not happen.
+	if err := appendPreparedAudit(promotedEvent); err != nil {
+		return nil, err
+	}
+	result.AuditEventID = promotedEvent.EventID
+	for _, event := range supersededEvents {
+		if err := appendPreparedAudit(event); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
 
-// markL1Superseded flips an existing L1 memory to superseded, records the winner,
-// appends a superseded audit event, and drops it from the recall index.
-func markL1Superseded(oldID, winnerID string, req CurationRequest) error {
-	old, err := loadMemoryByID(oldID)
-	if err != nil {
-		return err
-	}
+// commitL1Supersession flips an existing L1 memory to superseded, records the
+// winner, and drops it from the recall index. It returns the prepared (but not
+// yet appended) superseded audit event so the caller can append it only after
+// the whole curation transaction succeeds.
+func commitL1Supersession(old Memory, winnerID string, req CurationRequest) (PromotionAuditEvent, error) {
 	old.Status = "superseded"
 	old.PromotionState = PromotionSuperseded
 	old.SupersededBy = winnerID
@@ -263,25 +305,23 @@ func markL1Superseded(oldID, winnerID string, req CurationRequest) error {
 	if old.Path != "" {
 		dir = filepath.Dir(old.Path)
 	}
-	if _, err := appendPromotionAudit(PromotionAuditEvent{
+	event := prepareAuditEvent(PromotionAuditEvent{
 		EventType: PromotionEventSuperseded,
 		Actor:     req.Approver,
-		SourceID:  oldID,
+		SourceID:  old.ID,
 		TargetID:  winnerID,
 		FromState: PromotionPromoted,
 		ToState:   PromotionSuperseded,
 		Outcome:   "superseded",
 		Rationale: req.Rationale,
-	}); err != nil {
-		return err
-	}
+	})
 	if _, err := writeMemory(old, dir); err != nil {
-		return err
+		return PromotionAuditEvent{}, err
 	}
-	if err := DeleteFromIndex(oldID); err != nil {
-		fmt.Fprintf(os.Stderr, "[memory] FTS5 delete error for %s: %v\n", oldID, err)
+	if err := DeleteFromIndex(old.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "[memory] FTS5 delete error for %s: %v\n", old.ID, err)
 	}
-	return nil
+	return event, nil
 }
 
 func nonEmpty(v string) []string {

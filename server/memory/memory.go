@@ -237,7 +237,9 @@ func parseFrontmatter(text string) (Memory, string, error) {
 }
 
 // writeMemory serialises a memory (frontmatter + body) into targetDir/{id}.md.
-func writeMemory(mem Memory, targetDir string) (string, error) {
+// It is indirected through a package var (like now) so tests can inject write
+// failures to exercise the transactional promotion/curation paths.
+var writeMemory = func(mem Memory, targetDir string) (string, error) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", targetDir, err)
 	}

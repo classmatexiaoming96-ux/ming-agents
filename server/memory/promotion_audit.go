@@ -69,37 +69,73 @@ func newAuditEventID(eventType, sourceID, targetID, timestamp string) string {
 	return "evt_" + hex.EncodeToString(sum[:])[:16]
 }
 
-// appendPromotionAudit writes one event to the daily JSONL log using O_APPEND so
-// concurrent writers never truncate earlier records. There is no update or
-// delete path: the log is append-only by construction. It returns the event id
-// written so callers can link a promoted memory back to its audit record.
-func appendPromotionAudit(event PromotionAuditEvent) (string, error) {
-	ts := now().UTC()
+// prepareAuditEvent stamps the schema version, timestamp, and event id onto an
+// event without writing anything. This lets a caller reference the event (its
+// id and log path) before committing file state, then append the record only
+// after every mutation has succeeded.
+func prepareAuditEvent(event PromotionAuditEvent) PromotionAuditEvent {
 	if event.Timestamp == "" {
-		event.Timestamp = ts.Format(time.RFC3339)
+		event.Timestamp = now().UTC().Format(time.RFC3339)
 	}
 	event.SchemaVersion = promotionAuditSchemaVersion
 	if event.EventID == "" {
 		event.EventID = newAuditEventID(event.EventType, event.SourceID, event.TargetID, event.Timestamp)
 	}
+	return event
+}
+
+// auditEventTime returns the UTC time a prepared event should be filed under,
+// derived from the event's own timestamp so its reference and its log line
+// always agree (even across a UTC day boundary).
+func auditEventTime(event PromotionAuditEvent) time.Time {
+	if event.Timestamp != "" {
+		if t, err := time.Parse(time.RFC3339, event.Timestamp); err == nil {
+			return t.UTC()
+		}
+	}
+	return now().UTC()
+}
+
+// appendPreparedAudit writes an already-prepared event to its daily JSONL log.
+// It is the commit step of the prepare/commit split: callers append only after
+// their file mutations have succeeded.
+func appendPreparedAudit(event PromotionAuditEvent) error {
 	dir := PromotionAuditDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir promotion audit dir: %w", err)
+		return fmt.Errorf("mkdir promotion audit dir: %w", err)
 	}
 	line, err := json.Marshal(event)
 	if err != nil {
-		return "", fmt.Errorf("marshal audit event: %w", err)
+		return fmt.Errorf("marshal audit event: %w", err)
 	}
-	path := PromotionAuditPath(ts)
+	path := PromotionAuditPath(auditEventTime(event))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return "", fmt.Errorf("open promotion audit log: %w", err)
+		return fmt.Errorf("open promotion audit log: %w", err)
 	}
 	defer f.Close()
 	if _, err := f.Write(append(line, '\n')); err != nil {
-		return "", fmt.Errorf("append promotion audit: %w", err)
+		return fmt.Errorf("append promotion audit: %w", err)
+	}
+	return nil
+}
+
+// appendPromotionAudit prepares and appends an event in one step, returning the
+// event id. It remains the convenience path for blocked/rejected events that do
+// not mutate memory files.
+func appendPromotionAudit(event PromotionAuditEvent) (string, error) {
+	event = prepareAuditEvent(event)
+	if err := appendPreparedAudit(event); err != nil {
+		return "", err
 	}
 	return event.EventID, nil
+}
+
+// auditReferenceForEvent returns a vault-relative pointer to a prepared event's
+// log line, using the event's own timestamp so the reference always points at
+// the file the event was written to.
+func auditReferenceForEvent(event PromotionAuditEvent) string {
+	return "runs/_promotion_audit/" + auditEventTime(event).Format(dateLayout) + ".jsonl#" + event.EventID
 }
 
 // auditReference returns a vault-relative pointer suitable for storing in a

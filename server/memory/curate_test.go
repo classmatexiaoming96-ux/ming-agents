@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,6 +228,56 @@ func TestCurate_RejectsArchivedSource(t *testing.T) {
 	}
 	if _, err := Curate(CurationRequest{SourceID: "src-arch", Rationale: "global", Approver: PromotionActor{Kind: "human", Name: "alice"}}); err == nil {
 		t.Fatal("Curate must reject an archived L2 source")
+	}
+}
+
+func TestCurate_SupersedeWriteFailureLeavesOldL1Active(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+	// Seed an active L1 via a real curation.
+	writeL2Memory(t, "ming-agents", "l2-yes", "Use connection pooling", "Always use connection pooling for database access.", []string{"db"})
+	first, err := Curate(CurationRequest{SourceID: "l2-yes", Rationale: "baseline", Approver: PromotionActor{Kind: "human", Name: "alice"}})
+	if err != nil {
+		t.Fatalf("seed L1 error = %v", err)
+	}
+
+	// Prepare a contradicting L2 to supersede the first, but inject a failure on
+	// the new-L1 write (the very first mutation of the transaction).
+	writeL2Memory(t, "ming-agents", "l2-no", "Use connection pooling", "Do not use connection pooling for database access.", []string{"db"})
+	prev := writeMemory
+	writeMemory = func(mem Memory, targetDir string) (string, error) {
+		if mem.Layer == "l1" && mem.PromotionState == PromotionPromoted {
+			return "", fmt.Errorf("injected L1 write failure")
+		}
+		return prev(mem, targetDir)
+	}
+	t.Cleanup(func() { writeMemory = prev })
+
+	if _, err := Curate(CurationRequest{
+		SourceID: "l2-no", Rationale: "pooling caused leaks", ConflictMode: "supersede",
+		Approver: PromotionActor{Kind: "human", Name: "bob"},
+	}); err == nil {
+		t.Fatal("Curate must fail when the new L1 write fails")
+	}
+
+	// The old L1 must remain active (not superseded) and still be indexed.
+	old, err := loadMemoryByID(first.TargetID)
+	if err != nil {
+		t.Fatalf("load old L1: %v", err)
+	}
+	if old.Status != "active" || old.PromotionState != PromotionPromoted {
+		t.Fatalf("old L1 corrupted by failed transaction: %+v", old)
+	}
+	// No promoted audit event should have been written for the failed curation.
+	events, _ := ReadPromotionAudit(time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+	promoted := 0
+	for _, e := range events {
+		if e.EventType == PromotionEventPromoted {
+			promoted++
+		}
+	}
+	if promoted != 1 { // only the seed curation
+		t.Fatalf("promoted audit events = %d, want 1 (seed only)", promoted)
 	}
 }
 
