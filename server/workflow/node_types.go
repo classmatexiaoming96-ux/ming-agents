@@ -87,11 +87,16 @@ type RollbackSignal struct {
 }
 
 type RollbackDecision struct {
-	Action       RollbackAction
-	TargetScope  string
-	NewAttempt   int
-	ReuseSession bool
-	Rationale    string
+	Action         RollbackAction
+	TargetScope    string
+	NewAttempt     int
+	ReuseSession   bool
+	Rationale      string
+	FailureClass   FailureClass
+	FailureReason  string
+	RetryExhausted bool
+	NextAction     string
+	ArtifactRefs   []ArtifactRef
 }
 
 type RollbackContext struct {

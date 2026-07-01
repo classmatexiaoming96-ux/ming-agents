@@ -45,11 +45,16 @@ func (r *RollbackRunner) Decide(rctx RollbackContext, spec RollbackSpec, unit Ro
 		if exhaustedAction == "" {
 			exhaustedAction = RollbackActionBlocked
 		}
+		reason := fmt.Sprintf("rollback budget exhausted for scope %s: used %d of %d attempts", unit.Scope, used, maxAttempts)
 		return &RollbackDecision{
-			Action:      exhaustedAction,
-			TargetScope: unit.Scope,
-			NewAttempt:  nextAttempt,
-			Rationale:   fmt.Sprintf("rollback budget exhausted for scope %s: used %d of %d attempts", unit.Scope, used, maxAttempts),
+			Action:         exhaustedAction,
+			TargetScope:    unit.Scope,
+			NewAttempt:     nextAttempt,
+			Rationale:      reason,
+			FailureClass:   signal.FailureClass,
+			FailureReason:  reason,
+			RetryExhausted: true,
+			NextAction:     NextActionForFailure(signal.FailureClass),
 		}
 	}
 	return &RollbackDecision{

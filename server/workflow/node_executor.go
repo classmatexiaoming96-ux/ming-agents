@@ -78,6 +78,7 @@ func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSp
 		outputs[ns.ID] = output
 		statuses[ns.ID] = result.Status
 		e.writeState(repoRoot, runID, statuses, nodeStateDetails(result))
+		e.writePhaseStatusForResult(runID, ns, result)
 
 		if err != nil {
 			return outputs, fmt.Errorf("node %s (%s): %w", ns.ID, ns.Kind, err)
@@ -167,7 +168,14 @@ func (e *NodeExecutor) prepareRollbackDecision(ctx context.Context, repoRoot, ru
 		SourceNode:    ns.ID,
 		SourceAttempt: attemptCount,
 	}
-	return rbNode.PrepareRollback(ctx, rctx, signal)
+	decision, err := rbNode.PrepareRollback(ctx, rctx, signal)
+	if err != nil || decision == nil {
+		return decision, err
+	}
+	if decision.RetryExhausted && len(decision.ArtifactRefs) == 0 {
+		decision.ArtifactRefs = rbNode.RollbackArtifacts(rctx)
+	}
+	return decision, nil
 }
 
 func rollbackSpecEnabled(spec RollbackSpec) bool {
@@ -209,12 +217,32 @@ func rollbackReason(result *NodeResult) string {
 }
 
 func applyRollbackDecisionToResult(result *NodeResult, decision *RollbackDecision) {
-	if result.RetryAdvice == "" {
-		result.RetryAdvice = decision.Rationale
+	if decision.FailureClass != "" && result.FailureClass == "" {
+		result.FailureClass = decision.FailureClass
 	}
-	if result.NextAction == "" {
+	if decision.RetryExhausted {
+		result.RetryExhausted = true
+	}
+	if result.RetryAdvice == "" {
+		result.RetryAdvice = firstNonEmpty(decision.FailureReason, decision.Rationale)
+	}
+	if decision.NextAction != "" {
+		result.NextAction = decision.NextAction
+	} else if result.NextAction == "" {
 		result.NextAction = nextActionForRollbackDecision(decision.Action)
 	}
+	if len(decision.ArtifactRefs) > 0 {
+		result.ArtifactRefs = append(result.ArtifactRefs, decision.ArtifactRefs...)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func nextActionForRollbackDecision(action RollbackAction) string {
@@ -376,6 +404,27 @@ func nodeStateDetails(result *NodeResult) map[string]any {
 		details["attempt_count"] = result.AttemptCount
 	}
 	return details
+}
+
+func (e *NodeExecutor) writePhaseStatusForResult(runID string, ns NodeSpec, result *NodeResult) {
+	if e.services.StatusWriter == nil || result == nil || !result.RetryExhausted {
+		return
+	}
+	failureClass := result.FailureClass
+	if failureClass == "" {
+		failureClass = FailureClassInconclusive
+	}
+	nextAction := result.NextAction
+	if nextAction == "" {
+		nextAction = NextActionForFailure(failureClass)
+	}
+	_ = e.services.StatusWriter.WritePhase(runID, &PhaseStatus{
+		Phase:            string(ns.Kind),
+		GateStatus:       string(result.Status),
+		FailureClass:     failureClass,
+		NextAction:       nextAction,
+		NextActionPrompt: result.RetryAdvice,
+	})
 }
 
 func normalizeDevelopmentOutput(spec NodeSpec, output NodeOutput) {
