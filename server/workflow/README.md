@@ -929,7 +929,92 @@ Phase 3 deliberately leaves two parallel paths around review rollback that Phase
 - **Inline revision path (live in P3).** Review report revisions—both contract-error revision and the one-shot human-reject revision—run inline inside `RunSubtaskReview` / `RunAggregateReview`. This is the path actually exercised today.
 - **`PrepareRollback` interface path (declared, not yet driven).** `reviewNode` implements `RollbackCapableNode` (`PrepareRollback` / `RollbackArtifacts`) with a compile-time assertion, mirroring the development/evaluation nodes. It has no production caller in P3; the inline path does not route through it. The same is true for the other rollback-capable nodes.
 
-These two paths are not yet unified on purpose: P3 review does not attach to a P4 executor, and review-time human gating (blocking on a decision, then re-entering review) is the orchestrator's responsibility (see "P3 design choice: review human-reject revision does not block"). Phase 4 will introduce a `RollbackRunner`-driven executor that calls each node's `PrepareRollback` to decide budgeted rollback actions, replacing the inline revision branches with a single orchestrated path. Until then, treat the `PrepareRollback` implementations as the forward-looking interface and the inline branches as the operative behavior.
+Phase 4 adds the executor side of this handoff, but it does not delete the P3 inline review path. The final P4 state is:
+
+- `reviewNode.PrepareRollback` remains the declared `RollbackCapableNode` capability.
+- `RunSubtaskReview` / `RunAggregateReview` still own the existing inline contract-error and one-shot human-reject revision behavior.
+- `NodeExecutor` now calls `PrepareRollback` only after the runtime node implements `RollbackCapableNode` and `NodeSpec.Rollback` is non-zero/enabled.
+- Executor rollback handling records a structured decision and handoff; it does not add extra review revisions on top of the inline path.
+
+This is an intentional intermediate state. Review-time human gating still belongs to the run-level orchestrator, and P4 still does not route review/evaluation `product_defect` failures back to development by itself.
+
+## P4: Node-Level Retry and Structured Handoff
+
+Phase 4 adds current-node retry behavior to `NodeExecutor`. It keeps the Phase 3 DAG:
+
+```text
+clarification -> planning -> development -> review -> evaluation
+```
+
+No DAG back-edges are added. P4 does not implement a run-level orchestrator and does not automatically rerun upstream nodes. If review or evaluation finds a `product_defect`, the executor returns structured failure data for a future orchestrator or user; it does not jump back to development.
+
+### Interface Isolation
+
+`WorkflowNode` stays the minimal execution interface:
+
+```go
+type WorkflowNode interface {
+    Kind() NodeKind
+    Execute(ctx context.Context, req NodeRequest) (*NodeResult, error)
+}
+```
+
+Nodes that can make rollback decisions opt into a separate interface:
+
+```go
+type RollbackCapableNode interface {
+    WorkflowNode
+    PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error)
+    RollbackArtifacts(rctx RollbackContext) []ArtifactRef
+}
+```
+
+This keeps ordinary workflow nodes from being forced to know about rollback. Capability is discovered at runtime by type assertion.
+
+### Rollback Gate
+
+Executor rollback is gated by two conditions:
+
+1. The concrete node must implement `RollbackCapableNode`.
+2. The node's `NodeSpec.Rollback` must be enabled. A zero-value `RollbackSpec` disables executor rollback even when the node type has the methods.
+
+Only when both conditions are true does `NodeExecutor` call `PrepareRollback`. The rollback decision can populate `FailureClass`, `RetryAdvice`, `NextAction`, `RetryExhausted`, and `ArtifactRefs` on the final `NodeResult`.
+
+### Two Retry Budgets
+
+P4 has two distinct budgets:
+
+- `RollbackSpec` controls node-internal unit attempts. Examples: `review:subtask:<id>`, `review:aggregate`, `subtask:<id>`, `planning`, or `command:<test_id>`. These attempts are decided by `RollbackRunner` and are scoped to the failed unit.
+- `NodeSpec.MaxRetries` controls whole-node reruns by `NodeExecutor`. This reruns the current node only; it does not rerun completed upstream nodes.
+
+`NodeSpec.RetryOn` decides which `FailureClass` values may consume whole-node retry budget. If the failure class is not listed, the executor returns the failure immediately. If node retry budget is exhausted, `RetryExhausted` is exposed on the result for UI/API/orchestrator consumption.
+
+Default whole-node retry policy:
+
+| Node | MaxRetries | RetryOn |
+| --- | ---: | --- |
+| clarification | 1 | `transient`, `missing_evidence`, `inconclusive` |
+| planning | 2 | `transient`, `contract_error`, `missing_evidence`, `inconclusive` |
+| development | 1 | `transient`, `validator_issue`, `missing_evidence` |
+| review | 1 | `transient`, `contract_error`, `missing_evidence`, `inconclusive` |
+| evaluation | 2 | `transient`, `validator_issue`, `missing_evidence`, `inconclusive` |
+
+`product_defect` is intentionally absent from default `RetryOn`; executor retry cannot fix generator/development defects by looping the same review or evaluation node. `environment_block` is also not retried by default and maps to `fix_environment`.
+
+### Structured Node Results
+
+`NodeResult` now carries machine-readable failure handoff fields in addition to legacy `Error`, `BlockedItems`, and `OutputPaths`:
+
+- `FailureClass`
+- `RetryAdvice`
+- `NextAction`
+- `RetryExhausted`
+- `ArtifactRefs`
+- `AttemptCount`
+
+Nodes fill business-specific reason, advice, and artifact refs when they know them. `NodeExecutor` fills runtime fields such as attempt count, default failure class, retry exhaustion, and default next action when fields are empty.
+
+The executor writes these fields into state details and writes `PhaseStatus` for exhausted failures when a status writer is available. This is the P4 handoff point for later orchestration: the next component can inspect structured state instead of scraping text errors.
 
 ## 11. CLI 使用方法
 

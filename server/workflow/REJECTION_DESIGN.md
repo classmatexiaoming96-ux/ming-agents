@@ -337,12 +337,21 @@ Budget exhaustion returns a structured `RollbackDecision` with an exhausted acti
 
 ### P3 to P4 handoff
 
-Phase 3 keeps two parallel rollback paths that Phase 4 will converge:
+Phase 3 keeps two parallel rollback paths. Phase 4 converges the executor decision point, but deliberately keeps the P3 inline review revision path in place:
 
 - The inline revision path is live: review report revisions (contract-error and the one-shot human-reject revision) run inside `RunSubtaskReview` / `RunAggregateReview`.
-- The `PrepareRollback` interface path is declared but has no production caller in P3. `reviewNode` implements `RollbackCapableNode` with a compile-time assertion (like the development and evaluation nodes), but the inline path does not route through it.
+- The `PrepareRollback` interface path is declared in P3. `reviewNode` implements `RollbackCapableNode` with a compile-time assertion (like the development and evaluation nodes), but the inline path does not route through it.
+- Phase 4's `NodeExecutor` now drives the interface path only when both conditions are true: the runtime node implements `RollbackCapableNode`, and `NodeSpec.Rollback` is non-zero/enabled.
+- Phase 4 uses that decision path for structured rollback handoff (`FailureClass`, `NextAction`, `RetryExhausted`, `ArtifactRefs`) and node retry routing. It does not remove or duplicate `RunSubtaskReview` / `RunAggregateReview` inline revisions.
 
-This split is intentional: P3 review does not attach to a P4 executor, and review-time human gating is the orchestrator's responsibility. Phase 4 will add a `RollbackRunner`-driven executor that calls each node's `PrepareRollback` to decide budgeted rollback actions, unifying the inline revision branches and the interface path into one orchestrated flow.
+This split remains intentional after P4-T03. Review-time human gating is still the orchestrator's responsibility: the review node may revise once if a rejection is already present, while a future run-level orchestrator must decide when to wait for a human, write the rejection, and re-enter review. P4 therefore documents an intermediate state rather than a deleted P3 path: executor rollback capability is gated and structured, while the P3 inline review behavior remains the operative review-local revision path.
+
+Phase 4 also separates two budgets that earlier rejection docs discussed together:
+
+- `RollbackSpec` controls node-internal unit attempts such as `review:subtask:<id>`, `review:aggregate`, `planning`, `subtask:<id>`, or `command:<test_id>`.
+- `NodeSpec.MaxRetries` controls whole-node reruns by `NodeExecutor`, gated by `NodeSpec.RetryOn`.
+
+The executor only retries the current node. It does not add DAG back-edges, rerun completed upstream nodes, or route review/evaluation `product_defect` failures back to development. Those cross-node recovery choices remain future orchestrator work.
 
 ### 针对节点 Agent
 
