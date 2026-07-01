@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -41,6 +42,14 @@ func main() {
 		err = cmdFTS(args)
 	case "import-automind-summary":
 		err = cmdImportAutoMindSummary(args, os.Stdout)
+	case "promote":
+		err = cmdPromote(args, os.Stdout)
+	case "curate":
+		err = cmdCurate(args, os.Stdout)
+	case "list-pending-promotion":
+		err = cmdListPendingPromotion(args, os.Stdout)
+	case "revoke":
+		err = cmdRevoke(args, os.Stdout)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -66,6 +75,10 @@ usage:
   memory-cli implicit <id[,id2,...]> --log "<conversation text>"
   memory-cli fts rebuild
   memory-cli import-automind-summary <path> [--accept] [--project P] [--cross-project-policy inbox|reject]
+  memory-cli promote --source <id> --to l2 --rationale "..." [--actor N] [--evidence a,b] [--override] [--apply]
+  memory-cli curate --source <id> --to l1 --approver <name> --rationale "..." [--mode reject|supersede|allow_separate] [--supersedes a,b] [--apply]
+  memory-cli list-pending-promotion [--project P] [--to l2|l1] [--ready-only] [--format table|json]
+  memory-cli revoke --target <id> --reason "..." --actor N [--mode archive|supersede] [--superseded-by <id>] [--apply]
   memory-cli cleanup
   memory-cli stats`)
 }
@@ -285,6 +298,178 @@ func cmdImportAutoMindSummary(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "- %s -> %s %s\n", route.Kind, route.Target, status)
 	}
 	return nil
+}
+
+func cmdPromote(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("promote", flag.ExitOnError)
+	source := fs.String("source", "", "source memory id")
+	to := fs.String("to", "l2", "target layer (l2)")
+	rationale := fs.String("rationale", "", "why this promotion is justified")
+	actor := fs.String("actor", "", "actor name")
+	evidence := fs.String("evidence", "", "comma-separated evidence refs")
+	override := fs.Bool("override", false, "human single-run override")
+	apply := fs.Bool("apply", false, "write changes (default is dry-run)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"override": true, "apply": true})); err != nil {
+		return err
+	}
+	if *source == "" {
+		return fmt.Errorf("promote requires --source")
+	}
+	if *rationale == "" {
+		return fmt.Errorf("promote requires --rationale")
+	}
+	result, err := memory.Promote(memory.PromotionRequest{
+		SourceID:      *source,
+		TargetLayer:   *to,
+		Rationale:     *rationale,
+		Actor:         memory.PromotionActor{Kind: "human", Name: *actor},
+		EvidenceRefs:  splitTags(*evidence),
+		HumanOverride: *override,
+		DryRun:        !*apply,
+	})
+	if err != nil {
+		return err
+	}
+	printPromotionResult(out, "promote", result)
+	return nil
+}
+
+func cmdCurate(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("curate", flag.ExitOnError)
+	source := fs.String("source", "", "source L2 memory id")
+	to := fs.String("to", "l1", "target layer (l1)")
+	approver := fs.String("approver", "", "human approver name (required)")
+	rationale := fs.String("rationale", "", "why this belongs in global memory")
+	mode := fs.String("mode", "", "conflict mode: supersede|allow_separate")
+	supersedes := fs.String("supersedes", "", "comma-separated L1 ids to supersede")
+	apply := fs.Bool("apply", false, "write changes (default is dry-run)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"apply": true})); err != nil {
+		return err
+	}
+	if *to != "l1" {
+		return fmt.Errorf("curate only supports --to l1")
+	}
+	if *source == "" {
+		return fmt.Errorf("curate requires --source")
+	}
+	if *approver == "" {
+		return fmt.Errorf("curate requires --approver")
+	}
+	if *rationale == "" {
+		return fmt.Errorf("curate requires --rationale")
+	}
+	result, err := memory.Curate(memory.CurationRequest{
+		SourceID:     *source,
+		Rationale:    *rationale,
+		Approver:     memory.PromotionActor{Kind: "human", Name: *approver},
+		ConflictMode: *mode,
+		Supersedes:   splitTags(*supersedes),
+		DryRun:       !*apply,
+	})
+	if err != nil {
+		return err
+	}
+	printPromotionResult(out, "curate", result)
+	return nil
+}
+
+func cmdListPendingPromotion(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("list-pending-promotion", flag.ExitOnError)
+	project := fs.String("project", "", "project filter")
+	to := fs.String("to", "l2", "target layer: l2|l1")
+	readyOnly := fs.Bool("ready-only", false, "hide blocked candidates")
+	format := fs.String("format", "table", "table|json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"ready-only": true})); err != nil {
+		return err
+	}
+	pending, err := memory.ListPending(memory.PromotionFilter{
+		Project:   *project,
+		ToLayer:   *to,
+		ReadyOnly: *readyOnly,
+	})
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		data, err := json.MarshalIndent(pending, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, string(data))
+		return nil
+	}
+	if len(pending) == 0 {
+		fmt.Fprintln(out, "No pending promotions.")
+		return nil
+	}
+	for _, p := range pending {
+		status := "blocked"
+		if p.Eligible {
+			status = "eligible"
+		} else if p.ReadyForReview {
+			status = "ready-for-review"
+		}
+		fmt.Fprintf(out, "[%s->%s] %s %s (%s)\n", p.FromLayer, p.ToLayer, p.ID, p.Title, status)
+		if len(p.BlockingReasons) > 0 {
+			fmt.Fprintf(out, "  blocked: %s\n", strings.Join(p.BlockingReasons, ", "))
+		}
+	}
+	return nil
+}
+
+func cmdRevoke(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("revoke", flag.ExitOnError)
+	target := fs.String("target", "", "target memory id")
+	reason := fs.String("reason", "", "why this memory is revoked")
+	actor := fs.String("actor", "", "actor name")
+	mode := fs.String("mode", "archive", "archive|supersede")
+	supersededBy := fs.String("superseded-by", "", "replacement id (supersede mode)")
+	apply := fs.Bool("apply", false, "write changes (default is dry-run)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"apply": true})); err != nil {
+		return err
+	}
+	if *target == "" {
+		return fmt.Errorf("revoke requires --target")
+	}
+	if *reason == "" {
+		return fmt.Errorf("revoke requires --reason")
+	}
+	result, err := memory.Revoke(memory.RevokeRequest{
+		TargetID:     *target,
+		Reason:       *reason,
+		Mode:         *mode,
+		SupersededBy: *supersededBy,
+		Actor:        memory.PromotionActor{Kind: "human", Name: *actor},
+		DryRun:       !*apply,
+	})
+	if err != nil {
+		return err
+	}
+	mode2 := "apply"
+	if result.DryRun {
+		mode2 = "dry-run"
+	}
+	fmt.Fprintf(out, "revoke %s: %s %s -> %s", mode2, result.TargetID, result.FromState, result.ToState)
+	if result.AuditEventID != "" {
+		fmt.Fprintf(out, " audit=%s", result.AuditEventID)
+	}
+	fmt.Fprintln(out)
+	return nil
+}
+
+func printPromotionResult(out io.Writer, verb string, result *memory.PromotionResult) {
+	mode := "apply"
+	if result.DryRun {
+		mode = "dry-run"
+	}
+	fmt.Fprintf(out, "%s %s: %s -> %s (%s -> %s)", verb, mode, result.SourceID, result.TargetID, result.FromState, result.ToState)
+	if result.AuditEventID != "" {
+		fmt.Fprintf(out, " audit=%s", result.AuditEventID)
+	}
+	fmt.Fprintln(out)
+	if result.ConflictReport.HasBlockingConflict {
+		fmt.Fprintf(out, "  conflicts: %s\n", strings.Join(result.ConflictReport.PossibleConflicts, ", "))
+	}
 }
 
 func snippet(s string, n int) string {
