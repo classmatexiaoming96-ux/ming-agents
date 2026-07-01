@@ -1,10 +1,13 @@
 package workflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ming-agents/server/memory"
 )
@@ -17,7 +20,37 @@ func runBundleReceiver(repoRoot, runID string) *memory.RunBundleReceiver {
 	if project == "" {
 		project = reuseProject
 	}
-	return memory.NewRunBundleReceiver(project, runID)
+	receiver, err := memory.NewRunBundleReceiver(project, runID)
+	if err != nil {
+		log.Printf("NewRunBundleReceiver failed: %v", err)
+		recordRunBundleReceiverInitFailure(project, runID, err)
+		return nil
+	}
+	return receiver
+}
+
+func recordRunBundleReceiverInitFailure(project, runID string, initErr error) {
+	sum := sha256.Sum256([]byte(project + "\x00" + runID))
+	root := filepath.Join(memory.VaultDir, "runs", "_receiver-errors", hex.EncodeToString(sum[:8]))
+	if err := os.MkdirAll(root, 0755); err != nil {
+		log.Printf("RunBundleReceiver init failure status mkdir failed: %v", err)
+		return
+	}
+	status := map[string]any{
+		"receiver_init": map[string]string{
+			"status":     "failed",
+			"error":      initErr.Error(),
+			"updated_at": time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		log.Printf("RunBundleReceiver init failure status marshal failed: %v", err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(root, "receiver-status.json"), append(data, '\n'), 0644); err != nil {
+		log.Printf("RunBundleReceiver init failure status write failed: %v", err)
+	}
 }
 
 func freezeRunBundle(repoRoot, runID string) {

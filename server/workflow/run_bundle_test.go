@@ -35,7 +35,10 @@ func TestRunBundleReceiver_FreezeOnRunEnd(t *testing.T) {
 	if _, err := executor.Run(context.Background(), repoRoot, spec, nil); err != nil {
 		t.Fatalf("Run error = %v", err)
 	}
-	root := memory.RunBundlePath("repo", "run-freeze")
+	root, err := memory.RunBundlePath("repo", "run-freeze")
+	if err != nil {
+		t.Fatalf("RunBundlePath error = %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(root, "_frozen")); err != nil {
 		t.Fatalf("_frozen missing: %v", err)
 	}
@@ -103,7 +106,10 @@ func TestRunBundleEndToEnd_IsolatedFromL2AndArchive(t *testing.T) {
 		if err := os.WriteFile(testLog, []byte("ok"), 0644); err != nil {
 			return nil, err
 		}
-		receiver := memory.NewRunBundleReceiver(projectFromRepoRoot(repoRoot), runID)
+		receiver, err := memory.NewRunBundleReceiver(projectFromRepoRoot(repoRoot), runID)
+		if err != nil {
+			return nil, err
+		}
 		if err := receiver.ReceiveAutoMindSummary([]byte("summary"), "md"); err != nil {
 			return nil, err
 		}
@@ -133,7 +139,10 @@ func TestRunBundleEndToEnd_IsolatedFromL2AndArchive(t *testing.T) {
 		t.Fatalf("Run error = %v", err)
 	}
 
-	root := memory.RunBundlePath("repo", "run-e2e")
+	root, err := memory.RunBundlePath("repo", "run-e2e")
+	if err != nil {
+		t.Fatalf("RunBundlePath error = %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(root, "_frozen")); err != nil {
 		t.Fatalf("_frozen missing: %v", err)
 	}

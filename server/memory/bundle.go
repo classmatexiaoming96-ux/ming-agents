@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const RunBundleLargeFileThreshold = 5 * 1024 * 1024
@@ -65,16 +66,26 @@ type RunBundleReceiver struct {
 // RunBundlePath returns the L3 raw run bundle namespace for one project run.
 // It is intentionally separate from archive/<project>, which stores curated L2
 // memory history rather than raw workflow artifacts.
-func RunBundlePath(project, runID string) string {
-	return filepath.Join(VaultDir, "runs", project, runID)
+func RunBundlePath(project, runID string) (string, error) {
+	if err := validateProjectID(project); err != nil {
+		return "", err
+	}
+	if err := validateRunID(runID); err != nil {
+		return "", err
+	}
+	return filepath.Join(VaultDir, "runs", project, runID), nil
 }
 
-func NewRunBundleReceiver(project, runID string) *RunBundleReceiver {
+func NewRunBundleReceiver(project, runID string) (*RunBundleReceiver, error) {
+	root, err := RunBundlePath(project, runID)
+	if err != nil {
+		return nil, err
+	}
 	return &RunBundleReceiver{
 		project: project,
 		runID:   runID,
-		root:    RunBundlePath(project, runID),
-	}
+		root:    root,
+	}, nil
 }
 
 func (r *RunBundleReceiver) Root() string {
@@ -454,4 +465,54 @@ func pointerForFile(path string) (runBundlePointer, error) {
 		Size:       int64(len(data)),
 		SHA256:     sha256Hex(data),
 	}, nil
+}
+
+func validateRunID(id string) error {
+	return validateBundleID("run_id", id)
+}
+
+func validateProjectID(id string) error {
+	return validateBundleID("project", id)
+}
+
+func validateBundleID(kind, id string) error {
+	if id == "" {
+		return fmt.Errorf("%s is empty", kind)
+	}
+	if filepath.IsAbs(id) || strings.HasPrefix(id, "/") {
+		return fmt.Errorf("%s %q must not be absolute", kind, id)
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return fmt.Errorf("%s %q must not contain path separators", kind, id)
+	}
+	if id == "." || id == ".." {
+		return fmt.Errorf("%s %q must not be a dot segment", kind, id)
+	}
+	if filepath.Clean(id) != id {
+		return fmt.Errorf("%s %q changes after path cleaning", kind, id)
+	}
+	for _, r := range id {
+		if unicode.IsControl(r) || !unicode.IsPrint(r) {
+			return fmt.Errorf("%s %q contains non-printable characters", kind, id)
+		}
+	}
+	if isWindowsReservedName(id) {
+		return fmt.Errorf("%s %q uses a reserved Windows name", kind, id)
+	}
+	return nil
+}
+
+func isWindowsReservedName(id string) bool {
+	name := strings.ToUpper(id)
+	if dot := strings.IndexByte(name, '.'); dot >= 0 {
+		name = name[:dot]
+	}
+	switch name {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(name) == 4 && (strings.HasPrefix(name, "COM") || strings.HasPrefix(name, "LPT")) && name[3] >= '1' && name[3] <= '9' {
+		return true
+	}
+	return false
 }

@@ -13,13 +13,41 @@ func TestRunBundlePath_IsolatedFromArchive(t *testing.T) {
 	VaultDir = t.TempDir()
 	t.Cleanup(func() { VaultDir = oldVault })
 
-	got := RunBundlePath("ming-agents", "run-123")
+	got, err := RunBundlePath("ming-agents", "run-123")
+	if err != nil {
+		t.Fatalf("RunBundlePath error = %v", err)
+	}
 	want := filepath.Join(VaultDir, "runs", "ming-agents", "run-123")
 	if got != want {
 		t.Fatalf("RunBundlePath() = %q, want %q", got, want)
 	}
 	if strings.Contains(got, filepath.Join("archive", "ming-agents")) {
 		t.Fatalf("RunBundlePath() mixed with archive namespace: %s", got)
+	}
+}
+
+func TestRunBundlePath_RejectsPathTraversal(t *testing.T) {
+	tests := []struct {
+		name    string
+		project string
+		runID   string
+	}{
+		{name: "parent traversal", project: "ming-agents", runID: "../../etc"},
+		{name: "absolute run", project: "ming-agents", runID: "/absolute"},
+		{name: "windows drive path", project: "ming-agents", runID: `C:\foo`},
+		{name: "windows traversal", project: "ming-agents", runID: `..\..`},
+		{name: "subdirectory run", project: "ming-agents", runID: "subdir/foo"},
+		{name: "dot segment", project: "ming-agents", runID: "."},
+		{name: "empty project", project: "", runID: "run-123"},
+		{name: "reserved project", project: "CON", runID: "run-123"},
+		{name: "control character", project: "ming-agents", runID: "run-\n123"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := RunBundlePath(tt.project, tt.runID); err == nil {
+				t.Fatalf("RunBundlePath(%q, %q) error = nil, want rejection", tt.project, tt.runID)
+			}
+		})
 	}
 }
 
@@ -208,7 +236,11 @@ func newTestRunBundleReceiver(t *testing.T) *RunBundleReceiver {
 	oldVault := VaultDir
 	VaultDir = t.TempDir()
 	t.Cleanup(func() { VaultDir = oldVault })
-	return NewRunBundleReceiver("ming-agents", "run-test")
+	receiver, err := NewRunBundleReceiver("ming-agents", "run-test")
+	if err != nil {
+		t.Fatalf("NewRunBundleReceiver error = %v", err)
+	}
+	return receiver
 }
 
 func TestRunBundleReceiver_ImmutableAfterFreeze(t *testing.T) {
@@ -216,7 +248,10 @@ func TestRunBundleReceiver_ImmutableAfterFreeze(t *testing.T) {
 	VaultDir = t.TempDir()
 	t.Cleanup(func() { VaultDir = oldVault })
 
-	receiver := NewRunBundleReceiver("ming-agents", "run-immutable")
+	receiver, err := NewRunBundleReceiver("ming-agents", "run-immutable")
+	if err != nil {
+		t.Fatalf("NewRunBundleReceiver error = %v", err)
+	}
 	if err := receiver.ReceivePhaseReuse("planning", "memory hits"); err != nil {
 		t.Fatalf("ReceivePhaseReuse before freeze error = %v", err)
 	}
