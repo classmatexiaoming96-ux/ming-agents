@@ -56,6 +56,76 @@ type SummaryRoute struct {
 	Written bool   `json:"written"`
 }
 
+type SummaryImportOptions struct {
+	Accept             bool
+	ProjectOverride    string
+	CrossProjectPolicy string
+}
+
+type SummaryImportResult struct {
+	DryRun bool
+	Routes []SummaryRoute
+	L2     int
+	L3     int
+	Inbox  int
+}
+
+func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportResult, error) {
+	input, err := LoadSummary(path)
+	if err != nil {
+		return nil, err
+	}
+	if options.ProjectOverride != "" {
+		input.Project = options.ProjectOverride
+	}
+	classified, err := SummaryClassifier{}.Classify(input)
+	if err != nil {
+		return nil, err
+	}
+	if options.CrossProjectPolicy == "" {
+		options.CrossProjectPolicy = "inbox"
+	}
+	if options.CrossProjectPolicy != "inbox" && options.CrossProjectPolicy != "reject" {
+		return nil, fmt.Errorf("cross-project policy %q is not supported", options.CrossProjectPolicy)
+	}
+	if options.CrossProjectPolicy == "reject" && len(classified.CrossProjectCandidates) > 0 {
+		return nil, fmt.Errorf("cross-project candidates rejected by policy")
+	}
+
+	result := &SummaryImportResult{DryRun: !options.Accept}
+	if !options.Accept {
+		result.Routes = append(result.Routes, dryRunRoutes(classified.DurableLessons, "l2")...)
+		result.Routes = append(result.Routes, dryRunRoutes(classified.RawEvidence, "l3")...)
+		if options.CrossProjectPolicy == "inbox" {
+			result.Routes = append(result.Routes, dryRunRoutes(classified.CrossProjectCandidates, "l2_inbox")...)
+		}
+		result.countRoutes()
+		return result, nil
+	}
+
+	l2Routes, err := IngestDurableLessons(input.Project, classified.DurableLessons, true)
+	if err != nil {
+		return nil, err
+	}
+	result.Routes = append(result.Routes, l2Routes...)
+	if len(classified.RawEvidence) > 0 {
+		l3Routes, err := ArchiveRawBundle(input.Project, input.RunID, classified.RawEvidence, input.SummaryPath)
+		if err != nil {
+			return nil, err
+		}
+		result.Routes = append(result.Routes, l3Routes...)
+	}
+	if options.CrossProjectPolicy == "inbox" {
+		inboxRoutes, err := IngestCrossProjectCandidates(classified.CrossProjectCandidates)
+		if err != nil {
+			return nil, err
+		}
+		result.Routes = append(result.Routes, inboxRoutes...)
+	}
+	result.countRoutes()
+	return result, nil
+}
+
 func (SummaryClassifier) Classify(input *SummaryInput) (*ClassifiedSummary, error) {
 	if input == nil {
 		return nil, fmt.Errorf("summary input is required")
@@ -241,4 +311,29 @@ func summaryMemory(project string, item SummaryItem, id, layer string) Memory {
 func summaryMemoryID(project, title string) string {
 	sum := sha256.Sum256([]byte(project + "\x00" + strings.TrimSpace(title)))
 	return "automind_" + hex.EncodeToString(sum[:])[:16]
+}
+
+func dryRunRoutes(items []SummaryItem, target string) []SummaryRoute {
+	routes := make([]SummaryRoute, 0, len(items))
+	for _, item := range items {
+		routes = append(routes, SummaryRoute{
+			Kind:   item.Kind,
+			Title:  item.Title,
+			Target: target,
+		})
+	}
+	return routes
+}
+
+func (r *SummaryImportResult) countRoutes() {
+	for _, route := range r.Routes {
+		switch route.Target {
+		case "l2":
+			r.L2++
+		case "l3":
+			r.L3++
+		case "l2_inbox":
+			r.Inbox++
+		}
+	}
 }

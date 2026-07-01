@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -38,6 +39,8 @@ func main() {
 		err = cmdImplicit(args)
 	case "fts":
 		err = cmdFTS(args)
+	case "import-automind-summary":
+		err = cmdImportAutoMindSummary(args, os.Stdout)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -62,6 +65,7 @@ usage:
   memory-cli feedback <id> [--helpful]
   memory-cli implicit <id[,id2,...]> --log "<conversation text>"
   memory-cli fts rebuild
+  memory-cli import-automind-summary <path> [--accept] [--project P] [--cross-project-policy inbox|reject]
   memory-cli cleanup
   memory-cli stats`)
 }
@@ -243,6 +247,44 @@ func cmdFTS(args []string) error {
 	}
 	fs.Usage()
 	return fmt.Errorf("fts: specify --rebuild")
+}
+
+func cmdImportAutoMindSummary(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("import-automind-summary", flag.ExitOnError)
+	accept := fs.Bool("accept", false, "write routed memories and bundles")
+	project := fs.String("project", "", "override summary project")
+	crossProjectPolicy := fs.String("cross-project-policy", "inbox", "inbox or reject")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"accept": true})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("import-automind-summary requires <path>")
+	}
+	result, err := memory.ImportSummary(fs.Arg(0), memory.SummaryImportOptions{
+		Accept:             *accept,
+		ProjectOverride:    *project,
+		CrossProjectPolicy: *crossProjectPolicy,
+	})
+	if err != nil {
+		return err
+	}
+	mode := "accept"
+	if result.DryRun {
+		mode = "dry-run"
+	}
+	fmt.Fprintf(out, "AutoMind summary import %s: l2=%d l3=%d inbox=%d\n", mode, result.L2, result.L3, result.Inbox)
+	for _, route := range result.Routes {
+		status := "planned"
+		if route.Written {
+			status = "written"
+		}
+		if route.Path != "" {
+			fmt.Fprintf(out, "- %s -> %s %s %s\n", route.Kind, route.Target, status, route.Path)
+			continue
+		}
+		fmt.Fprintf(out, "- %s -> %s %s\n", route.Kind, route.Target, status)
+	}
+	return nil
 }
 
 func snippet(s string, n int) string {
