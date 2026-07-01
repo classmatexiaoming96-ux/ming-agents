@@ -63,6 +63,7 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 		if brief != nil {
 			briefs[st.ID] = brief
 			memoryBySubtask[st.ID] = brief.Markdown
+			mirrorBriefAuditToRunBundle(req, brief, st.ID)
 		}
 	}
 	firstBrief := firstBriefResult(briefs, plan.Subtasks)

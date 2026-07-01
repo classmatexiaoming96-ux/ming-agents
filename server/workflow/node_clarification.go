@@ -78,6 +78,8 @@ func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*Node
 		if err := WriteReuseAckAt(ctx, req.RepoRoot, runID, "clarification", ack); err != nil {
 			log.Printf("WriteReuseAckAt failed: %v", err)
 		}
+		mirrorPhaseReuseToRunBundle(req, string(req.Spec.Kind), reusePath)
+		mirrorReuseAckToRunBundle(req, "clarification", ack)
 	}
 	outputPath, err := runClarificationWithMemoryForNode(ctx, req.RepoRoot, userInput, briefMarkdown(brief))
 	if err != nil {
@@ -89,5 +91,6 @@ func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*Node
 		paths = append(paths, reusePath)
 		values["reuse_path"] = reusePath
 	}
+	mirrorBriefAuditToRunBundle(req, brief, "")
 	return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusCompleted, Values: values, OutputPaths: paths}, brief), nil
 }

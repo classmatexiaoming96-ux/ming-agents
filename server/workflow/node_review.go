@@ -95,6 +95,8 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 	}
 	report := MergeReviewReports(subtaskReports, aggregateReport)
 	reviewOutBySubtask["aggregate"] = aggregateOut
+	mirrorBriefAuditToRunBundle(req, brief, "")
+	mirrorReuseAckFileToRunBundle(req, string(req.Spec.Kind))
 	return nodeResultWithBrief(&NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,

@@ -40,6 +40,7 @@ func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSp
 	if runID == "" {
 		runID = time.Now().Format("20060102-150405")
 	}
+	defer freezeRunBundle(repoRoot, runID)
 
 	outputs := make(map[string]NodeOutput, len(initial)+len(spec.Nodes))
 	for nodeID, output := range initial {

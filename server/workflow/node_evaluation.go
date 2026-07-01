@@ -55,6 +55,7 @@ func (n *evaluationNode) Execute(ctx context.Context, req NodeRequest) (*NodeRes
 	if err != nil {
 		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
 	}
+	mirrorEvidenceToRunBundle(req, result)
 	resultJSON, _ := json.Marshal(result)
 	return nodeResultWithBrief(&NodeResult{
 		NodeID:      req.Spec.ID,

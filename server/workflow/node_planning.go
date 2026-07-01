@@ -71,6 +71,8 @@ func (n *planningNode) Execute(ctx context.Context, req NodeRequest) (*NodeResul
 	if err != nil {
 		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
 	}
+	mirrorBriefAuditToRunBundle(req, brief, "")
+	mirrorReuseAckFileToRunBundle(req, string(req.Spec.Kind))
 	planJSON, _ := json.Marshal(plan)
 	return nodeResultWithBrief(&NodeResult{
 		NodeID: req.Spec.ID,
