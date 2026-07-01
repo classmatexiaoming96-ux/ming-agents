@@ -124,6 +124,14 @@ func (e *NodeExecutor) executeNodeWithRetry(ctx context.Context, repoRoot, runID
 			return result, nil
 		}
 		failureClass := failureClassForAttempt(result, err)
+		decision, rollbackErr := e.prepareRollbackDecision(ctx, repoRoot, runID, ns, node, result, failureClass, attempt+1)
+		if rollbackErr != nil {
+			lastErr = rollbackErr
+			break
+		}
+		if result != nil && decision != nil {
+			applyRollbackDecisionToResult(result, decision)
+		}
 		if attempt < maxRetries && shouldRetryNode(ns, failureClass) {
 			continue
 		}
@@ -145,6 +153,91 @@ func (e *NodeExecutor) executeNodeWithRetry(ctx context.Context, repoRoot, runID
 		return nil, fmt.Errorf("node %s returned nil result", ns.ID)
 	}
 	return lastResult, lastErr
+}
+
+func (e *NodeExecutor) prepareRollbackDecision(ctx context.Context, repoRoot, runID string, ns NodeSpec, node WorkflowNode, result *NodeResult, failureClass FailureClass, attemptCount int) (*RollbackDecision, error) {
+	rbNode, ok := node.(RollbackCapableNode)
+	if !ok || !rollbackSpecEnabled(ns.Rollback) {
+		return nil, nil
+	}
+	rctx := executorRollbackContext(repoRoot, runID, ns)
+	signal := RollbackSignal{
+		FailureClass:  failureClass,
+		Reason:        rollbackReason(result),
+		SourceNode:    ns.ID,
+		SourceAttempt: attemptCount,
+	}
+	return rbNode.PrepareRollback(ctx, rctx, signal)
+}
+
+func rollbackSpecEnabled(spec RollbackSpec) bool {
+	return spec.DefaultUnit.Scope != "" ||
+		spec.DefaultUnit.MaxAttempts > 0 ||
+		spec.DefaultUnit.ReusePolicy != "" ||
+		spec.OnContract != "" ||
+		spec.OnHumanReject != "" ||
+		spec.OnProductDefect != ""
+}
+
+func executorRollbackContext(repoRoot, runID string, ns NodeSpec) RollbackContext {
+	spec := ns.Rollback
+	unit := spec.DefaultUnit
+	return RollbackContext{
+		RunID:    runID,
+		NodeID:   ns.ID,
+		NodeKind: ns.Kind,
+		Unit:     unit,
+		Budget: RollbackBudget{
+			MaxAttempts:     unit.MaxAttempts,
+			ExhaustedAction: RollbackActionBlocked,
+		},
+		Lineage: NewFileLineageStore(repoRoot),
+	}
+}
+
+func rollbackReason(result *NodeResult) string {
+	if result == nil {
+		return "node returned nil result"
+	}
+	if result.RetryAdvice != "" {
+		return result.RetryAdvice
+	}
+	if result.Error != "" {
+		return result.Error
+	}
+	return string(result.Status)
+}
+
+func applyRollbackDecisionToResult(result *NodeResult, decision *RollbackDecision) {
+	if result.RetryAdvice == "" {
+		result.RetryAdvice = decision.Rationale
+	}
+	if result.NextAction == "" {
+		result.NextAction = nextActionForRollbackDecision(decision.Action)
+	}
+}
+
+func nextActionForRollbackDecision(action RollbackAction) string {
+	switch action {
+	case RollbackActionRetrySubtask:
+		return string(NextActionRetrySubtask)
+	case RollbackActionFixEnvironment:
+		return string(NextActionFixEnvironment)
+	case RollbackActionAskUser:
+		return string(NextActionAskUser)
+	case RollbackActionRegenerateSubtask:
+		return string(NextActionRegenerateSubtask)
+	case RollbackActionRetryReport:
+		return string(NextActionRetryReport)
+	case RollbackActionRetryGenerator:
+		return string(NextActionRetryGenerator)
+	case RollbackActionFixClarification, RollbackActionRegeneratePlan:
+		return "retry_generator"
+	case RollbackActionBlocked:
+		return "blocked"
+	default:
+		return ""
+	}
 }
 
 func nodeAttemptFailed(result *NodeResult, err error) bool {
