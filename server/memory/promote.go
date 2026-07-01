@@ -90,9 +90,22 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 	if strings.TrimSpace(req.Rationale) == "" {
 		return nil, fmt.Errorf("promotion requires a rationale")
 	}
+	// L3 -> L2 promotion is human-confirmed by default: an apply must carry a
+	// human actor with a name. Service actors cannot promote until a signed
+	// service policy exists.
+	if req.Actor.Kind != "human" || strings.TrimSpace(req.Actor.Name) == "" {
+		return nil, fmt.Errorf("promotion to l2 requires a human actor with a name")
+	}
 	source, err := loadMemoryByID(req.SourceID)
 	if err != nil {
 		return nil, err
+	}
+	// Only a candidate or under_review source may be promoted. This blocks
+	// re-promoting an already-promoted L2/L1 authority memory or resurrecting an
+	// archived/superseded/rejected one through the promotion path.
+	fromState := ResolvePromotionState(source)
+	if fromState != PromotionCandidate && fromState != PromotionUnderReview {
+		return nil, fmt.Errorf("promotion source %q must be a candidate or under_review memory, got %q", req.SourceID, fromState)
 	}
 	// Merge any operator-supplied evidence so the promoted memory and the
 	// eligibility check see the complete provenance. SourceRunIDs are derived
@@ -112,7 +125,6 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 	}
 
 	report := evaluateL3ToL2(source, DefaultL3ToL2Threshold)
-	fromState := ResolvePromotionState(source)
 	result := &PromotionResult{
 		SourceID:  req.SourceID,
 		FromState: fromState,
@@ -148,6 +160,14 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 	result.DryRun = req.DryRun
 	if req.DryRun {
 		return result, nil
+	}
+
+	// Promote is an atomic review-and-promote: the candidate passes through
+	// review before promotion. Validate the under_review -> promoted edge so the
+	// terminal transition is the one the state machine actually allows (there is
+	// no direct candidate -> promoted edge).
+	if err := ValidatePromotionTransition(PromotionUnderReview, PromotionPromoted); err != nil {
+		return nil, err
 	}
 
 	eventID, err := appendPromotionAudit(PromotionAuditEvent{

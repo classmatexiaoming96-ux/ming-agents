@@ -152,6 +152,44 @@ func TestPromote_SingleRunHumanOverride(t *testing.T) {
 	}
 }
 
+func TestPromote_RejectsServiceActor(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+	runs := []string{"run-a", "run-b", "run-c"}
+	for _, r := range runs {
+		makeFrozenRun(t, "ming-agents", r)
+	}
+	writeCandidate(t, "cand-1", "ming-agents", runs, "")
+	_, err := Promote(PromotionRequest{
+		SourceID: "cand-1", TargetLayer: "l2", Rationale: "three runs agree",
+		Actor: PromotionActor{Kind: "service", Name: "bot"},
+	})
+	if err == nil {
+		t.Fatal("Promote with a service actor must be rejected")
+	}
+	// A blank human name is also rejected.
+	if _, err := Promote(PromotionRequest{
+		SourceID: "cand-1", TargetLayer: "l2", Rationale: "three runs agree",
+		Actor: PromotionActor{Kind: "human"},
+	}); err == nil {
+		t.Fatal("Promote with an unnamed human actor must be rejected")
+	}
+}
+
+func TestPromote_RejectsAlreadyPromotedSource(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+	// An active, promoted L2 memory must not be re-promoted through Promote.
+	writeL2Memory(t, "ming-agents", "l2-1", "Use pooling", "Pool DB connections.", []string{"db"})
+	_, err := Promote(PromotionRequest{
+		SourceID: "l2-1", TargetLayer: "l2", Rationale: "again",
+		Actor: PromotionActor{Kind: "human", Name: "alice"},
+	})
+	if err == nil {
+		t.Fatal("Promote of an already-promoted L2 source must be rejected")
+	}
+}
+
 func TestListPending_L2ShowsCandidatesWithVerdict(t *testing.T) {
 	useTempVault(t)
 	fixedNow(t, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
