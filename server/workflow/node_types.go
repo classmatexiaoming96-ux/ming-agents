@@ -156,10 +156,13 @@ type NodeResult struct {
 }
 
 type NodeSpec struct {
-	ID        string
-	Kind      NodeKind
-	DependsOn []string
-	Config    map[string]any
+	ID         string         `json:"id"`
+	Kind       NodeKind       `json:"kind"`
+	DependsOn  []string       `json:"depends_on,omitempty"`
+	Config     map[string]any `json:"config,omitempty"`
+	MaxRetries int            `json:"max_retries,omitempty"`
+	RetryOn    []FailureClass `json:"retry_on,omitempty"`
+	Rollback   RollbackSpec   `json:"rollback,omitempty"`
 }
 
 type NodeServices struct {
