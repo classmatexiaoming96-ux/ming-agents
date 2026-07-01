@@ -322,6 +322,85 @@ func TestManifest_ArtifactCountsAccurate(t *testing.T) {
 	}
 }
 
+func TestManifest_IncludesArtifactHashes(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	if err := receiver.ReceivePhaseReuse("planning", "reuse"); err != nil {
+		t.Fatalf("ReceivePhaseReuse error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(receiver.Root(), "manifest.json"))
+	if err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	var manifest runBundleManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("manifest decode error = %v", err)
+	}
+	if manifest.SchemaVersion != 1 {
+		t.Fatalf("SchemaVersion = %d, want 1", manifest.SchemaVersion)
+	}
+	found := false
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Path == "phase-reuse/planning.md" {
+			found = true
+			if artifact.Kind != "phase_reuse" || artifact.Size != int64(len("reuse")) || artifact.SHA256 == "" {
+				t.Fatalf("artifact = %+v, want kind/size/sha256", artifact)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("manifest artifacts = %+v, want phase-reuse/planning.md", manifest.Artifacts)
+	}
+}
+
+func TestFreeze_WritesManifestHash(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	if err := receiver.ReceivePhaseReuse("planning", "reuse"); err != nil {
+		t.Fatalf("ReceivePhaseReuse error = %v", err)
+	}
+	if err := receiver.Freeze(); err != nil {
+		t.Fatalf("Freeze error = %v", err)
+	}
+
+	manifestData, err := os.ReadFile(filepath.Join(receiver.Root(), "manifest.json"))
+	if err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	var frozen struct {
+		ManifestSHA256 string `json:"manifest_sha256"`
+	}
+	frozenData, err := os.ReadFile(filepath.Join(receiver.Root(), "_frozen"))
+	if err != nil {
+		t.Fatalf("_frozen missing: %v", err)
+	}
+	if err := json.Unmarshal(frozenData, &frozen); err != nil {
+		t.Fatalf("_frozen decode error = %v", err)
+	}
+	if frozen.ManifestSHA256 != sha256Hex(manifestData) {
+		t.Fatalf("manifest_sha256 = %q, want %q", frozen.ManifestSHA256, sha256Hex(manifestData))
+	}
+}
+
+func TestVerifyIntegrity_DetectsTampering(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	if err := receiver.ReceivePhaseReuse("planning", "reuse"); err != nil {
+		t.Fatalf("ReceivePhaseReuse error = %v", err)
+	}
+	if err := receiver.Freeze(); err != nil {
+		t.Fatalf("Freeze error = %v", err)
+	}
+	artifactPath := filepath.Join(receiver.Root(), "phase-reuse", "planning.md")
+	if err := os.Chmod(artifactPath, 0644); err != nil {
+		t.Fatalf("Chmod artifact error = %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("tampered"), 0644); err != nil {
+		t.Fatalf("tamper artifact error = %v", err)
+	}
+	if err := receiver.VerifyIntegrity(); err == nil {
+		t.Fatal("VerifyIntegrity error = nil, want tamper detection")
+	}
+}
+
 func newTestRunBundleReceiver(t *testing.T) *RunBundleReceiver {
 	t.Helper()
 	oldVault := VaultDir

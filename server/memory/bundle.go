@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -28,12 +29,24 @@ type ReuseAck struct {
 }
 
 type runBundleManifest struct {
-	Project        string         `json:"project"`
-	RunID          string         `json:"run_id"`
-	CreatedAt      string         `json:"created_at"`
-	FrozenAt       *string        `json:"frozen_at"`
-	State          string         `json:"state"`
-	ArtifactCounts map[string]int `json:"artifact_counts"`
+	SchemaVersion  int                 `json:"schema_version"`
+	Project        string              `json:"project"`
+	RunID          string              `json:"run_id"`
+	CreatedAt      string              `json:"created_at"`
+	FrozenAt       *string             `json:"frozen_at"`
+	FinalStatus    string              `json:"final_status,omitempty"`
+	State          string              `json:"state"`
+	ArtifactCounts map[string]int      `json:"artifact_counts"`
+	Artifacts      []runBundleArtifact `json:"artifacts"`
+}
+
+type runBundleArtifact struct {
+	Path       string `json:"path"`
+	Kind       string `json:"kind"`
+	Size       int64  `json:"size"`
+	SHA256     string `json:"sha256"`
+	CopyMode   string `json:"copy_mode,omitempty"`
+	SourcePath string `json:"source_path,omitempty"`
 }
 
 type runBundlePointer struct {
@@ -279,10 +292,27 @@ func (r *RunBundleReceiver) Freeze() error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	manifest.State = "frozen"
 	manifest.FrozenAt = &now
+	if manifest.FinalStatus == "" {
+		manifest.FinalStatus = "success"
+	}
 	if err := r.writeManifest(manifest); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(r.root, "_frozen"), []byte(now+"\n"), 0644); err != nil {
+	manifestData, err := os.ReadFile(filepath.Join(r.root, "manifest.json"))
+	if err != nil {
+		return err
+	}
+	frozen := map[string]string{
+		"frozen_at":       now,
+		"manifest_sha256": sha256Hex(manifestData),
+		"schema_version":  "1",
+		"final_status":    manifest.FinalStatus,
+	}
+	frozenData, err := json.MarshalIndent(frozen, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(r.root, "_frozen"), append(frozenData, '\n'), 0644); err != nil {
 		return err
 	}
 	return filepath.WalkDir(r.root, func(path string, d os.DirEntry, err error) error {
@@ -294,6 +324,48 @@ func (r *RunBundleReceiver) Freeze() error {
 		}
 		return os.Chmod(path, 0444)
 	})
+}
+
+func (r *RunBundleReceiver) VerifyIntegrity() error {
+	if r == nil {
+		return errors.New("nil run bundle receiver")
+	}
+	frozenData, err := os.ReadFile(filepath.Join(r.root, "_frozen"))
+	if err != nil {
+		return err
+	}
+	var frozen struct {
+		ManifestSHA256 string `json:"manifest_sha256"`
+	}
+	if err := json.Unmarshal(frozenData, &frozen); err != nil {
+		return err
+	}
+	manifestPath := filepath.Join(r.root, "manifest.json")
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return err
+	}
+	if got := sha256Hex(manifestData); got != frozen.ManifestSHA256 {
+		return fmt.Errorf("manifest sha256 = %s, want %s", got, frozen.ManifestSHA256)
+	}
+	var manifest runBundleManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return err
+	}
+	for _, artifact := range manifest.Artifacts {
+		path := filepath.Join(r.root, filepath.FromSlash(artifact.Path))
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read artifact %s: %w", artifact.Path, err)
+		}
+		if int64(len(data)) != artifact.Size {
+			return fmt.Errorf("artifact %s size = %d, want %d", artifact.Path, len(data), artifact.Size)
+		}
+		if got := sha256Hex(data); got != artifact.SHA256 {
+			return fmt.Errorf("artifact %s sha256 = %s, want %s", artifact.Path, got, artifact.SHA256)
+		}
+	}
+	return nil
 }
 
 func (r *RunBundleReceiver) ensureOpen() error {
@@ -385,6 +457,7 @@ func (r *RunBundleReceiver) loadManifest() (runBundleManifest, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return runBundleManifest{
+			SchemaVersion:  1,
 			Project:        r.project,
 			RunID:          r.runID,
 			CreatedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -402,6 +475,9 @@ func (r *RunBundleReceiver) loadManifest() (runBundleManifest, error) {
 	if manifest.ArtifactCounts == nil {
 		manifest.ArtifactCounts = map[string]int{}
 	}
+	if manifest.SchemaVersion == 0 {
+		manifest.SchemaVersion = 1
+	}
 	return manifest, nil
 }
 
@@ -410,11 +486,92 @@ func (r *RunBundleReceiver) writeManifest(manifest runBundleManifest) error {
 		return err
 	}
 	manifest.ArtifactCounts = r.artifactCounts()
+	artifacts, err := r.artifacts()
+	if err != nil {
+		return err
+	}
+	manifest.Artifacts = artifacts
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(r.root, "manifest.json"), append(data, '\n'), 0644)
+}
+
+func (r *RunBundleReceiver) artifacts() ([]runBundleArtifact, error) {
+	var artifacts []runBundleArtifact
+	if _, err := os.Stat(r.root); errors.Is(err, os.ErrNotExist) {
+		return artifacts, nil
+	}
+	err := filepath.WalkDir(r.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(r.root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "manifest.json" || rel == "_frozen" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		artifact := runBundleArtifact{
+			Path:     rel,
+			Kind:     artifactKind(rel),
+			Size:     int64(len(data)),
+			SHA256:   sha256Hex(data),
+			CopyMode: artifactCopyMode(rel),
+		}
+		if strings.HasSuffix(rel, ".pointer.json") {
+			var pointer runBundlePointer
+			if err := json.Unmarshal(data, &pointer); err == nil {
+				artifact.CopyMode = pointer.CopyMode
+				artifact.SourcePath = pointer.SourcePath
+			}
+		}
+		artifacts = append(artifacts, artifact)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(artifacts, func(i, j int) bool {
+		return artifacts[i].Path < artifacts[j].Path
+	})
+	return artifacts, nil
+}
+
+func artifactKind(rel string) string {
+	switch {
+	case strings.HasPrefix(rel, "phase-reuse/"):
+		return "phase_reuse"
+	case strings.HasPrefix(rel, "reuse-ack/"):
+		return "reuse_ack"
+	case strings.HasPrefix(rel, "brief-audit/"):
+		return "brief_audit"
+	case strings.HasPrefix(rel, "evidence/"):
+		return "evidence_pointers"
+	case strings.HasPrefix(rel, "automind-summary/"):
+		return "automind_summary"
+	case rel == "receiver-status.json":
+		return "receiver_status"
+	default:
+		return "unknown"
+	}
+}
+
+func artifactCopyMode(rel string) string {
+	if strings.HasSuffix(rel, ".pointer.json") || rel == "evidence/pointers.jsonl" {
+		return "pointer"
+	}
+	return "copy"
 }
 
 func (r *RunBundleReceiver) artifactCounts() map[string]int {
