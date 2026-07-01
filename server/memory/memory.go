@@ -893,6 +893,9 @@ func Recall(query, project, memType string, tags []string, minScore float64, sta
 
 	var results []Memory
 	for _, m := range memories {
+		if !isRecallVisibleMemory(m) {
+			continue
+		}
 		if memType != "" && m.Type != memType {
 			continue
 		}
@@ -1156,6 +1159,9 @@ func Stats() (total, active, archived, superseded int, byType map[string]int, er
 	}
 	byType = map[string]int{}
 	for _, m := range all {
+		if !isRecallVisibleMemory(m) {
+			continue
+		}
 		switch m.Status {
 		case "active":
 			active++
@@ -1166,5 +1172,9 @@ func Stats() (total, active, archived, superseded int, byType map[string]int, er
 			superseded++
 		}
 	}
-	return len(all), active, archived, superseded, byType, nil
+	return active + archived + superseded, active, archived, superseded, byType, nil
+}
+
+func isRecallVisibleMemory(m Memory) bool {
+	return m.Layer != "l2_inbox"
 }

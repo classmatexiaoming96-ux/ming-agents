@@ -393,7 +393,7 @@ func TestIngestCrossProjectCandidates_WritesInboxNotMainL2(t *testing.T) {
 	}
 }
 
-func TestImportSummary_AcceptIndexesCrossProjectCandidatesForRecall(t *testing.T) {
+func TestImportSummary_AcceptExcludesCrossProjectCandidatesFromGlobalRecallAndStats(t *testing.T) {
 	useTempVault(t)
 	mustIngest(t, "unrelated indexed calibrator mentions crossneedle", "decision", "ming-agents", nil, "manual")
 	summary := writeSummaryFixture(t, `
@@ -415,8 +415,15 @@ items:
 	if err != nil {
 		t.Fatalf("Recall() error = %v", err)
 	}
-	if !hasMemoryTitle(got, "Cross-project recall token") {
-		t.Fatalf("Recall() = %+v, want imported cross-project candidate", got)
+	if hasMemoryTitle(got, "Cross-project recall token") {
+		t.Fatalf("Recall() = %+v, want cross-project candidate excluded before curation", got)
+	}
+	total, active, _, _, byType, err := Stats()
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if total != 1 || active != 1 || byType["decision"] != 1 {
+		t.Fatalf("Stats() total=%d active=%d byType=%v, want only curated active memory", total, active, byType)
 	}
 }
 
