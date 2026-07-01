@@ -275,3 +275,55 @@ func TestPromotionAudit_AppendOnly(t *testing.T) {
 		t.Fatalf("event missing schema/id: %+v", events[0])
 	}
 }
+
+func TestPromotionAudit_WritesUnderAuditPromotionPath(t *testing.T) {
+	useTempVault(t)
+	day := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	fixedNow(t, day)
+	if _, err := appendPromotionAudit(PromotionAuditEvent{EventType: PromotionEventPromoted, SourceID: "a"}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	want := filepath.Join(VaultDir, "audit", "promotion", "2026", "07", "promotion-20260701.jsonl")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("audit not written to %s: %v", want, err)
+	}
+	// It must NOT be written under the legacy runs namespace.
+	if _, err := os.Stat(filepath.Join(VaultDir, "runs", "_promotion_audit")); !os.IsNotExist(err) {
+		t.Fatalf("audit written under legacy runs namespace: %v", err)
+	}
+}
+
+func TestPromotionAudit_ReadsLegacyPath(t *testing.T) {
+	useTempVault(t)
+	day := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	fixedNow(t, day)
+	// Simulate a pre-migration log under runs/_promotion_audit.
+	legacyDir := filepath.Join(VaultDir, "runs", "_promotion_audit")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("mkdir legacy: %v", err)
+	}
+	legacyLine := `{"schema_version":1,"event_id":"evt_legacy","event_type":"promoted","timestamp":"2026-07-01T10:00:00Z","source_id":"old","from_state":"candidate","to_state":"promoted","outcome":"promoted","rationale":"legacy"}`
+	if err := os.WriteFile(filepath.Join(legacyDir, "2026-07-01.jsonl"), []byte(legacyLine+"\n"), 0o644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	// A new event goes to the new path.
+	if _, err := appendPromotionAudit(PromotionAuditEvent{EventType: PromotionEventRevoked, SourceID: "new"}); err != nil {
+		t.Fatalf("append new: %v", err)
+	}
+	events, err := ReadPromotionAudit(day)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2 (new + legacy)", len(events))
+	}
+	var sawLegacy bool
+	for _, e := range events {
+		if e.EventID == "evt_legacy" {
+			sawLegacy = true
+		}
+	}
+	if !sawLegacy {
+		t.Fatalf("legacy event not read back: %+v", events)
+	}
+}

@@ -62,7 +62,7 @@ Retry once before fallback when the review node times out.`,
 }
 
 func TestCmdPromote_DryRunByDefault(t *testing.T) {
-	vault := useTempCLIVault(t)
+	useTempCLIVault(t)
 	runs := []string{"run-a", "run-b", "run-c"}
 	for _, r := range runs {
 		seedFrozenRun(t, "ming-agents", r)
@@ -76,13 +76,13 @@ func TestCmdPromote_DryRunByDefault(t *testing.T) {
 	if !strings.Contains(out.String(), "dry-run") {
 		t.Fatalf("output = %q, want dry-run", out.String())
 	}
-	if _, err := os.Stat(filepath.Join(vault, "runs", "_promotion_audit")); !os.IsNotExist(err) {
+	if _, err := os.Stat(memory.PromotionAuditDir()); !os.IsNotExist(err) {
 		t.Fatalf("dry-run wrote audit: %v", err)
 	}
 }
 
 func TestCmdPromote_ApplyWritesAudit(t *testing.T) {
-	vault := useTempCLIVault(t)
+	useTempCLIVault(t)
 	runs := []string{"run-a", "run-b", "run-c"}
 	for _, r := range runs {
 		seedFrozenRun(t, "ming-agents", r)
@@ -96,7 +96,7 @@ func TestCmdPromote_ApplyWritesAudit(t *testing.T) {
 	if !strings.Contains(out.String(), "audit=") {
 		t.Fatalf("output = %q, want audit id", out.String())
 	}
-	if _, err := os.Stat(filepath.Join(vault, "runs", "_promotion_audit")); err != nil {
+	if _, err := os.Stat(memory.PromotionAuditDir()); err != nil {
 		t.Fatalf("audit dir missing after apply: %v", err)
 	}
 }

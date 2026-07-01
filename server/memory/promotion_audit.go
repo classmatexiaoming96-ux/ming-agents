@@ -54,12 +54,30 @@ const promotionAuditSchemaVersion = 1
 // audit. It is intentionally separate from the per-run, frozen L3 bundles:
 // promotion can occur weeks later and may involve multiple runs or L2 memories.
 func PromotionAuditDir() string {
+	return filepath.Join(VaultDir, "audit", "promotion")
+}
+
+// PromotionAuditPath returns the daily append-only JSONL log for the given time,
+// partitioned by year and month: audit/promotion/YYYY/MM/promotion-YYYYMMDD.jsonl.
+func PromotionAuditPath(t time.Time) string {
+	t = t.UTC()
+	return filepath.Join(
+		PromotionAuditDir(),
+		t.Format("2006"),
+		t.Format("01"),
+		"promotion-"+t.Format("20060102")+".jsonl",
+	)
+}
+
+// legacyPromotionAuditDir is the pre-migration namespace under the runs tree. It
+// is still read for backwards compatibility but never written to.
+func legacyPromotionAuditDir() string {
 	return filepath.Join(VaultDir, "runs", "_promotion_audit")
 }
 
-// PromotionAuditPath returns the daily append-only JSONL log for the given time.
-func PromotionAuditPath(t time.Time) string {
-	return filepath.Join(PromotionAuditDir(), t.UTC().Format(dateLayout)+".jsonl")
+// legacyPromotionAuditPath returns the pre-migration daily log path.
+func legacyPromotionAuditPath(t time.Time) string {
+	return filepath.Join(legacyPromotionAuditDir(), t.UTC().Format(dateLayout)+".jsonl")
 }
 
 // newAuditEventID derives a stable id from the event's identifying fields so the
@@ -100,15 +118,14 @@ func auditEventTime(event PromotionAuditEvent) time.Time {
 // It is the commit step of the prepare/commit split: callers append only after
 // their file mutations have succeeded.
 func appendPreparedAudit(event PromotionAuditEvent) error {
-	dir := PromotionAuditDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir promotion audit dir: %w", err)
-	}
 	line, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal audit event: %w", err)
 	}
 	path := PromotionAuditPath(auditEventTime(event))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir promotion audit dir: %w", err)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("open promotion audit log: %w", err)
@@ -131,36 +148,50 @@ func appendPromotionAudit(event PromotionAuditEvent) (string, error) {
 	return event.EventID, nil
 }
 
+// auditRelativePath returns the vault-relative log path for the given time,
+// used to build a memory's promotion_audit reference.
+func auditRelativePath(t time.Time) string {
+	full := PromotionAuditPath(t)
+	if rel, err := filepath.Rel(VaultDir, full); err == nil {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(full)
+}
+
 // auditReferenceForEvent returns a vault-relative pointer to a prepared event's
 // log line, using the event's own timestamp so the reference always points at
 // the file the event was written to.
 func auditReferenceForEvent(event PromotionAuditEvent) string {
-	return "runs/_promotion_audit/" + auditEventTime(event).Format(dateLayout) + ".jsonl#" + event.EventID
+	return auditRelativePath(auditEventTime(event)) + "#" + event.EventID
 }
 
 // auditReference returns a vault-relative pointer suitable for storing in a
 // memory's PromotionAudit field, linking it to its append-only log line.
 func auditReference(eventID string) string {
-	return "runs/_promotion_audit/" + now().UTC().Format(dateLayout) + ".jsonl#" + eventID
+	return auditRelativePath(now().UTC()) + "#" + eventID
 }
 
 // ReadPromotionAudit reads all audit events for a given day, in append order.
-// It is used by tests and future indexers; it never mutates the log.
+// It reads the current audit/promotion path first and then the legacy
+// runs/_promotion_audit path so pre-migration logs remain visible. It is used by
+// tests and future indexers; it never mutates the log.
 func ReadPromotionAudit(t time.Time) ([]PromotionAuditEvent, error) {
-	data, err := os.ReadFile(PromotionAuditPath(t))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
 	var events []PromotionAuditEvent
-	for _, line := range splitJSONLines(data) {
-		var event PromotionAuditEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			return nil, fmt.Errorf("decode audit event: %w", err)
+	for _, path := range []string{PromotionAuditPath(t), legacyPromotionAuditPath(t)} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
-		events = append(events, event)
+		for _, line := range splitJSONLines(data) {
+			var event PromotionAuditEvent
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				return nil, fmt.Errorf("decode audit event: %w", err)
+			}
+			events = append(events, event)
+		}
 	}
 	return events, nil
 }
