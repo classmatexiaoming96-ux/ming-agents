@@ -265,3 +265,166 @@ func TestNodeExecutorStopsOnBlockedNode(t *testing.T) {
 		t.Fatal("Run() error = nil, want blocked error")
 	}
 }
+
+type rollbackRecordingNode struct {
+	kind         NodeKind
+	result       *NodeResult
+	executeCalls *int
+	prepareCalls *int
+	prepare      func(RollbackContext, RollbackSignal) *RollbackDecision
+}
+
+func (n rollbackRecordingNode) Kind() NodeKind { return n.kind }
+
+func (n rollbackRecordingNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
+	*n.executeCalls = *n.executeCalls + 1
+	return n.result, nil
+}
+
+func (n rollbackRecordingNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
+	*n.prepareCalls = *n.prepareCalls + 1
+	if n.prepare != nil {
+		return n.prepare(rctx, signal), nil
+	}
+	return &RollbackDecision{Action: RollbackActionRetryReport, TargetScope: rctx.Unit.Scope}, nil
+}
+
+func (n rollbackRecordingNode) RollbackArtifacts(rctx RollbackContext) []ArtifactRef {
+	return []ArtifactRef{{Type: ArtifactTypeReviewReport, Path: "review.out.md"}}
+}
+
+type recordingStatusWriter struct {
+	states      []map[string]NodeStatus
+	lastDetails map[string]any
+	phase       *PhaseStatus
+}
+
+func (w *recordingStatusWriter) WriteState(repoRoot, runID string, nodes map[string]NodeStatus, details map[string]any) error {
+	snapshot := make(map[string]NodeStatus, len(nodes))
+	for nodeID, status := range nodes {
+		snapshot[nodeID] = status
+	}
+	w.states = append(w.states, snapshot)
+	w.lastDetails = details
+	return nil
+}
+
+func (w *recordingStatusWriter) WritePhase(runID string, status *PhaseStatus) error {
+	w.phase = status
+	return nil
+}
+
+func TestNodeExecutorSkipsRollbackRunnerWhenSpecDisabled(t *testing.T) {
+	var executeCalls, prepareCalls int
+	registry := NewNodeRegistry()
+	registry.Register("rollback-capable", func() WorkflowNode {
+		return rollbackRecordingNode{
+			kind:         "rollback-capable",
+			result:       &NodeResult{NodeID: "review", Status: NodeStatusFailed, Error: "bad report", FailureClass: FailureClassContractError},
+			executeCalls: &executeCalls,
+			prepareCalls: &prepareCalls,
+		}
+	})
+
+	_, err := NewNodeExecutor(registry, NodeServices{}).Run(context.Background(), "/repo", WorkflowSpec{
+		RunID: "run-rollback-disabled",
+		Nodes: []NodeSpec{{
+			ID:   "review",
+			Kind: "rollback-capable",
+		}},
+	}, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want node failure")
+	}
+	if executeCalls != 1 {
+		t.Fatalf("Execute calls = %d, want 1", executeCalls)
+	}
+	if prepareCalls != 0 {
+		t.Fatalf("PrepareRollback calls = %d, want 0", prepareCalls)
+	}
+}
+
+func TestNodeExecutorWritesPhaseStatusForExhaustedRollbackDecision(t *testing.T) {
+	var executeCalls, prepareCalls int
+	writer := &recordingStatusWriter{}
+	spec := RollbackSpec{
+		DefaultUnit: RollbackUnit{Scope: "review", MaxAttempts: 1, ReusePolicy: SessionReuseSameSession},
+		OnContract:  RollbackActionRetryReport,
+	}
+	registry := NewNodeRegistry()
+	registry.Register(NodeKindReview, func() WorkflowNode {
+		return rollbackRecordingNode{
+			kind:         NodeKindReview,
+			result:       &NodeResult{NodeID: "review", Status: NodeStatusFailed, Error: "bad report", FailureClass: FailureClassContractError},
+			executeCalls: &executeCalls,
+			prepareCalls: &prepareCalls,
+			prepare: func(rctx RollbackContext, signal RollbackSignal) *RollbackDecision {
+				return NewRollbackRunner().Decide(rctx, rctx.Spec, rctx.Unit, []AttemptEvent{{Scope: "review", Attempt: 1}}, signal)
+			},
+		}
+	})
+
+	_, err := NewNodeExecutor(registry, NodeServices{StatusWriter: writer}).Run(context.Background(), "/repo", WorkflowSpec{
+		RunID: "run-exhausted",
+		Nodes: []NodeSpec{{
+			ID:       "review",
+			Kind:     NodeKindReview,
+			Rollback: spec,
+		}},
+	}, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want exhausted node failure")
+	}
+	if executeCalls != 1 {
+		t.Fatalf("Execute calls = %d, want 1", executeCalls)
+	}
+	if prepareCalls != 1 {
+		t.Fatalf("PrepareRollback calls = %d, want 1", prepareCalls)
+	}
+	if writer.phase == nil {
+		t.Fatal("WritePhase was not called")
+	}
+	if writer.phase.FailureClass != FailureClassContractError {
+		t.Fatalf("PhaseStatus FailureClass = %q, want %q", writer.phase.FailureClass, FailureClassContractError)
+	}
+	if writer.phase.NextAction != NextActionForFailure(FailureClassContractError) {
+		t.Fatalf("PhaseStatus NextAction = %q, want %q", writer.phase.NextAction, NextActionForFailure(FailureClassContractError))
+	}
+	if got := writer.lastDetails["retry_exhausted"]; got != true {
+		t.Fatalf("state retry_exhausted = %v, want true", got)
+	}
+	if got := writer.lastDetails["attempt_count"]; got != 1 {
+		t.Fatalf("state attempt_count = %v, want 1", got)
+	}
+}
+
+func TestNodeExecutorMaxRetriesZeroDoesNotRetry(t *testing.T) {
+	var attempts int
+	registry := NewNodeRegistry()
+	registry.Register("single-shot", func() WorkflowNode {
+		return sequenceNode{
+			kind:  "single-shot",
+			calls: &attempts,
+			results: []*NodeResult{
+				{NodeID: "single-shot", Status: NodeStatusFailed, Error: "temporary", FailureClass: FailureClassTransient},
+				{NodeID: "single-shot", Status: NodeStatusCompleted},
+			},
+		}
+	})
+
+	_, err := NewNodeExecutor(registry, NodeServices{}).Run(context.Background(), "/repo", WorkflowSpec{
+		RunID: "run-no-retry",
+		Nodes: []NodeSpec{{
+			ID:         "single-shot",
+			Kind:       "single-shot",
+			MaxRetries: 0,
+			RetryOn:    []FailureClass{FailureClassTransient},
+		}},
+	}, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want first attempt failure")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
