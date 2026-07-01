@@ -29,6 +29,13 @@ type MigrationResult struct {
 // Dry-run reports the counts without writing.
 func BackfillPromotionState(dryRun bool) (MigrationResult, error) {
 	result := MigrationResult{DryRun: dryRun}
+	if !dryRun {
+		// Serialise the rewrite phase against concurrent promotion/curation so a
+		// migration cannot clobber promotion metadata written between our read
+		// and our write. Dry-run never writes, so it does not need the lock.
+		promotionMu.Lock()
+		defer promotionMu.Unlock()
+	}
 	for _, sub := range []string{"notes", "archive", "inbox"} {
 		root := filepath.Join(VaultDir, sub)
 		if _, err := os.Stat(root); os.IsNotExist(err) {
@@ -45,7 +52,7 @@ func BackfillPromotionState(dryRun bool) (MigrationResult, error) {
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
-			mem, body, err := parseFrontmatter(string(raw))
+			mem, _, err := parseFrontmatter(string(raw))
 			if err != nil {
 				return err
 			}
@@ -71,15 +78,46 @@ func BackfillPromotionState(dryRun bool) (MigrationResult, error) {
 			if dryRun {
 				return nil
 			}
-			mem.Body = body
-			if _, err := writeMemory(mem, filepath.Dir(path)); err != nil {
-				return err
-			}
-			return nil
+			// Re-read the file under the lock and only patch the two missing
+			// frontmatter keys, so any promotion metadata written concurrently
+			// (before we acquired the lock) is preserved rather than overwritten
+			// with our earlier snapshot.
+			return patchMissingPromotionKeys(path)
 		})
 		if err != nil {
 			return result, err
 		}
 	}
 	return result, nil
+}
+
+// patchMissingPromotionKeys re-reads a memory file and writes back only the
+// promotion_state / promotion_audit defaults when they are still missing. If a
+// concurrent promotion already filled them in, it leaves the file untouched.
+func patchMissingPromotionKeys(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reread %s: %w", path, err)
+	}
+	mem, body, err := parseFrontmatter(string(raw))
+	if err != nil {
+		return err
+	}
+	changed := false
+	if !IsValidPromotionState(mem.PromotionState) {
+		mem.PromotionState = ResolvePromotionState(mem)
+		changed = true
+	}
+	if mem.PromotionState == PromotionPromoted && mem.PromotionAudit == "" {
+		mem.PromotionAudit = "legacy:no-audit"
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	mem.Body = body
+	if _, err := writeMemory(mem, filepath.Dir(path)); err != nil {
+		return err
+	}
+	return nil
 }

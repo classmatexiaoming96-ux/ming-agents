@@ -3,6 +3,7 @@ package memory
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -102,6 +103,50 @@ func TestBackfillPromotionState_DryRunDoesNotWrite(t *testing.T) {
 	}
 	if mem.PromotionState != "" {
 		t.Fatalf("dry-run wrote promotion_state: %q", mem.PromotionState)
+	}
+}
+
+func TestBackfillPromotionState_ConcurrentWithPromoteKeepsMetadata(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+
+	// A legacy L2 memory with no promotion_state, plus a promotable candidate.
+	writeLegacyMemory(t, filepath.Join(VaultDir, "notes", "ming-agents"), "leg-active", "active", "l2")
+	runs := []string{"run-a", "run-b", "run-c"}
+	for _, r := range runs {
+		makeFrozenRun(t, "ming-agents", r)
+	}
+	candID := writeCandidate(t, "cand-1", "ming-agents", runs, "")
+
+	// Run migration and a promotion concurrently. The promotion lock serialises
+	// their writes; the race detector guards against unsynchronised access.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := BackfillPromotionState(false); err != nil {
+			t.Errorf("BackfillPromotionState error = %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := Promote(PromotionRequest{
+			SourceID: candID, TargetLayer: "l2", Rationale: "three runs agree",
+			Actor: PromotionActor{Kind: "human", Name: "alice"},
+		}); err != nil {
+			t.Errorf("Promote error = %v", err)
+		}
+	}()
+	wg.Wait()
+
+	// The promoted candidate must retain its promoted state regardless of
+	// migration ordering (migration only patches missing keys).
+	cand, err := loadMemoryByID(candID)
+	if err != nil {
+		t.Fatalf("load candidate: %v", err)
+	}
+	if cand.PromotionState != PromotionPromoted {
+		t.Fatalf("candidate promotion_state = %q, want promoted (migration clobbered it)", cand.PromotionState)
 	}
 }
 
