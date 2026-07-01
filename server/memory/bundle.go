@@ -41,6 +41,15 @@ type runBundlePointer struct {
 	SHA256     string `json:"sha256"`
 }
 
+type runBundleReceiverStatus map[string]runBundleArtifactStatus
+
+type runBundleArtifactStatus struct {
+	Status    string   `json:"status"`
+	Files     []string `json:"files,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	UpdatedAt string   `json:"updated_at"`
+}
+
 // RunBundleReceiver mirrors raw workflow artifacts into the L3 run bundle.
 // Receive methods return write errors to callers for observability, but callers
 // should treat those errors as soft failures and continue the workflow.
@@ -73,74 +82,107 @@ func (r *RunBundleReceiver) Root() string {
 }
 
 func (r *RunBundleReceiver) ReceivePhaseReuse(phase, content string) error {
-	if err := r.ensureOpen(); err != nil {
+	var files []string
+	err := func() error {
+		if err := r.ensureOpen(); err != nil {
+			return err
+		}
+		name := safeBundleName(phase) + ".md"
+		written, err := r.writeArtifact(filepath.Join("phase-reuse", name), []byte(content))
+		files = append(files, written)
 		return err
-	}
-	name := safeBundleName(phase) + ".md"
-	return r.writeArtifact(filepath.Join("phase-reuse", name), []byte(content))
+	}()
+	return r.recordReceiveStatus("phase_reuse", files, err)
 }
 
 func (r *RunBundleReceiver) ReceiveReuseAck(phase string, ack ReuseAck) error {
-	if err := r.ensureOpen(); err != nil {
+	var files []string
+	err := func() error {
+		if err := r.ensureOpen(); err != nil {
+			return err
+		}
+		if ack.RunID == "" {
+			ack.RunID = r.runID
+		}
+		if ack.Phase == "" {
+			ack.Phase = phase
+		}
+		if ack.Timestamp.IsZero() {
+			ack.Timestamp = time.Now().UTC()
+		}
+		written, err := r.writeJSONArtifact(filepath.Join("reuse-ack", safeBundleName(phase)+".json"), ack)
+		files = append(files, written)
 		return err
-	}
-	if ack.RunID == "" {
-		ack.RunID = r.runID
-	}
-	if ack.Phase == "" {
-		ack.Phase = phase
-	}
-	if ack.Timestamp.IsZero() {
-		ack.Timestamp = time.Now().UTC()
-	}
-	return r.writeJSONArtifact(filepath.Join("reuse-ack", safeBundleName(phase)+".json"), ack)
+	}()
+	return r.recordReceiveStatus("reuse_ack", files, err)
 }
 
 func (r *RunBundleReceiver) ReceiveBriefAudit(kind NodeKind, audit *BriefAudit, auditName string) error {
-	if err := r.ensureOpen(); err != nil {
+	var files []string
+	err := func() error {
+		if err := r.ensureOpen(); err != nil {
+			return err
+		}
+		if audit == nil {
+			return nil
+		}
+		name := string(kind) + "-brief"
+		if auditName != "" {
+			name = safeBundleName(auditName) + "-brief"
+		}
+		written, err := r.writeJSONArtifact(filepath.Join("brief-audit", name+".json"), audit)
+		files = append(files, written)
 		return err
+	}()
+	if audit == nil && err == nil {
+		return r.recordSkippedStatus("brief_audit")
 	}
-	if audit == nil {
-		return nil
-	}
-	name := string(kind) + "-brief"
-	if auditName != "" {
-		name = safeBundleName(auditName) + "-brief"
-	}
-	return r.writeJSONArtifact(filepath.Join("brief-audit", name+".json"), audit)
+	return r.recordReceiveStatus("brief_audit", files, err)
 }
 
 func (r *RunBundleReceiver) ReceiveEvidencePointer(name, sourcePath string) error {
-	if err := r.ensureOpen(); err != nil {
+	var files []string
+	err := func() error {
+		if err := r.ensureOpen(); err != nil {
+			return err
+		}
+		filePointer, err := pointerForFile(sourcePath)
+		if err != nil {
+			return err
+		}
+		pointer := map[string]any{
+			"name":        name,
+			"source_path": sourcePath,
+			"size":        filePointer.Size,
+			"sha256":      filePointer.SHA256,
+			"received_at": time.Now().UTC().Format(time.RFC3339),
+		}
+		line, err := json.Marshal(pointer)
+		if err != nil {
+			return err
+		}
+		written, err := r.appendArtifact(filepath.Join("evidence", "pointers.jsonl"), append(line, '\n'))
+		files = append(files, written)
 		return err
-	}
-	filePointer, err := pointerForFile(sourcePath)
-	if err != nil {
-		return err
-	}
-	pointer := map[string]any{
-		"name":        name,
-		"source_path": sourcePath,
-		"size":        filePointer.Size,
-		"sha256":      filePointer.SHA256,
-		"received_at": time.Now().UTC().Format(time.RFC3339),
-	}
-	line, err := json.Marshal(pointer)
-	if err != nil {
-		return err
-	}
-	return r.appendArtifact(filepath.Join("evidence", "pointers.jsonl"), append(line, '\n'))
+	}()
+	return r.recordReceiveStatus("evidence_pointers", files, err)
 }
 
 func (r *RunBundleReceiver) ReceiveAutoMindSummary(rawContent []byte, format string) error {
-	if err := r.ensureOpen(); err != nil {
+	var files []string
+	err := func() error {
+		if err := r.ensureOpen(); err != nil {
+			return err
+		}
+		ext := ".md"
+		if strings.EqualFold(format, "json") {
+			ext = ".json"
+		}
+		written, err := r.writeArtifact(filepath.Join("automind-summary", "raw-summary"+ext), rawContent)
+		files = append(files, written)
 		return err
-	}
-	ext := ".md"
-	if strings.EqualFold(format, "json") {
-		ext = ".json"
-	}
-	return r.writeArtifact(filepath.Join("automind-summary", "raw-summary"+ext), rawContent)
+	}()
+	return r.recordReceiveStatus("automind_summary", files, err)
 }
 
 func (r *RunBundleReceiver) Freeze() error {
@@ -193,9 +235,9 @@ func (r *RunBundleReceiver) ensureOpen() error {
 	return nil
 }
 
-func (r *RunBundleReceiver) writeArtifact(rel string, data []byte) error {
+func (r *RunBundleReceiver) writeArtifact(rel string, data []byte) (string, error) {
 	if err := os.MkdirAll(r.root, 0755); err != nil {
-		return err
+		return "", err
 	}
 	if len(data) > RunBundleLargeFileThreshold {
 		pointer := runBundlePointer{
@@ -208,45 +250,45 @@ func (r *RunBundleReceiver) writeArtifact(rel string, data []byte) error {
 	}
 	path := filepath.Join(r.root, rel)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return err
+		return "", err
 	}
 	manifest, err := r.loadManifest()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return r.writeManifest(manifest)
+	return rel, r.writeManifest(manifest)
 }
 
-func (r *RunBundleReceiver) appendArtifact(rel string, data []byte) error {
+func (r *RunBundleReceiver) appendArtifact(rel string, data []byte) (string, error) {
 	if err := os.MkdirAll(r.root, 0755); err != nil {
-		return err
+		return "", err
 	}
 	path := filepath.Join(r.root, rel)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
+		return "", err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer f.Close()
 	if _, err := f.Write(data); err != nil {
-		return err
+		return "", err
 	}
 	manifest, err := r.loadManifest()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return r.writeManifest(manifest)
+	return rel, r.writeManifest(manifest)
 }
 
-func (r *RunBundleReceiver) writeJSONArtifact(rel string, value any) error {
+func (r *RunBundleReceiver) writeJSONArtifact(rel string, value any) (string, error) {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
 	return r.writeArtifact(rel, append(data, '\n'))
 }
@@ -285,6 +327,65 @@ func (r *RunBundleReceiver) writeManifest(manifest runBundleManifest) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(r.root, "manifest.json"), append(data, '\n'), 0644)
+}
+
+func (r *RunBundleReceiver) recordReceiveStatus(artifact string, files []string, receiveErr error) error {
+	status := "ok"
+	message := ""
+	if receiveErr != nil {
+		status = "failed"
+		message = receiveErr.Error()
+	}
+	statusErr := r.writeReceiverStatus(artifact, runBundleArtifactStatus{
+		Status:    status,
+		Files:     compactNonEmpty(files),
+		Error:     message,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	if receiveErr != nil {
+		return receiveErr
+	}
+	return statusErr
+}
+
+func (r *RunBundleReceiver) recordSkippedStatus(artifact string) error {
+	return r.writeReceiverStatus(artifact, runBundleArtifactStatus{
+		Status:    "skipped",
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (r *RunBundleReceiver) writeReceiverStatus(artifact string, entry runBundleArtifactStatus) error {
+	if r == nil {
+		return errors.New("nil run bundle receiver")
+	}
+	if err := os.MkdirAll(r.root, 0755); err != nil {
+		return err
+	}
+	path := filepath.Join(r.root, "receiver-status.json")
+	status := runBundleReceiverStatus{}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		_ = json.Unmarshal(data, &status)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	status[artifact] = entry
+	data, err = json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0644)
+}
+
+func compactNonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func safeBundleName(name string) string {

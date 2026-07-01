@@ -134,6 +134,30 @@ func TestRunBundleReceiver_LargePhaseReuseStoresPointer(t *testing.T) {
 	}
 }
 
+func TestRunBundleReceiver_SoftFailureOnVaultCorruption(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	manifestDir := filepath.Join(receiver.Root(), "manifest.json")
+	if err := os.MkdirAll(manifestDir, 0755); err != nil {
+		t.Fatalf("MkdirAll manifest corruption error = %v", err)
+	}
+
+	err := receiver.ReceivePhaseReuse("planning", "content")
+	if err == nil {
+		t.Fatal("ReceivePhaseReuse error = nil, want corruption error")
+	}
+	data, readErr := os.ReadFile(filepath.Join(receiver.Root(), "receiver-status.json"))
+	if readErr != nil {
+		t.Fatalf("receiver-status.json missing after soft failure: %v", readErr)
+	}
+	var status map[string]runBundleArtifactStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatalf("receiver-status.json decode error = %v", err)
+	}
+	if status["phase_reuse"].Status != "failed" || status["phase_reuse"].Error == "" {
+		t.Fatalf("receiver-status.json = %+v, want failed phase_reuse entry", status)
+	}
+}
+
 func newTestRunBundleReceiver(t *testing.T) *RunBundleReceiver {
 	t.Helper()
 	oldVault := VaultDir
