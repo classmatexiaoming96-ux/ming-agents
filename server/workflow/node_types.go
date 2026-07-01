@@ -103,6 +103,7 @@ type RollbackContext struct {
 	RunID    string
 	NodeID   string
 	NodeKind NodeKind
+	Spec     RollbackSpec
 	Unit     RollbackUnit
 	Budget   RollbackBudget
 	Lineage  AttemptLineageStore

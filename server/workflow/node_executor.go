@@ -188,12 +188,13 @@ func rollbackSpecEnabled(spec RollbackSpec) bool {
 }
 
 func executorRollbackContext(repoRoot, runID string, ns NodeSpec) RollbackContext {
-	spec := ns.Rollback
+	spec := MergeRollbackSpec(DefaultRollbackSpec(ns.Kind), ns.Rollback)
 	unit := spec.DefaultUnit
 	return RollbackContext{
 		RunID:    runID,
 		NodeID:   ns.ID,
 		NodeKind: ns.Kind,
+		Spec:     spec,
 		Unit:     unit,
 		Budget: RollbackBudget{
 			MaxAttempts:     unit.MaxAttempts,

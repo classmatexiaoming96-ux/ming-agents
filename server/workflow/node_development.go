@@ -10,7 +10,7 @@ type developmentNode struct{}
 func (n *developmentNode) Kind() NodeKind { return NodeKindDevelopment }
 
 func (n *developmentNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
-	spec := DefaultRollbackSpec(NodeKindDevelopment)
+	spec := rollbackSpecForContext(NodeKindDevelopment, rctx)
 	unit := rctx.Unit
 	if unit.Scope == "" {
 		unit = spec.DefaultUnit

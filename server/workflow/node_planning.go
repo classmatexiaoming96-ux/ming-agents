@@ -11,7 +11,7 @@ type planningNode struct{}
 func (n *planningNode) Kind() NodeKind { return NodeKindPlanning }
 
 func (n *planningNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
-	spec := DefaultRollbackSpec(NodeKindPlanning)
+	spec := rollbackSpecForContext(NodeKindPlanning, rctx)
 	unit := rctx.Unit
 	if unit.Scope == "" {
 		unit = spec.DefaultUnit

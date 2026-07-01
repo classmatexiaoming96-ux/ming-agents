@@ -43,12 +43,39 @@ func DefaultRollbackSpec(kind NodeKind) RollbackSpec {
 	}
 }
 
+func MergeRollbackSpec(base, override RollbackSpec) RollbackSpec {
+	if override.DefaultUnit.Scope != "" {
+		base.DefaultUnit.Scope = override.DefaultUnit.Scope
+	}
+	if override.DefaultUnit.MaxAttempts > 0 {
+		base.DefaultUnit.MaxAttempts = override.DefaultUnit.MaxAttempts
+	}
+	if override.DefaultUnit.ReusePolicy != "" {
+		base.DefaultUnit.ReusePolicy = override.DefaultUnit.ReusePolicy
+	}
+	if override.OnContract != "" {
+		base.OnContract = override.OnContract
+	}
+	if override.OnHumanReject != "" {
+		base.OnHumanReject = override.OnHumanReject
+	}
+	if override.OnProductDefect != "" {
+		base.OnProductDefect = override.OnProductDefect
+	}
+	return base
+}
+
+func rollbackSpecForContext(kind NodeKind, rctx RollbackContext) RollbackSpec {
+	return MergeRollbackSpec(DefaultRollbackSpec(kind), rctx.Spec)
+}
+
 func BuildRollbackContext(req NodeRequest) RollbackContext {
 	spec := DefaultRollbackSpec(req.Spec.Kind)
 	return RollbackContext{
 		RunID:    req.RunID,
 		NodeID:   req.Spec.ID,
 		NodeKind: req.Spec.Kind,
+		Spec:     spec,
 		Unit:     spec.DefaultUnit,
 		Budget: RollbackBudget{
 			MaxAttempts:     spec.DefaultUnit.MaxAttempts,

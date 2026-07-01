@@ -11,7 +11,7 @@ type reviewNode struct{}
 func (n *reviewNode) Kind() NodeKind { return NodeKindReview }
 
 func (n *reviewNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
-	spec := DefaultRollbackSpec(NodeKindReview)
+	spec := rollbackSpecForContext(NodeKindReview, rctx)
 	unit := rctx.Unit
 	if unit.Scope == "" {
 		unit = spec.DefaultUnit

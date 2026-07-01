@@ -10,7 +10,7 @@ type clarificationNode struct{}
 func (n *clarificationNode) Kind() NodeKind { return NodeKindClarification }
 
 func (n *clarificationNode) PrepareRollback(ctx context.Context, rctx RollbackContext, signal RollbackSignal) (*RollbackDecision, error) {
-	spec := DefaultRollbackSpec(NodeKindClarification)
+	spec := rollbackSpecForContext(NodeKindClarification, rctx)
 	unit := rctx.Unit
 	if unit.Scope == "" {
 		unit = spec.DefaultUnit
