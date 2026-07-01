@@ -158,6 +158,51 @@ func TestRunBundleReceiver_SoftFailureOnVaultCorruption(t *testing.T) {
 	}
 }
 
+func TestManifest_ArtifactCountsAccurate(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	source := filepath.Join(t.TempDir(), "test.log")
+	if err := os.WriteFile(source, []byte("evidence"), 0644); err != nil {
+		t.Fatalf("WriteFile source error = %v", err)
+	}
+
+	if err := receiver.ReceivePhaseReuse("clarification", "reuse"); err != nil {
+		t.Fatalf("ReceivePhaseReuse error = %v", err)
+	}
+	if err := receiver.ReceiveReuseAck("clarification", ReuseAck{Accepted: true}); err != nil {
+		t.Fatalf("ReceiveReuseAck error = %v", err)
+	}
+	if err := receiver.ReceiveBriefAudit(NodeKind("clarification"), &BriefAudit{}, ""); err != nil {
+		t.Fatalf("ReceiveBriefAudit error = %v", err)
+	}
+	if err := receiver.ReceiveEvidencePointer("test.log", source); err != nil {
+		t.Fatalf("ReceiveEvidencePointer error = %v", err)
+	}
+	if err := receiver.ReceiveAutoMindSummary([]byte("summary"), "md"); err != nil {
+		t.Fatalf("ReceiveAutoMindSummary error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(receiver.Root(), "manifest.json"))
+	if err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	var manifest runBundleManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("manifest decode error = %v", err)
+	}
+	want := map[string]int{
+		"phase_reuse":       1,
+		"reuse_ack":         1,
+		"brief_audit":       1,
+		"evidence_pointers": 1,
+		"automind_summary":  1,
+	}
+	for key, value := range want {
+		if manifest.ArtifactCounts[key] != value {
+			t.Fatalf("manifest.ArtifactCounts[%q] = %d, want %d in %+v", key, manifest.ArtifactCounts[key], value, manifest.ArtifactCounts)
+		}
+	}
+}
+
 func newTestRunBundleReceiver(t *testing.T) *RunBundleReceiver {
 	t.Helper()
 	oldVault := VaultDir

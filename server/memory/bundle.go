@@ -322,11 +322,50 @@ func (r *RunBundleReceiver) writeManifest(manifest runBundleManifest) error {
 	if err := os.MkdirAll(r.root, 0755); err != nil {
 		return err
 	}
+	manifest.ArtifactCounts = r.artifactCounts()
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(r.root, "manifest.json"), append(data, '\n'), 0644)
+}
+
+func (r *RunBundleReceiver) artifactCounts() map[string]int {
+	return map[string]int{
+		"phase_reuse":       countRegularFiles(filepath.Join(r.root, "phase-reuse")),
+		"reuse_ack":         countRegularFiles(filepath.Join(r.root, "reuse-ack")),
+		"brief_audit":       countRegularFiles(filepath.Join(r.root, "brief-audit")),
+		"evidence_pointers": countJSONLLines(filepath.Join(r.root, "evidence", "pointers.jsonl")),
+		"automind_summary":  countRegularFiles(filepath.Join(r.root, "automind-summary")),
+	}
+}
+
+func countRegularFiles(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			count++
+		}
+	}
+	return count
+}
+
+func countJSONLLines(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func (r *RunBundleReceiver) recordReceiveStatus(artifact string, files []string, receiveErr error) error {
