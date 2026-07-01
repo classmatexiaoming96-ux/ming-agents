@@ -63,6 +63,7 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 		RunID:    req.RunID,
 		RepoRoot: req.RepoRoot,
 		Kind:     req.Spec.Kind,
+		Project:  projectFromRepoRoot(req.RepoRoot),
 		Query:    reviewBriefQuery(&plan, results),
 	})
 	if err != nil {

@@ -50,6 +50,7 @@ func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*Node
 		RunID:    runID,
 		RepoRoot: req.RepoRoot,
 		Kind:     req.Spec.Kind,
+		Project:  projectFromRepoRoot(req.RepoRoot),
 		Query:    userInput,
 	})
 	if err != nil {

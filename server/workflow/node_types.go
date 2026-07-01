@@ -155,10 +155,14 @@ type NodeOutput struct {
 }
 
 type NodeResult struct {
-	NodeID         string
-	Status         NodeStatus
-	Values         map[string]any
-	OutputPaths    []string
+	NodeID      string
+	Status      NodeStatus
+	Values      map[string]any
+	OutputPaths []string
+	// BriefAudit is the primary brief audit for the node. Development nodes with
+	// multiple subtasks expose only the first subtask audit here; Phase 4
+	// ImplicitFeedback callers must read Values["brief_paths"] for the remaining
+	// per-subtask audit files.
 	BriefAudit     *memory.BriefAudit
 	BriefPath      string
 	Error          string

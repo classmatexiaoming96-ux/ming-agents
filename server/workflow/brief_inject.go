@@ -17,6 +17,7 @@ type BriefInjectContext struct {
 	RunID     string
 	RepoRoot  string
 	Kind      NodeKind
+	Project   string
 	Query     string
 	AuditName string
 }
@@ -32,12 +33,22 @@ type briefAuditFile struct {
 	Error       string            `json:"error,omitempty"`
 	RunID       string            `json:"run_id"`
 	Kind        NodeKind          `json:"kind"`
+	Project     string            `json:"project"`
 	Query       string            `json:"query"`
 	Budget      int               `json:"budget"`
 	GeneratedAt string            `json:"generated_at"`
 	Audit       memory.BriefAudit `json:"audit"`
 }
 
+// InjectBrief injects project-scoped memory for one workflow node and writes a
+// *-brief.json audit next to the run artifacts.
+//
+// Return shapes are part of the workflow contract:
+//   - (nil, nil): no-op because RepoRoot or RunID is empty.
+//   - (*BriefInjectResult, nil) with status "failed": soft failure; memory
+//     lookup failed but the node must continue without a brief block.
+//   - (*BriefInjectResult, nil) with status "ok": memory was queried and audit
+//     was written; Markdown may still be empty when no memories were injected.
 func InjectBrief(ctx context.Context, ic BriefInjectContext) (*BriefInjectResult, error) {
 	if ic.RepoRoot == "" || ic.RunID == "" {
 		return nil, nil
@@ -45,10 +56,12 @@ func InjectBrief(ctx context.Context, ic BriefInjectContext) (*BriefInjectResult
 	budget := briefBudgetForKind(ic.Kind)
 	path := briefAuditPath(ic)
 	audit := memory.BriefAudit{}
+	project := briefProject(ic.Project)
 	record := briefAuditFile{
 		Status:      "ok",
 		RunID:       ic.RunID,
 		Kind:        ic.Kind,
+		Project:     project,
 		Query:       ic.Query,
 		Budget:      budget,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -76,7 +89,7 @@ func InjectBrief(ctx context.Context, ic BriefInjectContext) (*BriefInjectResult
 	default:
 	}
 
-	block, gotAudit, err := workflowBrief(reuseProject, ic.Query, memory.Budget{MaxTokens: budget})
+	block, gotAudit, err := workflowBrief(project, ic.Query, memory.Budget{MaxTokens: budget})
 	if err != nil {
 		record.Status = "failed"
 		record.Error = err.Error()
@@ -92,6 +105,26 @@ func InjectBrief(ctx context.Context, ic BriefInjectContext) (*BriefInjectResult
 		return nil, err
 	}
 	return &BriefInjectResult{Markdown: markdown, Audit: &gotAudit, Path: path}, nil
+}
+
+func briefProject(project string) string {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return reuseProject
+	}
+	return project
+}
+
+func projectFromRepoRoot(repoRoot string) string {
+	repoRoot = strings.TrimSpace(repoRoot)
+	if repoRoot == "" {
+		return ""
+	}
+	base := filepath.Base(filepath.Clean(repoRoot))
+	if base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return base
 }
 
 func briefBudgetForKind(kind NodeKind) int {

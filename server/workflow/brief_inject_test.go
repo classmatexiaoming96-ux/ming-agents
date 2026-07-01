@@ -71,6 +71,40 @@ func TestInjectBrief_BudgetByKind(t *testing.T) {
 	}
 }
 
+func TestInjectBrief_UsesExplicitProjectOrFallback(t *testing.T) {
+	var projects []string
+	prev := workflowBrief
+	workflowBrief = func(project, query string, budget memory.Budget) (string, memory.BriefAudit, error) {
+		projects = append(projects, project)
+		return "memory body", memory.BriefAudit{InjectedIDs: []string{"mem_project"}}, nil
+	}
+	defer func() { workflowBrief = prev }()
+
+	for _, tc := range []struct {
+		name    string
+		project string
+		want    string
+	}{
+		{name: "fallback", project: "", want: reuseProject},
+		{name: "explicit", project: "my-project", want: "my-project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := InjectBrief(context.Background(), BriefInjectContext{
+				RunID:    "run-" + tc.name,
+				RepoRoot: t.TempDir(),
+				Kind:     NodeKindClarification,
+				Project:  tc.project,
+				Query:    "query",
+			}); err != nil {
+				t.Fatalf("InjectBrief() error = %v", err)
+			}
+			if got := projects[len(projects)-1]; got != tc.want {
+				t.Fatalf("project = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInjectBrief_AuditFields(t *testing.T) {
 	prevVault := memory.VaultDir
 	memory.VaultDir = t.TempDir()

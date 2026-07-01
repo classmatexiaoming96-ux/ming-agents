@@ -61,6 +61,7 @@ func (n *planningNode) Execute(ctx context.Context, req NodeRequest) (*NodeResul
 		RunID:    req.RunID,
 		RepoRoot: req.RepoRoot,
 		Kind:     req.Spec.Kind,
+		Project:  projectFromRepoRoot(req.RepoRoot),
 		Query:    briefQuery,
 	})
 	if err != nil {

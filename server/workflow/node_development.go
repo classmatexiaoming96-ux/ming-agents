@@ -53,6 +53,7 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 			RunID:     req.RunID,
 			RepoRoot:  req.RepoRoot,
 			Kind:      req.Spec.Kind,
+			Project:   projectFromRepoRoot(req.RepoRoot),
 			Query:     developmentBriefQuery(st),
 			AuditName: st.ID,
 		})

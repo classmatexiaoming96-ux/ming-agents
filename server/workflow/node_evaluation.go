@@ -45,6 +45,7 @@ func (n *evaluationNode) Execute(ctx context.Context, req NodeRequest) (*NodeRes
 		RunID:    req.RunID,
 		RepoRoot: req.RepoRoot,
 		Kind:     req.Spec.Kind,
+		Project:  projectFromRepoRoot(req.RepoRoot),
 		Query:    req.Spec.ID,
 	})
 	if err != nil {
