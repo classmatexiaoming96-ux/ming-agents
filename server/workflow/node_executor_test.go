@@ -40,6 +40,23 @@ func (blockingNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, 
 	return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusBlocked, Error: "waiting for reuse ack"}, nil
 }
 
+type sequenceNode struct {
+	kind    NodeKind
+	results []*NodeResult
+	calls   *int
+}
+
+func (n sequenceNode) Kind() NodeKind { return n.kind }
+
+func (n sequenceNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
+	*n.calls = *n.calls + 1
+	index := *n.calls - 1
+	if index >= len(n.results) {
+		index = len(n.results) - 1
+	}
+	return n.results[index], nil
+}
+
 func TestNodeExecutorRunsNodesInTopologicalOrderAndPassesOutputs(t *testing.T) {
 	var seen []string
 	registry := NewNodeRegistry()
@@ -78,6 +95,159 @@ func TestNodeExecutorRunsNodesInTopologicalOrderAndPassesOutputs(t *testing.T) {
 	}
 	if got := outputs["first"].Outputs["first_output"]; got != "/tmp/first.out" {
 		t.Fatalf("first output path = %v, want /tmp/first.out", got)
+	}
+}
+
+func TestNodeExecutorRetriesTransientFailureForCurrentNode(t *testing.T) {
+	var attempts int
+	registry := NewNodeRegistry()
+	registry.Register("flaky", func() WorkflowNode {
+		return sequenceNode{
+			kind:  "flaky",
+			calls: &attempts,
+			results: []*NodeResult{
+				{NodeID: "flaky", Status: NodeStatusFailed, Error: "temporary", FailureClass: FailureClassTransient},
+				{NodeID: "flaky", Status: NodeStatusCompleted, Values: map[string]any{"ok": true}},
+			},
+		}
+	})
+
+	outputs, err := NewNodeExecutor(registry, NodeServices{}).Run(context.Background(), "/repo", WorkflowSpec{
+		RunID: "run-retry",
+		Nodes: []NodeSpec{{
+			ID:         "flaky",
+			Kind:       "flaky",
+			MaxRetries: 1,
+			RetryOn:    []FailureClass{FailureClassTransient},
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if got := outputs["flaky"].Values["ok"]; got != true {
+		t.Fatalf("output ok = %v, want true", got)
+	}
+}
+
+func TestNodeExecutorDoesNotRetryWhenFailureClassDoesNotMatch(t *testing.T) {
+	var attempts int
+	registry := NewNodeRegistry()
+	registry.Register("invalid", func() WorkflowNode {
+		return sequenceNode{
+			kind:  "invalid",
+			calls: &attempts,
+			results: []*NodeResult{
+				{NodeID: "invalid", Status: NodeStatusFailed, Error: "bad request", FailureClass: FailureClassInvalidInput},
+				{NodeID: "invalid", Status: NodeStatusCompleted},
+			},
+		}
+	})
+
+	_, err := NewNodeExecutor(registry, NodeServices{}).Run(context.Background(), "/repo", WorkflowSpec{
+		RunID: "run-invalid",
+		Nodes: []NodeSpec{{
+			ID:         "invalid",
+			Kind:       "invalid",
+			MaxRetries: 2,
+			RetryOn:    []FailureClass{FailureClassTransient},
+		}},
+	}, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want invalid input failure")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestNodeExecutorDefaultPolicyDoesNotRetryEnvironmentOrProductDefect(t *testing.T) {
+	tests := []struct {
+		name         string
+		spec         NodeSpec
+		failureClass FailureClass
+	}{
+		{
+			name:         "environment_block",
+			spec:         defaultWorkflowNode("evaluation", NodeKindEvaluation, nil),
+			failureClass: FailureClassEnvironmentBlock,
+		},
+		{
+			name:         "product_defect",
+			spec:         defaultWorkflowNode("review", NodeKindReview, nil),
+			failureClass: FailureClassProductDefect,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts int
+			registry := NewNodeRegistry()
+			registry.Register(tt.spec.Kind, func() WorkflowNode {
+				return sequenceNode{
+					kind:  tt.spec.Kind,
+					calls: &attempts,
+					results: []*NodeResult{
+						{NodeID: tt.spec.ID, Status: NodeStatusFailed, Error: string(tt.failureClass), FailureClass: tt.failureClass},
+						{NodeID: tt.spec.ID, Status: NodeStatusCompleted},
+					},
+				}
+			})
+
+			_, err := NewNodeExecutor(registry, NodeServices{}).Run(context.Background(), "/repo", WorkflowSpec{
+				RunID: "run-" + tt.name,
+				Nodes: []NodeSpec{tt.spec},
+			}, nil)
+			if err == nil {
+				t.Fatal("Run() error = nil, want failure")
+			}
+			if attempts != 1 {
+				t.Fatalf("attempts = %d, want 1", attempts)
+			}
+		})
+	}
+}
+
+func TestNodeExecutorRetryDoesNotRerunCompletedUpstreamNodes(t *testing.T) {
+	var firstCalls, secondCalls int
+	registry := NewNodeRegistry()
+	registry.Register("first", func() WorkflowNode {
+		return sequenceNode{
+			kind:  "first",
+			calls: &firstCalls,
+			results: []*NodeResult{
+				{NodeID: "first", Status: NodeStatusCompleted, Values: map[string]any{"node_id": "first"}},
+			},
+		}
+	})
+	registry.Register("second", func() WorkflowNode {
+		return sequenceNode{
+			kind:  "second",
+			calls: &secondCalls,
+			results: []*NodeResult{
+				{NodeID: "second", Status: NodeStatusFailed, Error: "temporary", FailureClass: FailureClassTransient},
+				{NodeID: "second", Status: NodeStatusCompleted, Values: map[string]any{"node_id": "second"}},
+			},
+		}
+	})
+
+	_, err := NewNodeExecutor(registry, NodeServices{}).Run(context.Background(), "/repo", WorkflowSpec{
+		RunID: "run-upstream",
+		Nodes: []NodeSpec{
+			{ID: "first", Kind: "first"},
+			{ID: "second", Kind: "second", DependsOn: []string{"first"}, MaxRetries: 1, RetryOn: []FailureClass{FailureClassTransient}},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if firstCalls != 1 {
+		t.Fatalf("first calls = %d, want 1", firstCalls)
+	}
+	if secondCalls != 2 {
+		t.Fatalf("second calls = %d, want 2", secondCalls)
 	}
 }
 

@@ -124,6 +124,18 @@ func TestRollbackRunnerBudgetExhaustedUsesConfiguredAction(t *testing.T) {
 	if decision.NewAttempt != 2 {
 		t.Fatalf("NewAttempt = %d, want 2", decision.NewAttempt)
 	}
+	if !decision.RetryExhausted {
+		t.Fatal("RetryExhausted = false, want true")
+	}
+	if decision.FailureClass != FailureClassHumanReject {
+		t.Fatalf("FailureClass = %q, want %q", decision.FailureClass, FailureClassHumanReject)
+	}
+	if decision.NextAction != "ask_user" {
+		t.Fatalf("NextAction = %q, want ask_user", decision.NextAction)
+	}
+	if decision.FailureReason == "" {
+		t.Fatal("FailureReason is empty, want exhausted reason")
+	}
 }
 
 func TestRollbackRunnerRecordRollbackEvent(t *testing.T) {
