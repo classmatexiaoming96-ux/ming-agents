@@ -203,6 +203,9 @@ func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([
 		if err != nil {
 			return nil, err
 		}
+		if err := IndexMemory(mem.ID, mem.Title, mem.Body, mem.Project, mem.Type, mem.Tags); err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", mem.ID, err)
+		}
 		route.Path = path
 		route.Written = true
 		routes = append(routes, route)
@@ -282,6 +285,9 @@ func IngestCrossProjectCandidates(candidates []SummaryItem) ([]SummaryRoute, err
 		path, err := writeMemory(mem, targetDir)
 		if err != nil {
 			return nil, err
+		}
+		if err := IndexMemory(mem.ID, mem.Title, mem.Body, mem.Project, mem.Type, mem.Tags); err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", mem.ID, err)
 		}
 		routes = append(routes, SummaryRoute{
 			Kind:    candidate.Kind,

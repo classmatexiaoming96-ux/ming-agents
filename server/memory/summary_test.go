@@ -274,6 +274,33 @@ items:
 	}
 }
 
+func TestImportSummary_AcceptIndexesDurableLessonsForRecall(t *testing.T) {
+	useTempVault(t)
+	mustIngest(t, "unrelated indexed calibrator mentions orbitneedle", "decision", "ming-agents", nil, "manual")
+	summary := writeSummaryFixture(t, `
+run_id: run-index-l2
+project: ming-agents
+source_system: automind
+items:
+  - kind: durable_lesson
+    title: Summary recall token
+    body: Imported summaries should surface the orbitneedle lesson through keyword recall.
+    tags: [receiver]
+`)
+
+	if _, err := ImportSummary(summary, SummaryImportOptions{Accept: true}); err != nil {
+		t.Fatalf("ImportSummary() error = %v", err)
+	}
+
+	got, _, err := Recall("orbitneedle", "ming-agents", "", nil, 0, "active", 10)
+	if err != nil {
+		t.Fatalf("Recall() error = %v", err)
+	}
+	if !hasMemoryTitle(got, "Summary recall token") {
+		t.Fatalf("Recall() = %+v, want imported durable lesson", got)
+	}
+}
+
 func TestArchiveRawBundle_WritesSummaryBundleToL3(t *testing.T) {
 	vault := useTempVault(t)
 	source := filepath.Join(t.TempDir(), "summary.md")
@@ -364,6 +391,42 @@ func TestIngestCrossProjectCandidates_WritesInboxNotMainL2(t *testing.T) {
 	if mem.Layer != "l2_inbox" || !mem.CrossProject || mem.SourceSystem != "automind" {
 		t.Fatalf("candidate metadata = %+v", mem)
 	}
+}
+
+func TestImportSummary_AcceptIndexesCrossProjectCandidatesForRecall(t *testing.T) {
+	useTempVault(t)
+	mustIngest(t, "unrelated indexed calibrator mentions crossneedle", "decision", "ming-agents", nil, "manual")
+	summary := writeSummaryFixture(t, `
+run_id: run-index-inbox
+project: ming-agents
+source_system: automind
+items:
+  - kind: cross_project_candidate
+    title: Cross-project recall token
+    body: Candidate inbox entries should surface the crossneedle rule through keyword recall.
+    tags: [curation]
+`)
+
+	if _, err := ImportSummary(summary, SummaryImportOptions{Accept: true}); err != nil {
+		t.Fatalf("ImportSummary() error = %v", err)
+	}
+
+	got, _, err := Recall("crossneedle", "", "", nil, 0, "active", 10)
+	if err != nil {
+		t.Fatalf("Recall() error = %v", err)
+	}
+	if !hasMemoryTitle(got, "Cross-project recall token") {
+		t.Fatalf("Recall() = %+v, want imported cross-project candidate", got)
+	}
+}
+
+func hasMemoryTitle(memories []Memory, title string) bool {
+	for _, mem := range memories {
+		if mem.Title == title {
+			return true
+		}
+	}
+	return false
 }
 
 func writeSummaryFixture(t *testing.T, body string) string {
