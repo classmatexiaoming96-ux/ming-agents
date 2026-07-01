@@ -151,6 +151,10 @@ func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportRes
 		result.Routes = append(result.Routes, inboxRoutes...)
 	}
 	if len(classified.RawEvidence) == 0 {
+		// Importing the task summary is the terminal task-end operation for this
+		// run bundle. Phase 5 writes such as phase-reuse and reuse-ack must happen
+		// before import-automind-summary, because Freeze intentionally makes the
+		// bundle immutable after the summary has been accepted.
 		if err := receiver.Freeze(); err != nil {
 			return nil, err
 		}
