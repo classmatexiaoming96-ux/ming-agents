@@ -37,9 +37,11 @@ type runBundleManifest struct {
 }
 
 type runBundlePointer struct {
-	SourcePath string `json:"source_path"`
+	SourcePath string `json:"source_path,omitempty"`
+	TargetPath string `json:"target_path,omitempty"`
 	Size       int64  `json:"size"`
 	SHA256     string `json:"sha256"`
+	CopyMode   string `json:"copy_mode,omitempty"`
 }
 
 type runBundleReceiverStatus map[string]runBundleArtifactStatus
@@ -97,13 +99,30 @@ func (r *RunBundleReceiver) Root() string {
 }
 
 func (r *RunBundleReceiver) ReceivePhaseReuse(phase, content string) error {
+	return r.receivePhaseReuse(phase, []byte(content), "")
+}
+
+func (r *RunBundleReceiver) ReceivePhaseReuseFromSource(phase string, sourcePath string) error {
+	source, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return err
+	}
+	source = filepath.Clean(source)
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	return r.receivePhaseReuse(phase, data, source)
+}
+
+func (r *RunBundleReceiver) receivePhaseReuse(phase string, data []byte, sourcePath string) error {
 	var files []string
 	err := func() error {
 		if err := r.ensureOpen(); err != nil {
 			return err
 		}
 		name := safeBundleName(phase) + ".md"
-		written, err := r.writeArtifact(filepath.Join("phase-reuse", name), []byte(content))
+		written, err := r.writeArtifactWithSource(filepath.Join("phase-reuse", name), data, sourcePath)
 		files = append(files, written)
 		return err
 	}()
@@ -213,6 +232,23 @@ func (r *RunBundleReceiver) ReceiveEvidenceFile(name string, sourcePath string, 
 }
 
 func (r *RunBundleReceiver) ReceiveAutoMindSummary(rawContent []byte, format string) error {
+	return r.receiveAutoMindSummary(rawContent, format, "")
+}
+
+func (r *RunBundleReceiver) ReceiveAutoMindSummaryFromSource(sourcePath string, format string) error {
+	source, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return err
+	}
+	source = filepath.Clean(source)
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	return r.receiveAutoMindSummary(data, format, source)
+}
+
+func (r *RunBundleReceiver) receiveAutoMindSummary(rawContent []byte, format string, sourcePath string) error {
 	var files []string
 	err := func() error {
 		if err := r.ensureOpen(); err != nil {
@@ -222,7 +258,7 @@ func (r *RunBundleReceiver) ReceiveAutoMindSummary(rawContent []byte, format str
 		if strings.EqualFold(format, "json") {
 			ext = ".json"
 		}
-		written, err := r.writeArtifact(filepath.Join("automind-summary", "raw-summary"+ext), rawContent)
+		written, err := r.writeArtifactWithSource(filepath.Join("automind-summary", "raw-summary"+ext), rawContent, sourcePath)
 		files = append(files, written)
 		return err
 	}()
@@ -280,13 +316,20 @@ func (r *RunBundleReceiver) ensureOpen() error {
 }
 
 func (r *RunBundleReceiver) writeArtifact(rel string, data []byte) (string, error) {
+	return r.writeArtifactWithSource(rel, data, "")
+}
+
+func (r *RunBundleReceiver) writeArtifactWithSource(rel string, data []byte, sourcePath string) (string, error) {
 	if err := os.MkdirAll(r.root, 0755); err != nil {
 		return "", err
 	}
 	if len(data) > RunBundleLargeFileThreshold {
 		pointer := runBundlePointer{
-			Size:   int64(len(data)),
-			SHA256: sha256Hex(data),
+			SourcePath: sourcePath,
+			TargetPath: "(L3 pointer entry)",
+			Size:       int64(len(data)),
+			SHA256:     sha256Hex(data),
+			CopyMode:   "pointer",
 		}
 		ext := filepath.Ext(rel)
 		pointerRel := strings.TrimSuffix(rel, ext) + ".pointer.json"

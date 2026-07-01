@@ -68,13 +68,8 @@ func mirrorPhaseReuseToRunBundle(req NodeRequest, phase, path string) {
 	if receiver == nil || path == "" {
 		return
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Printf("RunBundleReceiver.ReceivePhaseReuse read failed: %v", err)
-		return
-	}
-	if err := receiver.ReceivePhaseReuse(phase, string(data)); err != nil {
-		log.Printf("RunBundleReceiver.ReceivePhaseReuse failed: %v", err)
+	if err := receiver.ReceivePhaseReuseFromSource(phase, path); err != nil {
+		log.Printf("RunBundleReceiver.ReceivePhaseReuseFromSource failed: %v", err)
 	}
 }
 

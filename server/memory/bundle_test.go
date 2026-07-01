@@ -229,6 +229,30 @@ func TestRunBundleReceiver_LargePhaseReuseStoresPointer(t *testing.T) {
 	}
 }
 
+func TestReceivePhaseReuse_LargeFilePointerHasSourcePath(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	root := t.TempDir()
+	source := filepath.Join(root, "planning.md")
+	if err := os.WriteFile(source, bytes.Repeat([]byte("x"), RunBundleLargeFileThreshold+1), 0644); err != nil {
+		t.Fatalf("WriteFile source error = %v", err)
+	}
+
+	if err := receiver.ReceivePhaseReuseFromSource("planning", source); err != nil {
+		t.Fatalf("ReceivePhaseReuseFromSource error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(receiver.Root(), "phase-reuse", "planning.pointer.json"))
+	if err != nil {
+		t.Fatalf("large phase reuse pointer missing: %v", err)
+	}
+	var pointer map[string]any
+	if err := json.Unmarshal(data, &pointer); err != nil {
+		t.Fatalf("large pointer json error = %v", err)
+	}
+	if pointer["source_path"] != source || pointer["target_path"] != "(L3 pointer entry)" || pointer["copy_mode"] != "pointer" {
+		t.Fatalf("large pointer = %+v, want source_path/target_path/copy_mode", pointer)
+	}
+}
+
 func TestRunBundleReceiver_SoftFailureOnVaultCorruption(t *testing.T) {
 	receiver := newTestRunBundleReceiver(t)
 	manifestDir := filepath.Join(receiver.Root(), "manifest.json")
