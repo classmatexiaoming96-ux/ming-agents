@@ -51,8 +51,11 @@ type runBundleArtifactStatus struct {
 }
 
 // RunBundleReceiver mirrors raw workflow artifacts into the L3 run bundle.
-// Receive methods return write errors to callers for observability, but callers
-// should treat those errors as soft failures and continue the workflow.
+//
+// Soft-fail contract: Receive methods return write errors for observability and
+// record receiver-status.json when possible, but workflow callers must not let
+// those errors change NodeResult or block the main run. Freeze marks the bundle
+// immutable with manifest state, _frozen, and read-only file modes.
 type RunBundleReceiver struct {
 	project string
 	runID   string

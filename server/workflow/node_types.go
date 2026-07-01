@@ -162,7 +162,9 @@ type NodeResult struct {
 	// BriefAudit is the primary brief audit for the node. Development nodes with
 	// multiple subtasks expose only the first subtask audit here; Phase 4
 	// ImplicitFeedback callers must read Values["brief_paths"] for the remaining
-	// per-subtask audit files.
+	// per-subtask audit files. The Phase 5 L3 run bundle mirrors every
+	// development subtask audit separately, so N development subtasks produce N
+	// brief-audit artifacts even though this field carries only one primary audit.
 	BriefAudit     *memory.BriefAudit
 	BriefPath      string
 	Error          string
