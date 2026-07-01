@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -121,6 +122,72 @@ func TestRunBundleReceiver_ReceiveEvidencePointer(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"source_path":"`+source+`"`) || !strings.Contains(string(data), `"sha256"`) {
 		t.Fatalf("evidence pointer jsonl = %s", data)
+	}
+}
+
+func TestReceiveEvidenceFile_SmallFileCopied(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	root := t.TempDir()
+	source := filepath.Join(root, "test.log")
+	if err := os.WriteFile(source, []byte("test evidence"), 0644); err != nil {
+		t.Fatalf("WriteFile source error = %v", err)
+	}
+
+	if err := receiver.ReceiveEvidenceFile("test.log", source, []string{root}); err != nil {
+		t.Fatalf("ReceiveEvidenceFile error = %v", err)
+	}
+	copied, err := os.ReadFile(filepath.Join(receiver.Root(), "evidence", "test.log"))
+	if err != nil {
+		t.Fatalf("copied evidence missing: %v", err)
+	}
+	if string(copied) != "test evidence" {
+		t.Fatalf("copied evidence = %q", copied)
+	}
+	data, err := os.ReadFile(filepath.Join(receiver.Root(), "evidence", "pointers.jsonl"))
+	if err != nil {
+		t.Fatalf("pointers.jsonl missing: %v", err)
+	}
+	if !strings.Contains(string(data), `"copy_mode":"copy"`) || !strings.Contains(string(data), `"target_path":"evidence/test.log"`) {
+		t.Fatalf("pointers.jsonl = %s", data)
+	}
+}
+
+func TestReceiveEvidenceFile_LargeFilePointerOnly(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	root := t.TempDir()
+	source := filepath.Join(root, "large.log")
+	if err := os.WriteFile(source, bytes.Repeat([]byte("x"), RunBundleLargeFileThreshold+1), 0644); err != nil {
+		t.Fatalf("WriteFile source error = %v", err)
+	}
+
+	if err := receiver.ReceiveEvidenceFile("large.log", source, []string{root}); err != nil {
+		t.Fatalf("ReceiveEvidenceFile error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(receiver.Root(), "evidence", "large.log")); !os.IsNotExist(err) {
+		t.Fatalf("large evidence copy err = %v, want not exist", err)
+	}
+	data, err := os.ReadFile(filepath.Join(receiver.Root(), "evidence", "pointers.jsonl"))
+	if err != nil {
+		t.Fatalf("pointers.jsonl missing: %v", err)
+	}
+	if !strings.Contains(string(data), `"copy_mode":"pointer"`) || !strings.Contains(string(data), `"source_path":"`+source+`"`) {
+		t.Fatalf("pointers.jsonl = %s", data)
+	}
+}
+
+func TestReceiveEvidenceFile_RejectsPathOutsideAllowlist(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	allowed := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.log")
+	if err := os.WriteFile(outside, []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile outside error = %v", err)
+	}
+
+	if err := receiver.ReceiveEvidenceFile("outside.log", outside, []string{allowed}); err == nil {
+		t.Fatal("ReceiveEvidenceFile error = nil, want allowlist rejection")
+	}
+	if _, err := os.Stat(filepath.Join(receiver.Root(), "evidence", "outside.log")); !os.IsNotExist(err) {
+		t.Fatalf("outside evidence copy err = %v, want not exist", err)
 	}
 }
 

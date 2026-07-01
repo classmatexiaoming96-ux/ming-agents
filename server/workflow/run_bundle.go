@@ -145,8 +145,12 @@ func mirrorEvidenceToRunBundle(req NodeRequest, result *EvaluationResult) {
 		if name == "." || name == string(filepath.Separator) {
 			name = string(ref.Type)
 		}
-		if err := receiver.ReceiveEvidencePointer(name, ref.Path); err != nil {
-			log.Printf("RunBundleReceiver.ReceiveEvidencePointer failed: %v", err)
+		allowedRoots := []string{
+			req.RepoRoot,
+			filepath.Join(req.RepoRoot, ".workflow", "runs", req.RunID),
+		}
+		if err := receiver.ReceiveEvidenceFile(name, ref.Path, allowedRoots); err != nil {
+			log.Printf("RunBundleReceiver.ReceiveEvidenceFile failed: %v", err)
 		}
 	}
 }

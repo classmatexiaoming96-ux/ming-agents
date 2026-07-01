@@ -156,20 +156,49 @@ func (r *RunBundleReceiver) ReceiveBriefAudit(kind NodeKind, audit *BriefAudit, 
 }
 
 func (r *RunBundleReceiver) ReceiveEvidencePointer(name, sourcePath string) error {
+	return r.ReceiveEvidenceFile(name, sourcePath, []string{filepath.Dir(sourcePath)})
+}
+
+func (r *RunBundleReceiver) ReceiveEvidenceFile(name string, sourcePath string, allowedRoots []string) error {
 	var files []string
 	err := func() error {
 		if err := r.ensureOpen(); err != nil {
 			return err
 		}
-		filePointer, err := pointerForFile(sourcePath)
+		source, err := cleanAllowedSourcePath(sourcePath, allowedRoots)
 		if err != nil {
 			return err
 		}
+		filePointer, err := pointerForFile(source)
+		if err != nil {
+			return err
+		}
+		evidenceName := safeBundleName(filepath.Base(name))
+		if evidenceName == "." || evidenceName == string(filepath.Separator) {
+			evidenceName = "evidence"
+		}
+		copyMode := "pointer"
+		targetPath := "(L3 pointer entry)"
+		if filePointer.Size < RunBundleLargeFileThreshold {
+			copyMode = "copy"
+			targetPath = filepath.ToSlash(filepath.Join("evidence", evidenceName))
+			data, err := os.ReadFile(source)
+			if err != nil {
+				return err
+			}
+			written, err := r.writeArtifact(filepath.Join("evidence", evidenceName), data)
+			files = append(files, written)
+			if err != nil {
+				return err
+			}
+		}
 		pointer := map[string]any{
 			"name":        name,
-			"source_path": sourcePath,
+			"source_path": source,
+			"target_path": targetPath,
 			"size":        filePointer.Size,
 			"sha256":      filePointer.SHA256,
+			"copy_mode":   copyMode,
 			"received_at": time.Now().UTC().Format(time.RFC3339),
 		}
 		line, err := json.Marshal(pointer)
@@ -471,6 +500,31 @@ func pointerForFile(path string) (runBundlePointer, error) {
 		Size:       int64(len(data)),
 		SHA256:     sha256Hex(data),
 	}, nil
+}
+
+func cleanAllowedSourcePath(sourcePath string, allowedRoots []string) (string, error) {
+	if sourcePath == "" {
+		return "", errors.New("source_path is empty")
+	}
+	source, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	source = filepath.Clean(source)
+	for _, root := range allowedRoots {
+		if root == "" {
+			continue
+		}
+		allowed, err := filepath.Abs(root)
+		if err != nil {
+			return "", err
+		}
+		allowed = filepath.Clean(allowed)
+		if source == allowed || strings.HasPrefix(source, allowed+string(filepath.Separator)) {
+			return source, nil
+		}
+	}
+	return "", fmt.Errorf("source_path %q is outside allowed roots", source)
 }
 
 func validateRunID(id string) error {
