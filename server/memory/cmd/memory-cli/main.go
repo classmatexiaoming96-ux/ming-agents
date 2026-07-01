@@ -50,6 +50,8 @@ func main() {
 		err = cmdListPendingPromotion(args, os.Stdout)
 	case "revoke":
 		err = cmdRevoke(args, os.Stdout)
+	case "migrate-promotion-state":
+		err = cmdMigratePromotionState(args, os.Stdout)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -79,6 +81,7 @@ usage:
   memory-cli curate --source <id> --to l1 --approver <name> --rationale "..." [--mode reject|supersede|allow_separate] [--supersedes a,b] [--apply]
   memory-cli list-pending-promotion [--project P] [--to l2|l1] [--ready-only] [--format table|json]
   memory-cli revoke --target <id> --reason "..." --actor N [--mode archive|supersede] [--superseded-by <id>] [--apply]
+  memory-cli migrate-promotion-state [--apply]
   memory-cli cleanup
   memory-cli stats`)
 }
@@ -454,6 +457,24 @@ func cmdRevoke(args []string, out io.Writer) error {
 		fmt.Fprintf(out, " audit=%s", result.AuditEventID)
 	}
 	fmt.Fprintln(out)
+	return nil
+}
+
+func cmdMigratePromotionState(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("migrate-promotion-state", flag.ExitOnError)
+	apply := fs.Bool("apply", false, "write changes (default is dry-run)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"apply": true})); err != nil {
+		return err
+	}
+	result, err := memory.BackfillPromotionState(!*apply)
+	if err != nil {
+		return err
+	}
+	mode := "apply"
+	if result.DryRun {
+		mode = "dry-run"
+	}
+	fmt.Fprintf(out, "migrate-promotion-state %s: scanned=%d updated=%d\n", mode, result.Scanned, result.Updated)
 	return nil
 }
 
