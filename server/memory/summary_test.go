@@ -280,6 +280,40 @@ func TestIngestDurableLessons_MapsExperienceKindToMemoryType(t *testing.T) {
 	}
 }
 
+func TestIngestDurableLessons_DuplicateTitlesDoNotCollide(t *testing.T) {
+	vault := useTempVault(t)
+	lessons := []SummaryItem{
+		{
+			Kind:  SummaryKindDurableLesson,
+			Title: "Repeatable title",
+			Body:  "First lesson body keeps the setup detail.",
+		},
+		{
+			Kind:  SummaryKindDurableLesson,
+			Title: "Repeatable title",
+			Body:  "Second lesson body keeps the verification detail.",
+		},
+	}
+
+	routes, err := IngestDurableLessons("ming-agents", lessons, true)
+	if err != nil {
+		t.Fatalf("IngestDurableLessons() error = %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("routes len = %d, want 2", len(routes))
+	}
+	if routes[0].Path == routes[1].Path {
+		t.Fatalf("duplicate title routes collided at %s", routes[0].Path)
+	}
+	entries, err := os.ReadDir(filepath.Join(vault, "notes", "ming-agents"))
+	if err != nil {
+		t.Fatalf("read notes dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("written memories = %d, want 2", len(entries))
+	}
+}
+
 func TestImportSummary_DurableOnlyRejectsDuplicateWithoutRewritingL2(t *testing.T) {
 	useTempVault(t)
 	firstImport := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)

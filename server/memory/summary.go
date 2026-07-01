@@ -195,7 +195,7 @@ func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([
 		if lesson.Kind != SummaryKindDurableLesson {
 			return nil, fmt.Errorf("durable lesson kind %q is not supported", lesson.Kind)
 		}
-		id := summaryMemoryID(project, lesson.Title)
+		id := summaryMemoryID(project, lesson.Title, lesson.Body)
 		targetPath := filepath.Join(VaultDir, "notes", project, id+".md")
 		route := SummaryRoute{
 			Kind:   lesson.Kind,
@@ -288,7 +288,7 @@ func IngestCrossProjectCandidates(candidates []SummaryItem) ([]SummaryRoute, err
 		if candidate.Kind != SummaryKindCrossProjectCandidate {
 			return nil, fmt.Errorf("cross-project candidate kind %q is not supported", candidate.Kind)
 		}
-		id := summaryMemoryID("_cross_project", candidate.Title)
+		id := summaryMemoryID("_cross_project", candidate.Title, candidate.Body)
 		mem := summaryMemory("_cross_project", candidate, id, "l2_inbox")
 		mem.CrossProject = true
 		path, err := writeMemory(mem, targetDir)
@@ -373,8 +373,8 @@ func summaryMemory(project string, item SummaryItem, id, layer string) Memory {
 	}
 }
 
-func summaryMemoryID(project, title string) string {
-	sum := sha256.Sum256([]byte(project + "\x00" + strings.TrimSpace(title)))
+func summaryMemoryID(project, title, body string) string {
+	sum := sha256.Sum256([]byte(project + "\x00" + strings.TrimSpace(title) + "\x00" + strings.TrimSpace(body)))
 	return "automind_" + hex.EncodeToString(sum[:])[:16]
 }
 
