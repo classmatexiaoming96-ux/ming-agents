@@ -470,3 +470,30 @@ func TestRunBundleReceiver_ImmutableAfterFreeze(t *testing.T) {
 		t.Fatal("ReceivePhaseReuse after freeze error = nil, want immutable error")
 	}
 }
+
+func TestReceive_AfterFreeze_ReturnsFrozenError(t *testing.T) {
+	receiver := newTestRunBundleReceiver(t)
+	if err := receiver.ReceivePhaseReuse("planning", "memory hits"); err != nil {
+		t.Fatalf("ReceivePhaseReuse before freeze error = %v", err)
+	}
+	statusPath := filepath.Join(receiver.Root(), "receiver-status.json")
+	beforeStatus, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatalf("receiver-status.json before freeze missing: %v", err)
+	}
+	if err := receiver.Freeze(); err != nil {
+		t.Fatalf("Freeze error = %v", err)
+	}
+
+	err = receiver.ReceiveReuseAck("review", ReuseAck{Accepted: true})
+	if !errors.Is(err, ErrBundleFrozen) {
+		t.Fatalf("ReceiveReuseAck after freeze error = %v, want ErrBundleFrozen", err)
+	}
+	afterStatus, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatalf("receiver-status.json after freeze missing: %v", err)
+	}
+	if !bytes.Equal(afterStatus, beforeStatus) {
+		t.Fatalf("receiver-status changed after frozen receive\nbefore=%s\nafter=%s", beforeStatus, afterStatus)
+	}
+}

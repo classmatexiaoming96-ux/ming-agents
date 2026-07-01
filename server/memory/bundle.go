@@ -19,6 +19,7 @@ const RunBundleLargeFileThreshold = 5 * 1024 * 1024
 var (
 	ErrAckContextMismatch      = errors.New("reuse ack context mismatch")
 	ErrArtifactContextMismatch = errors.New("artifact context mismatch")
+	ErrBundleFrozen            = errors.New("run bundle is frozen")
 )
 
 type NodeKind string
@@ -82,6 +83,7 @@ type RunBundleReceiver struct {
 	project string
 	runID   string
 	root    string
+	frozen  bool
 }
 
 // RunBundlePath returns the L3 raw run bundle namespace for one project run.
@@ -309,6 +311,9 @@ func (r *RunBundleReceiver) Freeze() error {
 	if r == nil {
 		return errors.New("nil run bundle receiver")
 	}
+	if r.frozen {
+		return ErrBundleFrozen
+	}
 	if err := os.MkdirAll(r.root, 0755); err != nil {
 		return err
 	}
@@ -342,6 +347,7 @@ func (r *RunBundleReceiver) Freeze() error {
 	if err := os.WriteFile(filepath.Join(r.root, "_frozen"), append(frozenData, '\n'), 0644); err != nil {
 		return err
 	}
+	r.frozen = true
 	return filepath.WalkDir(r.root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -409,8 +415,12 @@ func (r *RunBundleReceiver) ensureOpen() error {
 	if r == nil {
 		return errors.New("nil run bundle receiver")
 	}
+	if r.frozen {
+		return ErrBundleFrozen
+	}
 	if _, err := os.Stat(filepath.Join(r.root, "_frozen")); err == nil {
-		return fmt.Errorf("run bundle %s is frozen", r.root)
+		r.frozen = true
+		return ErrBundleFrozen
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -419,7 +429,8 @@ func (r *RunBundleReceiver) ensureOpen() error {
 		return err
 	}
 	if manifest.State == "frozen" {
-		return fmt.Errorf("run bundle %s is frozen", r.root)
+		r.frozen = true
+		return ErrBundleFrozen
 	}
 	return nil
 }
@@ -650,6 +661,9 @@ func countJSONLLines(path string) int {
 }
 
 func (r *RunBundleReceiver) recordReceiveStatus(artifact string, files []string, receiveErr error) error {
+	if errors.Is(receiveErr, ErrBundleFrozen) {
+		return receiveErr
+	}
 	status := "ok"
 	message := ""
 	if receiveErr != nil {
