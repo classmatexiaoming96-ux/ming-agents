@@ -3,8 +3,10 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -66,19 +68,9 @@ func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSp
 			inputs[dep] = out
 		}
 
-		statuses[ns.ID] = NodeStatusRunning
-		result, err := node.Execute(ctx, NodeRequest{
-			RunID:    runID,
-			RepoRoot: repoRoot,
-			Spec:     ns,
-			Config:   nodeRequestConfig(ns),
-			Inputs:   inputs,
-			Services: e.services,
-		})
+		result, err := e.executeNodeWithRetry(ctx, repoRoot, runID, ns, node, inputs, statuses)
 		if result == nil {
-			statuses[ns.ID] = NodeStatusFailed
-			e.writeState(repoRoot, runID, statuses, map[string]any{"error": "node returned nil result"})
-			return outputs, fmt.Errorf("node %s returned nil result", ns.ID)
+			return outputs, err
 		}
 
 		output := nodeOutputFromResult(ns.ID, result)
@@ -99,6 +91,120 @@ func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSp
 	}
 
 	return outputs, nil
+}
+
+func (e *NodeExecutor) executeNodeWithRetry(ctx context.Context, repoRoot, runID string, ns NodeSpec, node WorkflowNode, inputs NodeInputs, statuses map[string]NodeStatus) (*NodeResult, error) {
+	maxRetries := ns.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	var lastResult *NodeResult
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		statuses[ns.ID] = NodeStatusRunning
+		e.writeState(repoRoot, runID, statuses, map[string]any{
+			"node_id":       ns.ID,
+			"attempt_count": attempt + 1,
+		})
+
+		result, err := node.Execute(ctx, NodeRequest{
+			RunID:    runID,
+			RepoRoot: repoRoot,
+			Spec:     ns,
+			Config:   nodeRequestConfig(ns),
+			Inputs:   inputs,
+			Services: e.services,
+		})
+		lastResult, lastErr = result, err
+		if result != nil {
+			failureClass := failureClassForAttempt(result, err)
+			fillNodeResultRuntimeFields(result, attempt+1, failureClass, attempt >= maxRetries && nodeAttemptFailed(result, err) && shouldRetryNode(ns, failureClass))
+		}
+		if !nodeAttemptFailed(result, err) {
+			return result, nil
+		}
+		failureClass := failureClassForAttempt(result, err)
+		if attempt < maxRetries && shouldRetryNode(ns, failureClass) {
+			continue
+		}
+		break
+	}
+	if lastResult == nil {
+		statuses[ns.ID] = NodeStatusFailed
+		e.writeState(repoRoot, runID, statuses, map[string]any{
+			"node_id":         ns.ID,
+			"error":           "node returned nil result",
+			"failure_class":   failureClassForAttempt(nil, lastErr),
+			"next_action":     NextActionForFailure(failureClassForAttempt(nil, lastErr)),
+			"retry_exhausted": shouldRetryNode(ns, failureClassForAttempt(nil, lastErr)),
+			"attempt_count":   maxRetries + 1,
+		})
+		if lastErr != nil {
+			return nil, fmt.Errorf("node %s (%s): %w", ns.ID, ns.Kind, lastErr)
+		}
+		return nil, fmt.Errorf("node %s returned nil result", ns.ID)
+	}
+	return lastResult, lastErr
+}
+
+func nodeAttemptFailed(result *NodeResult, err error) bool {
+	if err != nil || result == nil {
+		return true
+	}
+	return result.Status == NodeStatusFailed || result.Status == NodeStatusBlocked
+}
+
+func fillNodeResultRuntimeFields(result *NodeResult, attemptCount int, failureClass FailureClass, retryExhausted bool) {
+	if result.AttemptCount == 0 {
+		result.AttemptCount = attemptCount
+	}
+	if failureClass != "" && result.FailureClass == "" {
+		result.FailureClass = failureClass
+	}
+	if retryExhausted && shouldExposeRetryExhausted(failureClass) {
+		result.RetryExhausted = true
+	}
+	if result.NextAction == "" && shouldExposeNextAction(failureClass) {
+		result.NextAction = NextActionForFailure(failureClass)
+	}
+}
+
+func failureClassForAttempt(result *NodeResult, err error) FailureClass {
+	if result != nil && result.FailureClass != "" {
+		return result.FailureClass
+	}
+	if err != nil {
+		if errorsIsContextDone(err) {
+			return FailureClassUserBlocked
+		}
+		return FailureClassTransient
+	}
+	if result != nil && result.Status == NodeStatusBlocked {
+		return FailureClassUserBlocked
+	}
+	if result != nil && result.Status == NodeStatusFailed {
+		return FailureClassInconclusive
+	}
+	return FailureClassNone
+}
+
+func errorsIsContextDone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func shouldRetryNode(ns NodeSpec, failureClass FailureClass) bool {
+	if failureClass == "" || failureClass == FailureClassNone {
+		return false
+	}
+	return slices.Contains(ns.RetryOn, failureClass)
+}
+
+func shouldExposeRetryExhausted(failureClass FailureClass) bool {
+	return failureClass != "" && failureClass != FailureClassNone
+}
+
+func shouldExposeNextAction(failureClass FailureClass) bool {
+	return failureClass != "" && failureClass != FailureClassNone
 }
 
 func nodeRequestConfig(ns NodeSpec) map[string]any {
