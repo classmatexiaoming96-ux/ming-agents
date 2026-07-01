@@ -321,7 +321,7 @@ func TestArchiveRawBundle_WritesSummaryBundleToL3(t *testing.T) {
 	}
 	root := filepath.Join(vault, "runs", "ming-agents", "run-001")
 	itemsPath := filepath.Join(root, "summary", "items.jsonl")
-	rawPath := filepath.Join(root, "summary", "raw-summary.md")
+	rawPath := filepath.Join(root, "automind-summary", "raw-summary.md")
 	if _, err := os.Stat(itemsPath); err != nil {
 		t.Fatalf("items.jsonl missing: %v", err)
 	}
@@ -354,6 +354,44 @@ func TestArchiveRawBundle_WritesSummaryBundleToL3(t *testing.T) {
 	}
 	if err := receiver.VerifyIntegrity(); err != nil {
 		t.Fatalf("VerifyIntegrity() error = %v", err)
+	}
+}
+
+func TestImportSummary_RejectsSummaryPathOutsideSummaryDirectory(t *testing.T) {
+	vault := useTempVault(t)
+	root := t.TempDir()
+	summaryDir := filepath.Join(root, "summary")
+	if err := os.MkdirAll(summaryDir, 0o755); err != nil {
+		t.Fatalf("mkdir summary dir: %v", err)
+	}
+	outside := filepath.Join(root, "outside.md")
+	if err := os.WriteFile(outside, []byte("# outside\n"), 0o644); err != nil {
+		t.Fatalf("write outside summary: %v", err)
+	}
+	path := filepath.Join(summaryDir, "summary.yaml")
+	body := `
+run_id: run-traversal
+project: ming-agents
+source_system: automind
+summary_path: ../outside.md
+items:
+  - kind: raw_evidence
+    title: raw bundle
+    body: raw body
+`
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(body)+"\n"), 0o644); err != nil {
+		t.Fatalf("write summary: %v", err)
+	}
+
+	_, err := ImportSummary(path, SummaryImportOptions{Accept: true})
+	if err == nil {
+		t.Fatal("ImportSummary() error = nil, want summary_path allowlist rejection")
+	}
+	if !strings.Contains(err.Error(), "outside allowed roots") {
+		t.Fatalf("ImportSummary() error = %v, want outside allowed roots", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(vault, "runs", "ming-agents", "run-traversal")); !os.IsNotExist(statErr) {
+		t.Fatalf("run bundle exists after rejected summary_path: %v", statErr)
 	}
 }
 

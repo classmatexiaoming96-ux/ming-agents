@@ -128,7 +128,11 @@ func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportRes
 	}
 	result.Routes = append(result.Routes, l2Routes...)
 	if len(classified.RawEvidence) > 0 {
-		l3Routes, err := ArchiveRawBundle(input.Project, input.RunID, classified.RawEvidence, input.SummaryPath)
+		summaryPath, allowedRoots, err := importSummarySource(path, input.SummaryPath)
+		if err != nil {
+			return nil, err
+		}
+		l3Routes, err := ArchiveRawBundle(input.Project, input.RunID, classified.RawEvidence, summaryPath, allowedRoots)
 		if err != nil {
 			return nil, err
 		}
@@ -215,10 +219,10 @@ func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([
 
 // ArchiveRawBundle stores raw AutoMind summary evidence under the Phase 5 L3
 // run bundle namespace, reusing RunBundleReceiver manifest, hash, and freeze
-// behavior. It writes summary/items.jsonl plus the raw summary copy under
-// summary/, never archive/ or notes/, and returns ErrBundleFrozen when the run
-// bundle was already finalized.
-func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath string) ([]SummaryRoute, error) {
+// behavior. It writes summary/items.jsonl plus the raw summary copy through the
+// automind-summary receiver namespace, never archive/ or notes/, and returns
+// ErrBundleFrozen when the run bundle was already finalized.
+func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath string, allowedRoots ...[]string) ([]SummaryRoute, error) {
 	receiver, err := NewRunBundleReceiver(project, runID)
 	if err != nil {
 		return nil, err
@@ -227,6 +231,19 @@ func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath st
 		return nil, ErrBundleFrozen
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, err
+	}
+	if summaryPath != "" {
+		format := summaryFormat(summaryPath)
+		if len(allowedRoots) > 0 {
+			if err := receiver.ReceiveAutoMindSummaryFromSource(summaryPath, format, allowedRoots[0]); err != nil {
+				return nil, err
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[memory] warning: importing AutoMind summary %q without allowed roots\n", summaryPath)
+			if err := receiver.ReceiveAutoMindSummaryFromSource(summaryPath, format); err != nil {
+				return nil, err
+			}
+		}
 	}
 	routes := make([]SummaryRoute, 0, len(items))
 	for _, item := range items {
@@ -249,23 +266,10 @@ func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath st
 			Written: true,
 		})
 	}
-	if summaryPath != "" {
-		source, err := filepath.Abs(summaryPath)
-		if err != nil {
-			return nil, err
-		}
-		raw, err := os.ReadFile(source)
-		if err != nil {
-			return nil, err
-		}
-		ext := strings.ToLower(filepath.Ext(source))
-		if ext != ".json" {
-			ext = ".md"
-		}
-		if _, err := receiver.writeArtifactWithSource(filepath.Join("summary", "raw-summary"+ext), raw, source); err != nil {
-			return nil, err
-		}
-	}
+	// Importing the task summary is the terminal task-end operation for this run
+	// bundle. Phase 5 writes such as phase-reuse and reuse-ack must complete
+	// before import-automind-summary, because Freeze intentionally makes later
+	// receiver writes return ErrBundleFrozen.
 	if err := receiver.Freeze(); err != nil {
 		return nil, err
 	}
@@ -358,6 +362,29 @@ func summaryMemory(project string, item SummaryItem, id, layer string) Memory {
 func summaryMemoryID(project, title string) string {
 	sum := sha256.Sum256([]byte(project + "\x00" + strings.TrimSpace(title)))
 	return "automind_" + hex.EncodeToString(sum[:])[:16]
+}
+
+func importSummarySource(importPath, summaryPath string) (string, []string, error) {
+	if summaryPath == "" {
+		return "", nil, nil
+	}
+	importAbs, err := filepath.Abs(importPath)
+	if err != nil {
+		return "", nil, err
+	}
+	importDir := filepath.Dir(filepath.Clean(importAbs))
+	source := summaryPath
+	if !filepath.IsAbs(source) {
+		source = filepath.Join(importDir, source)
+	}
+	return source, []string{importDir}, nil
+}
+
+func summaryFormat(path string) string {
+	if strings.EqualFold(filepath.Ext(path), ".json") {
+		return "json"
+	}
+	return "md"
 }
 
 func dryRunRoutes(items []SummaryItem, target string) []SummaryRoute {
