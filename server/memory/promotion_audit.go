@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -80,10 +82,16 @@ func legacyPromotionAuditPath(t time.Time) string {
 	return filepath.Join(legacyPromotionAuditDir(), t.UTC().Format(dateLayout)+".jsonl")
 }
 
-// newAuditEventID derives a stable id from the event's identifying fields so the
-// same logical action produces a reproducible id for cross-referencing.
+// newAuditEventID derives an id from the event's identifying fields plus random
+// entropy so two actions on the same source/target within the same second still
+// get distinct ids (the earlier second-resolution hash could collide).
 func newAuditEventID(eventType, sourceID, targetID, timestamp string) string {
-	sum := sha256.Sum256([]byte(eventType + "\x00" + sourceID + "\x00" + targetID + "\x00" + timestamp))
+	var entropy [8]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		// Fall back to the nanosecond clock if the RNG is unavailable.
+		binary.LittleEndian.PutUint64(entropy[:], uint64(now().UnixNano()))
+	}
+	sum := sha256.Sum256([]byte(eventType + "\x00" + sourceID + "\x00" + targetID + "\x00" + timestamp + "\x00" + string(entropy[:])))
 	return "evt_" + hex.EncodeToString(sum[:])[:16]
 }
 

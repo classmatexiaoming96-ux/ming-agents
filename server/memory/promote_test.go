@@ -276,6 +276,25 @@ func TestPromotionAudit_AppendOnly(t *testing.T) {
 	}
 }
 
+func TestPromotionAudit_SameSecondEventsGetUniqueIDs(t *testing.T) {
+	useTempVault(t)
+	day := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	fixedNow(t, day)
+	// Two identical logical actions within the same (frozen) second must not
+	// collide on event id.
+	id1, err := appendPromotionAudit(PromotionAuditEvent{EventType: PromotionEventPromoted, SourceID: "a", TargetID: "b"})
+	if err != nil {
+		t.Fatalf("append 1: %v", err)
+	}
+	id2, err := appendPromotionAudit(PromotionAuditEvent{EventType: PromotionEventPromoted, SourceID: "a", TargetID: "b"})
+	if err != nil {
+		t.Fatalf("append 2: %v", err)
+	}
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("event ids must be unique, got %q and %q", id1, id2)
+	}
+}
+
 func TestPromotionAudit_WritesUnderAuditPromotionPath(t *testing.T) {
 	useTempVault(t)
 	day := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
