@@ -3,6 +3,7 @@ package memory
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,6 +105,55 @@ func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([
 		route.Path = path
 		route.Written = true
 		routes = append(routes, route)
+	}
+	return routes, nil
+}
+
+func ArchiveRawBundle(project, runID string, items []SummaryItem, summaryPath string) ([]SummaryRoute, error) {
+	receiver, err := NewRunBundleReceiver(project, runID)
+	if err != nil {
+		return nil, err
+	}
+	routes := make([]SummaryRoute, 0, len(items))
+	for _, item := range items {
+		if item.Kind != SummaryKindRawEvidence {
+			return nil, fmt.Errorf("raw evidence kind %q is not supported", item.Kind)
+		}
+		line, err := json.Marshal(item)
+		if err != nil {
+			return nil, fmt.Errorf("marshal raw evidence: %w", err)
+		}
+		written, err := receiver.appendArtifact(filepath.Join("summary", "items.jsonl"), append(line, '\n'))
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, SummaryRoute{
+			Kind:    item.Kind,
+			Title:   item.Title,
+			Target:  "l3",
+			Path:    filepath.Join(receiver.Root(), written),
+			Written: true,
+		})
+	}
+	if summaryPath != "" {
+		source, err := filepath.Abs(summaryPath)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := os.ReadFile(source)
+		if err != nil {
+			return nil, err
+		}
+		ext := strings.ToLower(filepath.Ext(source))
+		if ext != ".json" {
+			ext = ".md"
+		}
+		if _, err := receiver.writeArtifactWithSource(filepath.Join("summary", "raw-summary"+ext), raw, source); err != nil {
+			return nil, err
+		}
+	}
+	if err := receiver.Freeze(); err != nil {
+		return nil, err
 	}
 	return routes, nil
 }

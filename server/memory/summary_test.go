@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,6 +214,62 @@ func TestIngestDurableLessons_AcceptWritesL2WithProvenance(t *testing.T) {
 	}
 	if mem.ID == "" || !strings.Contains(mem.ID, "automind_") {
 		t.Fatalf("id = %q, want automind-derived id", mem.ID)
+	}
+}
+
+func TestArchiveRawBundle_WritesSummaryBundleToL3(t *testing.T) {
+	vault := useTempVault(t)
+	source := filepath.Join(t.TempDir(), "summary.md")
+	if err := os.WriteFile(source, []byte("# AutoMind summary\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	items := []SummaryItem{
+		{Kind: SummaryKindRawEvidence, Title: "log", Body: "raw command log"},
+		{Kind: SummaryKindRawEvidence, Title: "ack", Body: "reuse ack record"},
+	}
+
+	routes, err := ArchiveRawBundle("ming-agents", "run-001", items, source)
+	if err != nil {
+		t.Fatalf("ArchiveRawBundle() error = %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("routes len = %d, want 2", len(routes))
+	}
+	root := filepath.Join(vault, "runs", "ming-agents", "run-001")
+	itemsPath := filepath.Join(root, "summary", "items.jsonl")
+	rawPath := filepath.Join(root, "summary", "raw-summary.md")
+	if _, err := os.Stat(itemsPath); err != nil {
+		t.Fatalf("items.jsonl missing: %v", err)
+	}
+	if _, err := os.Stat(rawPath); err != nil {
+		t.Fatalf("raw summary missing: %v", err)
+	}
+	if strings.Contains(itemsPath, string(filepath.Separator)+"archive"+string(filepath.Separator)) ||
+		strings.Contains(itemsPath, string(filepath.Separator)+"notes"+string(filepath.Separator)) {
+		t.Fatalf("L3 summary path mixed with L2/archive namespace: %s", itemsPath)
+	}
+	rawItems, err := os.ReadFile(itemsPath)
+	if err != nil {
+		t.Fatalf("read items: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(rawItems)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("jsonl lines = %d, want 2", len(lines))
+	}
+	var got SummaryItem
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("decode jsonl: %v", err)
+	}
+	if got.Title != "log" {
+		t.Fatalf("first item title = %q, want log", got.Title)
+	}
+
+	receiver, err := NewRunBundleReceiver("ming-agents", "run-001")
+	if err != nil {
+		t.Fatalf("NewRunBundleReceiver() error = %v", err)
+	}
+	if err := receiver.VerifyIntegrity(); err != nil {
+		t.Fatalf("VerifyIntegrity() error = %v", err)
 	}
 }
 
