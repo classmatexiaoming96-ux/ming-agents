@@ -186,7 +186,7 @@ func TestIngestDurableLessons_DryRunDoesNotWriteL2(t *testing.T) {
 		Tags:  []string{"tests"},
 	}}
 
-	routes, err := IngestDurableLessons("ming-agents", lessons, false)
+	routes, err := IngestDurableLessons("ming-agents", "run-dry", lessons, false)
 	if err != nil {
 		t.Fatalf("IngestDurableLessons() error = %v", err)
 	}
@@ -198,7 +198,7 @@ func TestIngestDurableLessons_DryRunDoesNotWriteL2(t *testing.T) {
 	}
 }
 
-func TestIngestDurableLessons_AcceptWritesL2WithProvenance(t *testing.T) {
+func TestIngestDurableLessons_AcceptWritesCandidateWithProvenance(t *testing.T) {
 	vault := useTempVault(t)
 	fixedNow(t, time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC))
 	lessons := []SummaryItem{{
@@ -209,15 +209,15 @@ func TestIngestDurableLessons_AcceptWritesL2WithProvenance(t *testing.T) {
 		EvidenceRef: ".automind/tasks/001/log.md",
 	}}
 
-	routes, err := IngestDurableLessons("ming-agents", lessons, true)
+	routes, err := IngestDurableLessons("ming-agents", "run-001", lessons, true)
 	if err != nil {
 		t.Fatalf("IngestDurableLessons() error = %v", err)
 	}
 	if len(routes) != 1 || !routes[0].Written {
 		t.Fatalf("routes = %+v, want one written route", routes)
 	}
-	if filepath.Dir(routes[0].Path) != filepath.Join(vault, "notes", "ming-agents") {
-		t.Fatalf("path = %s, want L2 notes project dir", routes[0].Path)
+	if filepath.Dir(routes[0].Path) != filepath.Join(vault, "notes", "ming-agents", "_candidates") {
+		t.Fatalf("path = %s, want L2 candidate dir", routes[0].Path)
 	}
 
 	raw, err := os.ReadFile(routes[0].Path)
@@ -233,6 +233,12 @@ func TestIngestDurableLessons_AcceptWritesL2WithProvenance(t *testing.T) {
 	}
 	if mem.Layer != "l2" || mem.SourceSystem != "automind" || mem.SourceGranularity != "task_summary" {
 		t.Fatalf("provenance = layer %q source_system %q granularity %q", mem.Layer, mem.SourceSystem, mem.SourceGranularity)
+	}
+	if mem.PromotionState != PromotionCandidate {
+		t.Fatalf("promotion_state = %q, want candidate", mem.PromotionState)
+	}
+	if len(mem.SourceRunIDs) != 1 || mem.SourceRunIDs[0] != "run-001" {
+		t.Fatalf("source_run_ids = %v, want [run-001]", mem.SourceRunIDs)
 	}
 	if mem.ID == "" || !strings.Contains(mem.ID, "automind_") {
 		t.Fatalf("id = %q, want automind-derived id", mem.ID)
@@ -256,7 +262,7 @@ func TestIngestDurableLessons_MapsExperienceKindToMemoryType(t *testing.T) {
 		},
 	}
 
-	routes, err := IngestDurableLessons("ming-agents", lessons, true)
+	routes, err := IngestDurableLessons("ming-agents", "run-exp", lessons, true)
 	if err != nil {
 		t.Fatalf("IngestDurableLessons() error = %v", err)
 	}
@@ -295,7 +301,7 @@ func TestIngestDurableLessons_DuplicateTitlesDoNotCollide(t *testing.T) {
 		},
 	}
 
-	routes, err := IngestDurableLessons("ming-agents", lessons, true)
+	routes, err := IngestDurableLessons("ming-agents", "run-dup", lessons, true)
 	if err != nil {
 		t.Fatalf("IngestDurableLessons() error = %v", err)
 	}
@@ -305,7 +311,7 @@ func TestIngestDurableLessons_DuplicateTitlesDoNotCollide(t *testing.T) {
 	if routes[0].Path == routes[1].Path {
 		t.Fatalf("duplicate title routes collided at %s", routes[0].Path)
 	}
-	entries, err := os.ReadDir(filepath.Join(vault, "notes", "ming-agents"))
+	entries, err := os.ReadDir(filepath.Join(vault, "notes", "ming-agents", "_candidates"))
 	if err != nil {
 		t.Fatalf("read notes dir: %v", err)
 	}
@@ -370,7 +376,7 @@ items:
 	}
 }
 
-func TestImportSummary_AcceptIndexesDurableLessonsForRecall(t *testing.T) {
+func TestImportSummary_AcceptWritesDurableLessonsAsNonRecallableCandidates(t *testing.T) {
 	useTempVault(t)
 	mustIngest(t, "unrelated indexed calibrator mentions orbitneedle", "decision", "ming-agents", nil, "manual")
 	summary := writeSummaryFixture(t, `
@@ -388,12 +394,14 @@ items:
 		t.Fatalf("ImportSummary() error = %v", err)
 	}
 
+	// Candidate-first: a single AutoMind summary lesson is a promotion candidate,
+	// so it must NOT surface in authoritative recall until it is promoted.
 	got, _, err := Recall("orbitneedle", "ming-agents", "", nil, 0, "active", 10)
 	if err != nil {
 		t.Fatalf("Recall() error = %v", err)
 	}
-	if !hasMemoryTitle(got, "Summary recall token") {
-		t.Fatalf("Recall() = %+v, want imported durable lesson", got)
+	if hasMemoryTitle(got, "Summary recall token") {
+		t.Fatalf("Recall() = %+v, want durable lesson excluded until promoted", got)
 	}
 }
 

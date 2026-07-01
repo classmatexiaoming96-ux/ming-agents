@@ -127,7 +127,7 @@ func ImportSummary(path string, options SummaryImportOptions) (*SummaryImportRes
 		return nil, ErrBundleFrozen
 	}
 
-	l2Routes, err := IngestDurableLessons(input.Project, classified.DurableLessons, true)
+	l2Routes, err := IngestDurableLessons(input.Project, input.RunID, classified.DurableLessons, true)
 	if err != nil {
 		return nil, err
 	}
@@ -187,20 +187,25 @@ func (SummaryClassifier) Classify(input *SummaryInput) (*ClassifiedSummary, erro
 	return &classified, nil
 }
 
-// IngestDurableLessons writes AutoMind durable lessons into L2 project memory
-// only when accept is true. In dry-run mode it returns planned L2 routes but
-// writes nothing, preserving the receiver's conservative default.
-func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([]SummaryRoute, error) {
+// IngestDurableLessons stores AutoMind durable lessons as L2 promotion
+// candidates (never authoritative L2 directly). From Phase 7 onward a single
+// task summary must not confer L2 authority: lessons are written into the
+// per-project candidate namespace with promotion_state=candidate and their run
+// provenance, then a human/automation promotes them via Promote once the L3->L2
+// evidence threshold is met. In dry-run mode it returns planned routes but
+// writes nothing.
+func IngestDurableLessons(project, runID string, lessons []SummaryItem, accept bool) ([]SummaryRoute, error) {
 	if project == "" {
 		return nil, fmt.Errorf("project is required")
 	}
+	candidateDir := durableLessonCandidateDir(project)
 	routes := make([]SummaryRoute, 0, len(lessons))
 	for _, lesson := range lessons {
 		if lesson.Kind != SummaryKindDurableLesson {
 			return nil, fmt.Errorf("durable lesson kind %q is not supported", lesson.Kind)
 		}
 		id := summaryMemoryID(project, lesson.Title, lesson.Body)
-		targetPath := filepath.Join(VaultDir, "notes", project, id+".md")
+		targetPath := filepath.Join(candidateDir, id+".md")
 		route := SummaryRoute{
 			Kind:   lesson.Kind,
 			Title:  lesson.Title,
@@ -212,7 +217,11 @@ func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([
 			continue
 		}
 		mem := summaryMemory(project, lesson, id, "l2")
-		path, err := writeMemory(mem, filepath.Join(VaultDir, "notes", project))
+		mem.PromotionState = PromotionCandidate
+		if runID != "" {
+			mem.SourceRunIDs = appendUnique(mem.SourceRunIDs, runID)
+		}
+		path, err := writeMemory(mem, candidateDir)
 		if err != nil {
 			return nil, err
 		}
@@ -224,6 +233,14 @@ func IngestDurableLessons(project string, lessons []SummaryItem, accept bool) ([
 		routes = append(routes, route)
 	}
 	return routes, nil
+}
+
+// durableLessonCandidateDir is the per-project namespace for L2 promotion
+// candidates produced from AutoMind summaries. It is separate from the
+// authoritative notes/{project} L2 namespace so candidate lessons never surface
+// in recall until a promotion accepts them.
+func durableLessonCandidateDir(project string) string {
+	return filepath.Join(VaultDir, "notes", project, "_candidates")
 }
 
 // ArchiveRawBundle stores raw AutoMind summary evidence under the Phase 5 L3
