@@ -170,7 +170,15 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 		return nil, err
 	}
 
-	eventID, err := appendPromotionAudit(PromotionAuditEvent{
+	// Serialise the file commit against concurrent promotion/curation/migration.
+	promotionMu.Lock()
+	defer promotionMu.Unlock()
+
+	// Prepare (but do not append) the audit event so the promoted memory can
+	// reference it. The audit is appended only after every write succeeds so a
+	// mid-commit failure never leaves an audit record for a promotion that did
+	// not happen.
+	promotedEvent := prepareAuditEvent(PromotionAuditEvent{
 		EventType:    PromotionEventPromoted,
 		Actor:        req.Actor,
 		SourceID:     req.SourceID,
@@ -182,10 +190,6 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 		EvidenceRefs: allEvidenceRefs(source),
 		SourceRunIDs: source.SourceRunIDs,
 	})
-	if err != nil {
-		return nil, err
-	}
-	result.AuditEventID = eventID
 
 	l2 := source
 	l2.ID = targetID
@@ -195,12 +199,9 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 	l2.PromotionState = PromotionPromoted
 	l2.PromotedBy = req.Actor.Name
 	l2.PromotedAt = now().UTC().Format(dateLayout)
-	l2.PromotionAudit = auditReference(eventID)
+	l2.PromotionAudit = auditReferenceForEvent(promotedEvent)
 	if _, err := writeMemory(l2, filepath.Join(VaultDir, "notes", source.Project)); err != nil {
 		return nil, err
-	}
-	if err := IndexMemory(l2.ID, l2.Title, l2.Body, l2.Project, l2.Type, l2.Tags); err != nil {
-		fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", l2.ID, err)
 	}
 
 	// Mark the originating candidate promoted so it stops surfacing in the
@@ -213,6 +214,16 @@ func Promote(req PromotionRequest) (*PromotionResult, error) {
 			return nil, err
 		}
 	}
+
+	if err := IndexMemory(l2.ID, l2.Title, l2.Body, l2.Project, l2.Type, l2.Tags); err != nil {
+		fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", l2.ID, err)
+	}
+
+	// All file state committed: append the audit last.
+	if err := appendPreparedAudit(promotedEvent); err != nil {
+		return nil, err
+	}
+	result.AuditEventID = promotedEvent.EventID
 	return result, nil
 }
 
@@ -252,7 +263,11 @@ func Revoke(req RevokeRequest) (*RevokeResult, error) {
 		return result, nil
 	}
 
-	eventID, err := appendPromotionAudit(PromotionAuditEvent{
+	// Serialise the file commit against concurrent promotion/curation/migration.
+	promotionMu.Lock()
+	defer promotionMu.Unlock()
+
+	revokedEvent := prepareAuditEvent(PromotionAuditEvent{
 		EventType: PromotionEventRevoked,
 		Actor:     req.Actor,
 		SourceID:  req.TargetID,
@@ -262,10 +277,6 @@ func Revoke(req RevokeRequest) (*RevokeResult, error) {
 		Outcome:   "revoked",
 		Rationale: req.Reason,
 	})
-	if err != nil {
-		return nil, err
-	}
-	result.AuditEventID = eventID
 
 	if mode == "supersede" {
 		target.Status = "superseded"
@@ -277,6 +288,7 @@ func Revoke(req RevokeRequest) (*RevokeResult, error) {
 		target.Status = "archived"
 		target.PromotionState = PromotionArchived
 	}
+	target.PromotionAudit = auditReferenceForEvent(revokedEvent)
 	dir := filepath.Dir(target.Path)
 	if target.Path == "" {
 		dir = filepath.Join(VaultDir, "notes", target.Project)
@@ -287,6 +299,12 @@ func Revoke(req RevokeRequest) (*RevokeResult, error) {
 	if err := DeleteFromIndex(req.TargetID); err != nil {
 		fmt.Fprintf(os.Stderr, "[memory] FTS5 delete error for %s: %v\n", req.TargetID, err)
 	}
+
+	// Commit succeeded: append the audit last.
+	if err := appendPreparedAudit(revokedEvent); err != nil {
+		return nil, err
+	}
+	result.AuditEventID = revokedEvent.EventID
 	return result, nil
 }
 

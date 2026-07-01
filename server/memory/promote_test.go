@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -187,6 +188,41 @@ func TestPromote_RejectsAlreadyPromotedSource(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Promote of an already-promoted L2 source must be rejected")
+	}
+}
+
+func TestPromote_WriteFailureLeavesNoPromotedAudit(t *testing.T) {
+	useTempVault(t)
+	day := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	fixedNow(t, day)
+	runs := []string{"run-a", "run-b", "run-c"}
+	for _, r := range runs {
+		makeFrozenRun(t, "ming-agents", r)
+	}
+	writeCandidate(t, "cand-1", "ming-agents", runs, "")
+
+	prev := writeMemory
+	writeMemory = func(mem Memory, targetDir string) (string, error) {
+		if mem.Layer == "l2" && mem.PromotionState == PromotionPromoted {
+			return "", fmt.Errorf("injected L2 write failure")
+		}
+		return prev(mem, targetDir)
+	}
+	t.Cleanup(func() { writeMemory = prev })
+
+	if _, err := Promote(PromotionRequest{
+		SourceID: "cand-1", TargetLayer: "l2", Rationale: "three runs agree",
+		Actor: PromotionActor{Kind: "human", Name: "alice"},
+	}); err == nil {
+		t.Fatal("Promote must fail when the L2 write fails")
+	}
+
+	// No promoted audit may exist for a promotion that never committed.
+	events, _ := ReadPromotionAudit(day)
+	for _, e := range events {
+		if e.EventType == PromotionEventPromoted {
+			t.Fatalf("promoted audit written despite failed commit: %+v", e)
+		}
 	}
 }
 

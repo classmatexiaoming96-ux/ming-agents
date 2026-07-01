@@ -173,12 +173,6 @@ func auditReferenceForEvent(event PromotionAuditEvent) string {
 	return auditRelativePath(auditEventTime(event)) + "#" + event.EventID
 }
 
-// auditReference returns a vault-relative pointer suitable for storing in a
-// memory's PromotionAudit field, linking it to its append-only log line.
-func auditReference(eventID string) string {
-	return auditRelativePath(now().UTC()) + "#" + eventID
-}
-
 // ReadPromotionAudit reads all audit events for a given day, in append order.
 // It reads the current audit/promotion path first and then the legacy
 // runs/_promotion_audit path so pre-migration logs remain visible. It is used by
