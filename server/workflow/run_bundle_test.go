@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,6 +49,74 @@ func TestRunBundleReceiver_FreezeOnRunEnd(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0555 {
 		t.Fatalf("run bundle root mode = %v, want 0555", got)
+	}
+}
+
+func TestFreezePolicy_OnlyOnSuccess(t *testing.T) {
+	oldVault := memory.VaultDir
+	memory.VaultDir = t.TempDir()
+	t.Cleanup(func() { memory.VaultDir = oldVault })
+
+	registry := NewNodeRegistry()
+	registry.Register(NodeKindClarification, func() WorkflowNode {
+		return staticNode{kind: NodeKindClarification, status: NodeStatusFailed, errText: "boom"}
+	})
+	executor := NewNodeExecutor(registry, NodeServices{})
+	spec := WorkflowSpec{
+		RunID: "run-failed-open",
+		Nodes: []NodeSpec{{
+			ID:   "clarification",
+			Kind: NodeKindClarification,
+		}},
+	}
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll repoRoot error = %v", err)
+	}
+
+	if _, err := executor.Run(context.Background(), repoRoot, spec, nil); err == nil {
+		t.Fatal("Run error = nil, want node failure")
+	}
+	root, err := memory.RunBundlePath("repo", "run-failed-open")
+	if err != nil {
+		t.Fatalf("RunBundlePath error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "_frozen")); !os.IsNotExist(err) {
+		t.Fatalf("_frozen err = %v, want not exist for failed run", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "receiver-status.json"))
+	if err != nil {
+		t.Fatalf("receiver-status.json missing: %v", err)
+	}
+	var status map[string]any
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatalf("receiver-status.json decode error = %v", err)
+	}
+	if status["final_status"] != "incomplete" || status["incomplete_reason"] == "" {
+		t.Fatalf("receiver-status.json = %s, want incomplete status", data)
+	}
+}
+
+func TestIncompleteBundle_AllowsFurtherWrites(t *testing.T) {
+	oldVault := memory.VaultDir
+	memory.VaultDir = t.TempDir()
+	t.Cleanup(func() { memory.VaultDir = oldVault })
+
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll repoRoot error = %v", err)
+	}
+	markRunBundleIncomplete(repoRoot, "run-incomplete", errors.New("node failed"))
+
+	receiver, err := memory.NewRunBundleReceiver("repo", "run-incomplete")
+	if err != nil {
+		t.Fatalf("NewRunBundleReceiver error = %v", err)
+	}
+	if err := receiver.ReceivePhaseReuse("diagnostics", "late diagnostic"); err != nil {
+		t.Fatalf("ReceivePhaseReuse after incomplete error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(receiver.Root(), "phase-reuse", "diagnostics.md")); err != nil {
+		t.Fatalf("late diagnostic missing: %v", err)
 	}
 }
 
@@ -214,11 +283,17 @@ func TestRunBundleEndToEnd_IsolatedFromL2AndArchive(t *testing.T) {
 }
 
 type staticNode struct {
-	kind NodeKind
+	kind    NodeKind
+	status  NodeStatus
+	errText string
 }
 
 func (n staticNode) Kind() NodeKind { return n.kind }
 
 func (n staticNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult, error) {
-	return &NodeResult{NodeID: req.Spec.ID, Status: NodeStatusCompleted}, nil
+	status := n.status
+	if status == "" {
+		status = NodeStatusCompleted
+	}
+	return &NodeResult{NodeID: req.Spec.ID, Status: status, Error: n.errText}, nil
 }

@@ -694,6 +694,34 @@ func (r *RunBundleReceiver) RecordSkippedArtifact(artifact, reason string) error
 	})
 }
 
+func (r *RunBundleReceiver) MarkIncomplete(reason string) error {
+	if r == nil {
+		return errors.New("nil run bundle receiver")
+	}
+	if err := os.MkdirAll(r.root, 0755); err != nil {
+		return err
+	}
+	path := filepath.Join(r.root, "receiver-status.json")
+	status := map[string]json.RawMessage{}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		_ = json.Unmarshal(data, &status)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	finalStatus, _ := json.Marshal("incomplete")
+	incompleteReason, _ := json.Marshal(reason)
+	updatedAt, _ := json.Marshal(time.Now().UTC().Format(time.RFC3339))
+	status["final_status"] = finalStatus
+	status["incomplete_reason"] = incompleteReason
+	status["updated_at"] = updatedAt
+	data, err = json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0644)
+}
+
 func (r *RunBundleReceiver) writeReceiverStatus(artifact string, entry runBundleArtifactStatus) error {
 	if r == nil {
 		return errors.New("nil run bundle receiver")
@@ -702,14 +730,18 @@ func (r *RunBundleReceiver) writeReceiverStatus(artifact string, entry runBundle
 		return err
 	}
 	path := filepath.Join(r.root, "receiver-status.json")
-	status := runBundleReceiverStatus{}
+	status := map[string]json.RawMessage{}
 	data, err := os.ReadFile(path)
 	if err == nil {
 		_ = json.Unmarshal(data, &status)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	status[artifact] = entry
+	entryData, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	status[artifact] = entryData
 	data, err = json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		return err

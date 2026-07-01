@@ -63,6 +63,16 @@ func freezeRunBundle(repoRoot, runID string) {
 	}
 }
 
+func markRunBundleIncomplete(repoRoot, runID string, runErr error) {
+	receiver := runBundleReceiver(repoRoot, runID)
+	if receiver == nil || runErr == nil {
+		return
+	}
+	if err := receiver.MarkIncomplete(runErr.Error()); err != nil {
+		log.Printf("RunBundleReceiver.MarkIncomplete failed: %v", err)
+	}
+}
+
 func mirrorPhaseReuseToRunBundle(req NodeRequest, phase, path string) {
 	receiver := runBundleReceiver(req.RepoRoot, req.RunID)
 	if receiver == nil || path == "" {

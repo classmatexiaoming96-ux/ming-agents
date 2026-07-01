@@ -19,7 +19,7 @@ func NewNodeExecutor(registry *NodeRegistry, services NodeServices) *NodeExecuto
 	return &NodeExecutor{registry: registry, services: services}
 }
 
-func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSpec, initial NodeInputs) (map[string]NodeOutput, error) {
+func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSpec, initial NodeInputs) (outputs map[string]NodeOutput, runErr error) {
 	dag, err := BuildNodeDAG(spec)
 	if err != nil {
 		return nil, err
@@ -40,9 +40,15 @@ func (e *NodeExecutor) Run(ctx context.Context, repoRoot string, spec WorkflowSp
 	if runID == "" {
 		runID = time.Now().Format("20060102-150405")
 	}
-	defer freezeRunBundle(repoRoot, runID)
+	defer func() {
+		if runErr == nil {
+			freezeRunBundle(repoRoot, runID)
+			return
+		}
+		markRunBundleIncomplete(repoRoot, runID, runErr)
+	}()
 
-	outputs := make(map[string]NodeOutput, len(initial)+len(spec.Nodes))
+	outputs = make(map[string]NodeOutput, len(initial)+len(spec.Nodes))
 	for nodeID, output := range initial {
 		outputs[nodeID] = output
 	}
