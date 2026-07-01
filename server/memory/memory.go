@@ -126,6 +126,17 @@ type Memory struct {
 	EvidenceRef       string `yaml:"evidence_ref,omitempty"`
 	CrossProject      bool   `yaml:"_cross_project,omitempty"`
 
+	// §Phase 7 promotion authority workflow. Status answers "is this memory
+	// active in recall?"; PromotionState answers "where is this item in the
+	// authority workflow?". All fields are omitempty so pre-Phase-7 files parse
+	// to zero values and are resolved by read-time defaulting (see
+	// ResolvePromotionState) rather than a destructive migration.
+	PromotionState PromotionState `yaml:"promotion_state,omitempty"`
+	PromotedBy     string         `yaml:"promoted_by,omitempty"`
+	PromotedAt     string         `yaml:"promoted_at,omitempty"`
+	PromotionAudit string         `yaml:"promotion_audit,omitempty"`
+	SourceRunIDs   []string       `yaml:"source_run_ids,omitempty"`
+
 	// §SHRIMP inject controls whether this memory is auto-injected into context.
 	// "always" = inject on every recall regardless of query (token-capped by budget).
 	// "query"  = inject only when matched by query (default, backwards-compatible).
