@@ -364,7 +364,7 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 				// Curate/Revoke, never auto-superseded by a contradiction pass — a
 				// lexical false positive must not silently drop a global rule.
 				if !allowL1Supersede() && (winner.Layer == "l1" || loser.Layer == "l1") {
-					return nil, fmt.Errorf("refuse: l1 memory must be curated/revoked explicitly, not superseded via contradiction")
+					return nil, fmt.Errorf("%w: not superseded via contradiction", ErrL1Supersede)
 				}
 				// Supersede is a two-object mutation (winner link + loser state)
 				// that must not half-commit. We keep the original winner so the
@@ -501,10 +501,10 @@ func PlanUnsupersede(id string) (UnsupersedePlan, error) {
 		}
 	}
 	if !found {
-		return UnsupersedePlan{}, fmt.Errorf("superseded memory %q not found", id)
+		return UnsupersedePlan{}, fmt.Errorf("%w: superseded memory %q", ErrNotFound, id)
 	}
 	if err := ValidatePromotionTransition(PromotionSuperseded, PromotionPromoted); err != nil {
-		return UnsupersedePlan{}, err
+		return UnsupersedePlan{}, fmt.Errorf("%w: %v", ErrInvalidTransition, err)
 	}
 	winnerID := loser.SupersededBy
 	winnerActive := false
@@ -557,13 +557,13 @@ func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
 		}
 	}
 	if !found {
-		return Memory{}, fmt.Errorf("superseded memory %q not found", id)
+		return Memory{}, fmt.Errorf("%w: superseded memory %q", ErrNotFound, id)
 	}
 
 	// G5: only reverse the eviction if the state machine still allows the
 	// superseded -> promoted edge. Defensive: phase 7 permits it today.
 	if err := ValidatePromotionTransition(PromotionSuperseded, PromotionPromoted); err != nil {
-		return Memory{}, err
+		return Memory{}, fmt.Errorf("%w: %v", ErrInvalidTransition, err)
 	}
 
 	winnerID := loser.SupersededBy
@@ -817,10 +817,10 @@ type ResolveSummary struct {
 //   - G2: an apply batch above MaxPairs is refused unless IKnow is set.
 func RunResolve(spec ResolveSpec) (ResolveSummary, error) {
 	if !spec.All && spec.Pair[0] == "" && spec.Pair[1] == "" {
-		return ResolveSummary{}, fmt.Errorf("resolve requires --pair or --all")
+		return ResolveSummary{}, fmt.Errorf("%w: resolve requires --pair or --all", ErrValidation)
 	}
 	if spec.Apply && (spec.Actor.Kind != "human" || strings.TrimSpace(spec.Actor.Name) == "") {
-		return ResolveSummary{}, fmt.Errorf("resolve --apply requires --actor (human name)")
+		return ResolveSummary{}, fmt.Errorf("%w: resolve --apply requires --actor (human name)", ErrValidation)
 	}
 
 	cands, err := gatherContradictionCandidates()
@@ -832,7 +832,7 @@ func RunResolve(spec ResolveSpec) (ResolveSummary, error) {
 	if !spec.All {
 		a, b := spec.Pair[0], spec.Pair[1]
 		if a == "" || b == "" {
-			return ResolveSummary{}, fmt.Errorf("resolve --pair requires two ids as <idA>,<idB>")
+			return ResolveSummary{}, fmt.Errorf("%w: resolve --pair requires two ids as <idA>,<idB>", ErrValidation)
 		}
 		if a > b {
 			a, b = b, a
@@ -856,13 +856,13 @@ func RunResolve(spec ResolveSpec) (ResolveSummary, error) {
 			for _, id := range []string{a, b} {
 				m, err := loadMemoryByID(id)
 				if err != nil {
-					return ResolveSummary{}, fmt.Errorf("resolve --pair: %s is not active: %w", id, err)
+					return ResolveSummary{}, fmt.Errorf("%w: resolve --pair: %s is not active: %v", ErrMemberNotActive, id, err)
 				}
 				if m.Status != "active" {
-					return ResolveSummary{}, fmt.Errorf("resolve --pair: %s is not active (status %q)", id, m.Status)
+					return ResolveSummary{}, fmt.Errorf("%w: resolve --pair: %s is not active (status %q)", ErrMemberNotActive, id, m.Status)
 				}
 			}
-			return ResolveSummary{}, fmt.Errorf("resolve --pair: %s,%s is not a pending contradiction", a, b)
+			return ResolveSummary{}, fmt.Errorf("%w: resolve --pair: %s,%s", ErrNotPendingContradiction, a, b)
 		}
 		cands = filtered
 	} else if spec.Project != "" {
@@ -891,10 +891,10 @@ func RunResolve(spec ResolveSpec) (ResolveSummary, error) {
 	// here so CLI and API share one gate.
 	if spec.Apply && !spec.IKnow {
 		if spec.MaxPairs == 0 {
-			return ResolveSummary{}, fmt.Errorf("refused: --max-pairs 0 is unbounded (use --i-know to override)")
+			return ResolveSummary{}, fmt.Errorf("%w: --max-pairs 0 is unbounded (use --i-know to override)", ErrUnboundedBatch)
 		}
 		if spec.MaxPairs > 0 && len(cands) > spec.MaxPairs {
-			return ResolveSummary{}, fmt.Errorf("refused: %d candidates > --max-pairs %d (use --i-know to override)", len(cands), spec.MaxPairs)
+			return ResolveSummary{}, fmt.Errorf("%w: %d candidates > --max-pairs %d (use --i-know to override)", ErrUnboundedBatch, len(cands), spec.MaxPairs)
 		}
 	}
 

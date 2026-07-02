@@ -389,24 +389,25 @@ func (s *Server) handleMemoryUnsupersede(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// resolveErrStatus maps a memory-layer error to an HTTP status per §3.5.
+// resolveErrStatus maps a memory-layer error to an HTTP status by matching the
+// typed sentinel errors the memory package wraps, rather than the message text
+// (which changes as wording evolves). Unrecognised errors are 500.
 func resolveErrStatus(err error) int {
-	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "not found"):
+	case errors.Is(err, memory.ErrNotFound):
 		return http.StatusNotFound
-	case strings.Contains(msg, "not active"):
+	case errors.Is(err, memory.ErrMemberNotActive):
 		return http.StatusNotFound
-	case strings.Contains(msg, "not a pending contradiction"):
+	case errors.Is(err, memory.ErrNotPendingContradiction):
 		return http.StatusUnprocessableEntity
-	case strings.Contains(msg, "is not allowed"):
+	case errors.Is(err, memory.ErrUnboundedBatch):
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, memory.ErrInvalidTransition):
 		return http.StatusConflict
-	case strings.Contains(msg, "--max-pairs") || strings.Contains(msg, "refused:"):
-		return http.StatusUnprocessableEntity
-	case strings.Contains(msg, "requires") || strings.Contains(msg, "mutually exclusive"):
+	case errors.Is(err, memory.ErrL1Supersede):
+		return http.StatusConflict
+	case errors.Is(err, memory.ErrValidation):
 		return http.StatusBadRequest
-	case strings.Contains(msg, "l1 memory must be curated"):
-		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}
