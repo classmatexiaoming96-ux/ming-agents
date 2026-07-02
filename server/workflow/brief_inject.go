@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,41 @@ import (
 )
 
 var workflowBrief = memory.Brief
+
+// workflowImplicitFeedback is indirected so tests can observe the feedback loop
+// without touching the real vault. It defaults to the memory package entry
+// point, which mutates memory files (score / pending_score) for the injected
+// memories that the LLM turn actually referenced.
+var workflowImplicitFeedback = memory.ImplicitFeedback
+
+// implicitFeedbackDisabled reports whether the workflow-level implicit feedback
+// loop is turned off. It is the dry-run guard from the design: because
+// ImplicitFeedback mutates memory files, an operator can disable the online
+// score adjustment by setting WORKFLOW_IMPLICIT_FEEDBACK_DISABLED.
+func implicitFeedbackDisabled() bool {
+	return strings.TrimSpace(os.Getenv("WORKFLOW_IMPLICIT_FEEDBACK_DISABLED")) != ""
+}
+
+// applyImplicitFeedback closes the brief -> output -> score loop: it feeds the
+// memories that a node injected (brief.Audit.InjectedIDs) and the assistant
+// output of that LLM turn into ImplicitFeedback, so referenced memories gain
+// pending_score and contradicted ones are penalised. It is deliberately
+// soft-fail (log only) so a feedback error never blocks the workflow, and a
+// no-op when there is nothing to score.
+func applyImplicitFeedback(brief *BriefInjectResult, output string) {
+	if implicitFeedbackDisabled() {
+		return
+	}
+	if brief == nil || brief.Audit == nil || len(brief.Audit.InjectedIDs) == 0 {
+		return
+	}
+	if strings.TrimSpace(output) == "" {
+		return
+	}
+	if _, err := workflowImplicitFeedback(brief.Audit.InjectedIDs, output); err != nil {
+		log.Printf("implicit feedback failed for %v: %v", brief.Audit.InjectedIDs, err)
+	}
+}
 
 type BriefInjectContext struct {
 	RunID     string

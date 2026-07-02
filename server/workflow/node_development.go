@@ -77,6 +77,16 @@ func (n *developmentNode) Execute(ctx context.Context, req NodeRequest) (*NodeRe
 			subtaskResults = results
 		}
 	}
+	// Close the brief -> output -> score loop per subtask: each subtask's LLM
+	// output is scored against the memories injected into its own brief.
+	if results, ok := subtaskResultsFromState(state); ok {
+		for _, sr := range results {
+			if sr == nil {
+				continue
+			}
+			applyImplicitFeedback(briefs[sr.Subtask.ID], sr.Output)
+		}
+	}
 	result := &NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,

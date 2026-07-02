@@ -74,6 +74,9 @@ func (n *planningNode) Execute(ctx context.Context, req NodeRequest) (*NodeResul
 	mirrorBriefAuditToRunBundle(req, brief, "")
 	mirrorReuseAckFileToRunBundle(req, string(req.Spec.Kind))
 	planJSON, _ := json.Marshal(plan)
+	// Close the brief -> output -> score loop with the planning turn output
+	// (the serialised plan is the observable result of this LLM turn).
+	applyImplicitFeedback(brief, string(planJSON))
 	return nodeResultWithBrief(&NodeResult{
 		NodeID: req.Spec.ID,
 		Status: NodeStatusCompleted,

@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"log"
+	"os"
 )
 
 type clarificationNode struct{}
@@ -84,6 +85,12 @@ func (n *clarificationNode) Execute(ctx context.Context, req NodeRequest) (*Node
 	outputPath, err := runClarificationWithMemoryForNode(ctx, req.RepoRoot, userInput, briefMarkdown(brief))
 	if err != nil {
 		return nodeResultWithBrief(&NodeResult{NodeID: req.Spec.ID, Status: NodeStatusFailed, Error: err.Error()}, brief), err
+	}
+	// Close the brief -> output -> score loop: feed the memories injected into
+	// this LLM turn and its output back through implicit feedback so recall
+	// ordering reflects what was actually used.
+	if data, readErr := os.ReadFile(outputPath); readErr == nil {
+		applyImplicitFeedback(brief, string(data))
 	}
 	paths := []string{outputPath}
 	values := map[string]any{}
