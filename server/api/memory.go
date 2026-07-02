@@ -357,6 +357,8 @@ func resolveErrStatus(err error) int {
 		return http.StatusNotFound
 	case strings.Contains(msg, "not active"):
 		return http.StatusNotFound
+	case strings.Contains(msg, "not a pending contradiction"):
+		return http.StatusUnprocessableEntity
 	case strings.Contains(msg, "is not allowed"):
 		return http.StatusConflict
 	case strings.Contains(msg, "--max-pairs") || strings.Contains(msg, "refused:"):

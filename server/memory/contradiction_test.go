@@ -763,6 +763,27 @@ func TestPhase8_ConcurrentResolveOnSamePair(t *testing.T) {
 	}
 }
 
+// TestPhase8_RunResolvePairNotPending (P1-3): a --pair that is not a pending
+// contradiction must return an explicit error instead of a silent all-zero
+// success, and distinguish a non-active member from a merely non-conflicting
+// active pair.
+func TestPhase8_RunResolvePairNotPending(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+	// Two active, unrelated memories: no lexical contradiction between them.
+	placeMemory(t, Memory{ID: "mem_alpha0", Project: "p", Score: 3.0, PromotionState: PromotionPromoted, Body: "prefer structured logging in services"})
+	placeMemory(t, Memory{ID: "mem_beta00", Project: "p", Score: 3.0, PromotionState: PromotionPromoted, Body: "database migrations run in the deploy step"})
+
+	// Both active but not in conflict → explicit not-pending error.
+	if _, err := RunResolve(ResolveSpec{Pair: [2]string{"mem_alpha0", "mem_beta00"}, Evict: true}); err == nil || !strings.Contains(err.Error(), "not a pending contradiction") {
+		t.Fatalf("non-conflicting pair error = %v, want not-a-pending-contradiction", err)
+	}
+	// A member that does not exist → not-active error.
+	if _, err := RunResolve(ResolveSpec{Pair: [2]string{"mem_alpha0", "mem_missing"}, Evict: true}); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("missing member error = %v, want not-active", err)
+	}
+}
+
 // TestPhase8_RunResolveUnboundedRequiresIKnow (P1-1/P1-2): an apply pass with
 // --max-pairs 0 is unbounded and must be refused unless --i-know is set,
 // regardless of surface (CLI or API both route through RunResolve).

@@ -776,6 +776,23 @@ func RunResolve(spec ResolveSpec) (ResolveSummary, error) {
 				filtered = append(filtered, c)
 			}
 		}
+		// A --pair that the detector did not surface is not a pending
+		// contradiction. Distinguish two failure modes so the operator gets a
+		// clear error instead of a silent all-zero success: a member that no
+		// longer exists / is not active, versus a pair whose members are both
+		// active but simply aren't in conflict.
+		if len(filtered) == 0 {
+			for _, id := range []string{a, b} {
+				m, err := loadMemoryByID(id)
+				if err != nil {
+					return ResolveSummary{}, fmt.Errorf("resolve --pair: %s is not active: %w", id, err)
+				}
+				if m.Status != "active" {
+					return ResolveSummary{}, fmt.Errorf("resolve --pair: %s is not active (status %q)", id, m.Status)
+				}
+			}
+			return ResolveSummary{}, fmt.Errorf("resolve --pair: %s,%s is not a pending contradiction", a, b)
+		}
 		cands = filtered
 	} else if spec.Project != "" {
 		var filtered []Contradiction
