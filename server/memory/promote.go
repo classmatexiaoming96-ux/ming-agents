@@ -278,6 +278,17 @@ func Revoke(req RevokeRequest) (*RevokeResult, error) {
 		Rationale: req.Reason,
 	})
 
+	// Snapshot the target before mutation so an audit-append failure after the
+	// write can restore it. Revoke owns the whole file+audit transaction: the
+	// target must never end up retired (superseded/archived) without a durable
+	// promotion audit record, even when the caller (contradiction resolve) only
+	// rolls back the winner.
+	origTarget := target
+	dir := filepath.Dir(target.Path)
+	if target.Path == "" {
+		dir = filepath.Join(VaultDir, "notes", target.Project)
+	}
+
 	if mode == "supersede" {
 		target.Status = "superseded"
 		target.PromotionState = PromotionSuperseded
@@ -289,10 +300,6 @@ func Revoke(req RevokeRequest) (*RevokeResult, error) {
 		target.PromotionState = PromotionArchived
 	}
 	target.PromotionAudit = auditReferenceForEvent(revokedEvent)
-	dir := filepath.Dir(target.Path)
-	if target.Path == "" {
-		dir = filepath.Join(VaultDir, "notes", target.Project)
-	}
 	if _, err := writeMemory(target, dir); err != nil {
 		return nil, err
 	}
@@ -300,8 +307,16 @@ func Revoke(req RevokeRequest) (*RevokeResult, error) {
 		fmt.Fprintf(os.Stderr, "[memory] FTS5 delete error for %s: %v\n", req.TargetID, err)
 	}
 
-	// Commit succeeded: append the audit last.
+	// Commit gate: append the audit last. If it fails, roll the target file back
+	// to its pre-revoke state and re-index it so the target is not left retired
+	// without an audit trail.
 	if err := appendPreparedAudit(revokedEvent); err != nil {
+		if _, rbErr := writeMemory(origTarget, dir); rbErr != nil {
+			return nil, fmt.Errorf("revoke: audit append failed (%v) and target rollback failed: %w", err, rbErr)
+		}
+		if idxErr := IndexMemory(origTarget.ID, origTarget.Title, origTarget.Body, origTarget.Project, origTarget.Type, origTarget.Tags); idxErr != nil {
+			fmt.Fprintf(os.Stderr, "[memory] FTS5 reindex error for %s: %v\n", origTarget.ID, idxErr)
+		}
 		return nil, err
 	}
 	result.AuditEventID = revokedEvent.EventID

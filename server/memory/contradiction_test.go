@@ -993,6 +993,76 @@ func TestPhase8_SupersedeRevokeFailureRollsBackWinner(t *testing.T) {
 	}
 }
 
+// TestPhase8_SupersedeAuditFailureRollsBackLoser (P0-1): if the loser write
+// succeeds but the promotion audit append fails inside Revoke, the loser must
+// be restored to active/promoted and the winner rolled back too — the loser
+// must never remain superseded without a durable revoked promotion audit.
+func TestPhase8_SupersedeAuditFailureRollsBackLoser(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, ConflictsWith: []string{"mem_loser01"}, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, ConflictsWith: []string{"mem_winner1"}, Body: "do not use pooling"})
+
+	// Block the promotion audit month path so the loser write succeeds but the
+	// audit append inside Revoke fails: replace the month dir with a regular
+	// file so MkdirAll cannot recreate it (robust even when running as root).
+	auditFile := PromotionAuditPath(now())
+	monthDir := filepath.Dir(auditFile)
+	if err := os.RemoveAll(monthDir); err != nil {
+		t.Fatalf("clear audit month dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(monthDir), 0o755); err != nil {
+		t.Fatalf("mkdir audit year dir: %v", err)
+	}
+	if err := os.WriteFile(monthDir, []byte("blocker"), 0o644); err != nil {
+		t.Fatalf("plant audit blocker file: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(monthDir) })
+
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Similarity: 0.8, Source: "manual"}}
+	_, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: PromotionActor{Kind: "human", Name: "alice"}})
+	if err == nil {
+		t.Fatal("supersede must fail when the loser audit append fails")
+	}
+	os.Remove(monthDir)
+
+	// Loser restored to active/promoted, never left superseded without an audit.
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 0 {
+		t.Fatalf("loser left superseded without audit after failed revoke: %+v", sup)
+	}
+	act, _ := readAllMemories("active", "")
+	var l, w *Memory
+	for i := range act {
+		switch act[i].ID {
+		case loser.ID:
+			l = &act[i]
+		case winner.ID:
+			w = &act[i]
+		}
+	}
+	if l == nil {
+		t.Fatalf("loser not restored active after failed revoke: %+v", act)
+	}
+	if ResolvePromotionState(*l) != PromotionPromoted {
+		t.Errorf("loser promotion state = %s, want promoted", ResolvePromotionState(*l))
+	}
+	// Winner rolled back too: no dangling Supersedes, conflict marker preserved.
+	if w == nil {
+		t.Fatalf("winner no longer active after rollback: %+v", act)
+	}
+	if containsString(w.Supersedes, loser.ID) {
+		t.Errorf("winner retains dangling Supersedes after failed revoke: %v", w.Supersedes)
+	}
+	// No revoked promotion audit was committed for the aborted supersede.
+	events, _ := ReadPromotionAudit(now())
+	for _, e := range events {
+		if e.EventType == PromotionEventRevoked && e.SourceID == loser.ID {
+			t.Fatalf("revoked audit written despite failed supersede: %+v", e)
+		}
+	}
+}
+
 func TestPairKeyCanonical(t *testing.T) {
 	c1 := Contradiction{A: "mem_b", B: "mem_a"}
 	c2 := Contradiction{A: "mem_a", B: "mem_b"}
