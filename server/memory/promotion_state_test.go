@@ -2,6 +2,132 @@ package memory
 
 import "testing"
 
+// allPromotionStates is the closed set the state machine understands, used to
+// drive the exhaustive transition matrix below.
+var allPromotionStates = []PromotionState{
+	PromotionCandidate,
+	PromotionUnderReview,
+	PromotionPromoted,
+	PromotionArchived,
+	PromotionSuperseded,
+	PromotionRejected,
+}
+
+// TestPromotionTransitionMatrix exhaustively covers every (from, to) pair over
+// the closed state set. The legal edges are declared here independently of the
+// production promotionTransitions map, so adding or removing an edge in the
+// source without updating this matrix fails the test — the whole point of a
+// table-driven state machine guard is to make silent drift impossible.
+func TestPromotionTransitionMatrix(t *testing.T) {
+	// legal[from][to] = true means from -> to is an allowed workflow edge.
+	legal := map[PromotionState]map[PromotionState]bool{
+		PromotionCandidate: {
+			PromotionUnderReview: true,
+			PromotionRejected:    true,
+		},
+		PromotionUnderReview: {
+			PromotionCandidate: true,
+			PromotionRejected:  true,
+			PromotionPromoted:  true,
+		},
+		PromotionPromoted: {
+			PromotionArchived:   true,
+			PromotionSuperseded: true,
+		},
+		PromotionSuperseded: {
+			PromotionPromoted: true,
+		},
+		PromotionArchived: {
+			PromotionCandidate: true,
+		},
+		PromotionRejected: {
+			PromotionCandidate: true,
+		},
+	}
+
+	for _, from := range allPromotionStates {
+		for _, to := range allPromotionStates {
+			from, to := from, to
+			wantLegal := legal[from][to]
+			t.Run(string(from)+"->"+string(to), func(t *testing.T) {
+				if got := CanTransitionPromotion(from, to); got != wantLegal {
+					t.Errorf("CanTransitionPromotion(%q,%q) = %v, want %v", from, to, got, wantLegal)
+				}
+				err := ValidatePromotionTransition(from, to)
+				if wantLegal && err != nil {
+					t.Errorf("ValidatePromotionTransition(%q,%q) = %v, want nil", from, to, err)
+				}
+				if !wantLegal && err == nil {
+					t.Errorf("ValidatePromotionTransition(%q,%q) = nil, want error", from, to)
+				}
+			})
+		}
+	}
+}
+
+// TestPromotionTransition_NoOpNeverLegal confirms a same-state edge is never a
+// transition for any state (from == to must fail).
+func TestPromotionTransition_NoOpNeverLegal(t *testing.T) {
+	for _, s := range allPromotionStates {
+		if CanTransitionPromotion(s, s) {
+			t.Errorf("CanTransitionPromotion(%q,%q) = true, want false (no-op is not a transition)", s, s)
+		}
+		if err := ValidatePromotionTransition(s, s); err == nil {
+			t.Errorf("ValidatePromotionTransition(%q,%q) = nil, want error", s, s)
+		}
+	}
+}
+
+// TestValidatePromotionTransition_UnknownStatesMatrix covers unknown states on
+// either side against every known state.
+func TestValidatePromotionTransition_UnknownStatesMatrix(t *testing.T) {
+	const bogus PromotionState = "bogus"
+	if IsValidPromotionState(bogus) {
+		t.Fatal("bogus must not be a valid state")
+	}
+	for _, s := range allPromotionStates {
+		if err := ValidatePromotionTransition(bogus, s); err == nil {
+			t.Errorf("ValidatePromotionTransition(bogus,%q) = nil, want error", s)
+		}
+		if err := ValidatePromotionTransition(s, bogus); err == nil {
+			t.Errorf("ValidatePromotionTransition(%q,bogus) = nil, want error", s)
+		}
+	}
+}
+
+// TestIsValidPromotionState_ClosedSet confirms every declared state validates
+// and nothing outside the set does.
+func TestIsValidPromotionState_ClosedSet(t *testing.T) {
+	for _, s := range allPromotionStates {
+		if !IsValidPromotionState(s) {
+			t.Errorf("IsValidPromotionState(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []PromotionState{"", "bogus", "PROMOTED", "candidate ", "l2"} {
+		if IsValidPromotionState(s) {
+			t.Errorf("IsValidPromotionState(%q) = true, want false", s)
+		}
+	}
+}
+
+// TestIsRecallVisiblePromotionState_Matrix covers visibility across every state
+// and both the l2_inbox and authoritative layer namespaces.
+func TestIsRecallVisiblePromotionState_Matrix(t *testing.T) {
+	for _, s := range allPromotionStates {
+		// l2_inbox is never recall-visible regardless of state.
+		if IsRecallVisiblePromotionState(s, "l2_inbox") {
+			t.Errorf("l2_inbox state %q must never be recall-visible", s)
+		}
+		// Outside l2_inbox, only promoted is visible.
+		wantVisible := s == PromotionPromoted
+		for _, layer := range []string{"", "l2", "l1"} {
+			if got := IsRecallVisiblePromotionState(s, layer); got != wantVisible {
+				t.Errorf("IsRecallVisiblePromotionState(%q, %q) = %v, want %v", s, layer, got, wantVisible)
+			}
+		}
+	}
+}
+
 func TestPromotionTransitions_ValidEdges(t *testing.T) {
 	valid := []struct{ from, to PromotionState }{
 		{PromotionCandidate, PromotionUnderReview},
