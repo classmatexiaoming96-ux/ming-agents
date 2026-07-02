@@ -1124,32 +1124,10 @@ func Cleanup() (CleanupResult, error) {
 // holographic source), funnels them through ResolveContradictions, and returns
 // the number of pairs actually superseded. AutoEvict is OFF here (flag-only).
 func resolutionPhase() (int, error) {
-	active, err := readAllMemories("active", "")
+	cands, err := gatherContradictionCandidates()
 	if err != nil {
 		return 0, err
 	}
-
-	var cands []Contradiction
-	// Implicit candidates from durable conflicts_with markers. These carry only a
-	// low confidence on their own — the at-rest detector must independently
-	// corroborate the pair to lift it above the eviction floor.
-	seen := map[string]bool{}
-	for _, m := range active {
-		for _, partner := range m.ConflictsWith {
-			c := Contradiction{A: m.ID, B: partner, Source: "implicit", Confidence: implicitMarkerConfidence, Detail: "online conflicts_with marker"}
-			k := c.PairKey()
-			if seen[k] {
-				continue
-			}
-			seen[k] = true
-			cands = append(cands, c)
-		}
-	}
-	// At-rest candidates from the injectable detector.
-	if ContradictionDetector != nil {
-		cands = append(cands, ContradictionDetector(active)...)
-	}
-
 	if len(cands) == 0 {
 		return 0, nil
 	}

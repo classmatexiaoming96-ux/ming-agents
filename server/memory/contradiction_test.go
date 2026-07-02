@@ -386,6 +386,80 @@ func TestCleanupDrivesResolutionPhase(t *testing.T) {
 	}
 }
 
+// TestPhase8_ResolveDryRunNoWrites (§6.1): a dry-run pass that would supersede a
+// pair must not touch the vault or either audit log.
+func TestPhase8_ResolveDryRunNoWrites(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Type: "decision", Project: "p", Score: 4.0, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Type: "decision", Project: "p", Score: 2.0, Body: "do not use pooling"})
+
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Similarity: 0.8, Source: "manual"}}
+
+	res, err := ResolveContradictions(cands, ResolveOptions{DryRun: true, AutoEvict: true})
+	if err != nil {
+		t.Fatalf("dry-run ResolveContradictions: %v", err)
+	}
+	if len(res) != 1 || res[0].Action != "superseded" {
+		t.Fatalf("dry-run result = %+v, want one superseded", res)
+	}
+	// The candidate metadata is echoed back on the result (C1 field additions).
+	if res[0].Source != "manual" || res[0].Confidence != 0.9 || res[0].Similarity != 0.8 {
+		t.Errorf("dry-run result missing candidate metadata: %+v", res[0])
+	}
+	// Loser file must remain untouched at its original path.
+	if _, err := os.Stat(loser.Path); err != nil {
+		t.Errorf("dry-run moved/removed loser file: %v", err)
+	}
+	// No contradiction audit log created.
+	if auditLogExists(t) {
+		t.Errorf("dry-run wrote %s, must write nothing", contradictionsLog)
+	}
+	// No promotion audit events.
+	events, err := ReadPromotionAudit(now())
+	if err != nil {
+		t.Fatalf("ReadPromotionAudit: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("dry-run wrote %d promotion audit events, want 0", len(events))
+	}
+}
+
+// TestPhase8_ListConflicts (§2.1/§3.2): ListConflicts returns the current
+// pending pairs as a read-only view, honouring the filters.
+func TestPhase8_ListConflicts(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	// A same-project polarity-flip pair the lexical detector will surface.
+	placeMemory(t, Memory{ID: "mem_pool_yes", Project: "p", Score: 3.0, Body: "use connection pooling for the database"})
+	placeMemory(t, Memory{ID: "mem_pool_no0", Project: "p", Score: 3.0, Body: "do not use connection pooling for the database"})
+
+	got, err := ListConflicts(ListConflictFilter{})
+	if err != nil {
+		t.Fatalf("ListConflicts: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListConflicts returned %d pairs, want 1 (%+v)", len(got), got)
+	}
+	if got[0].Source != "lexical" {
+		t.Errorf("conflict source = %q, want lexical", got[0].Source)
+	}
+	// ListConflicts must not write anything.
+	if auditLogExists(t) {
+		t.Errorf("ListConflicts wrote %s, must be read-only", contradictionsLog)
+	}
+	// Project filter that matches nothing yields an empty list.
+	none, err := ListConflicts(ListConflictFilter{Project: "other"})
+	if err != nil {
+		t.Fatalf("ListConflicts(project filter): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("project filter returned %d, want 0", len(none))
+	}
+}
+
 func TestPairKeyCanonical(t *testing.T) {
 	c1 := Contradiction{A: "mem_b", B: "mem_a"}
 	c2 := Contradiction{A: "mem_a", B: "mem_b"}

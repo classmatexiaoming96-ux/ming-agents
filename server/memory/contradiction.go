@@ -64,18 +64,48 @@ func (c Contradiction) PairKey() string {
 
 // ResolveOptions controls a resolution pass.
 type ResolveOptions struct {
-	DryRun    bool // compute + return decisions, write nothing (required for first rollout)
-	AutoEvict bool // false = only flag conflicts_with, never supersede
+	DryRun    bool           // compute + return decisions, write nothing (required for first rollout)
+	AutoEvict bool           // false = only flag conflicts_with, never supersede
+	Actor     PromotionActor // who is applying the eviction; recorded in the promotion audit via Revoke
 }
 
 // ResolutionResult is one decision from ResolveContradictions.
 type ResolutionResult struct {
-	Pair   [2]string `json:"pair"`             // [A, B] canonical
-	Action string    `json:"action"`           // superseded | flagged | skipped
-	Winner string    `json:"winner,omitempty"` // populated when a winner was determined
-	Loser  string    `json:"loser,omitempty"`
-	Margin float64   `json:"margin"`
-	Reason string    `json:"reason"`
+	Pair       [2]string `json:"pair"`             // [A, B] canonical
+	Action     string    `json:"action"`           // superseded | flagged | skipped
+	Winner     string    `json:"winner,omitempty"` // populated when a winner was determined
+	Loser      string    `json:"loser,omitempty"`
+	Margin     float64   `json:"margin"`
+	Reason     string    `json:"reason"`
+	Source     string    `json:"source,omitempty"`     // detector source of the winning candidate
+	Confidence float64   `json:"confidence,omitempty"` // candidate confidence
+	Similarity float64   `json:"similarity,omitempty"` // candidate same-subject similarity
+	// PromotionAuditEventID cross-references the promotion audit record written
+	// by Revoke when the loser is actually superseded (empty on dry-run/flag).
+	PromotionAuditEventID string `json:"promotion_audit_event_id,omitempty"`
+}
+
+// ListConflictFilter narrows the read-only conflict listing.
+type ListConflictFilter struct {
+	Project       string
+	Source        string
+	MinConfidence float64
+	Action        string
+	Limit         int
+}
+
+// ResolveSpec is the shared input CLI and HTTP handlers translate their flags /
+// JSON into. Business logic lives in RunResolve so the surfaces only do IO.
+type ResolveSpec struct {
+	Pair         [2]string
+	All          bool
+	Project      string
+	Evict        bool
+	Apply        bool
+	MaxPairs     int
+	IKnow        bool
+	Actor        PromotionActor
+	SourceFilter string
 }
 
 // ContradictionDetector is the injectable at-rest scanner. The default is the
@@ -256,7 +286,7 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 
 	for _, k := range order {
 		c := byKey[k]
-		res := ResolutionResult{Pair: [2]string{c.A, c.B}}
+		res := ResolutionResult{Pair: [2]string{c.A, c.B}, Source: c.Source, Confidence: c.Confidence, Similarity: c.Similarity}
 
 		a, okA := idx[c.A]
 		b, okB := idx[c.B]
@@ -472,6 +502,88 @@ func Unsupersede(id string) (Memory, error) {
 		return Memory{}, err
 	}
 	return loser, nil
+}
+
+// gatherContradictionCandidates builds the current candidate stream the same way
+// resolutionPhase does: low-confidence implicit pairs from durable
+// conflicts_with markers, plus the at-rest ContradictionDetector output. It reads
+// live memory state (never the historical _contradictions.jsonl) so callers see
+// the current pending set.
+func gatherContradictionCandidates() ([]Contradiction, error) {
+	active, err := readAllMemories("active", "")
+	if err != nil {
+		return nil, err
+	}
+	var cands []Contradiction
+	// Implicit candidates from durable conflicts_with markers. These carry only a
+	// low confidence on their own — the at-rest detector must independently
+	// corroborate the pair to lift it above the eviction floor.
+	seen := map[string]bool{}
+	for _, m := range active {
+		for _, partner := range m.ConflictsWith {
+			c := Contradiction{A: m.ID, B: partner, Source: "implicit", Confidence: implicitMarkerConfidence, Detail: "online conflicts_with marker"}
+			k := c.PairKey()
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			cands = append(cands, c)
+		}
+	}
+	// At-rest candidates from the injectable detector.
+	if ContradictionDetector != nil {
+		cands = append(cands, ContradictionDetector(active)...)
+	}
+	return cands, nil
+}
+
+// projectOfPair returns the project of either pair member from the active index,
+// used to apply the ListConflicts / ResolveSpec project filter.
+func projectOfPair(pair [2]string) string {
+	for _, id := range pair {
+		if m, err := loadMemoryByID(id); err == nil {
+			return m.Project
+		}
+	}
+	return ""
+}
+
+// ListConflicts computes the current pending contradictions as a read-only,
+// dry-run view (no writes). It runs the full §13.2 decision pass with AutoEvict
+// on so a caller can see which pairs *would* be superseded, then applies the
+// caller's filters and sorts by confidence descending.
+func ListConflicts(filter ListConflictFilter) ([]ResolutionResult, error) {
+	cands, err := gatherContradictionCandidates()
+	if err != nil {
+		return nil, err
+	}
+	results, err := ResolveContradictions(cands, ResolveOptions{DryRun: true, AutoEvict: true})
+	if err != nil {
+		return nil, err
+	}
+	var out []ResolutionResult
+	for _, r := range results {
+		if filter.Source != "" && r.Source != filter.Source {
+			continue
+		}
+		if filter.MinConfidence > 0 && r.Confidence < filter.MinConfidence {
+			continue
+		}
+		if filter.Action != "" && r.Action != filter.Action {
+			continue
+		}
+		if filter.Project != "" && projectOfPair(r.Pair) != filter.Project {
+			continue
+		}
+		out = append(out, r)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Confidence > out[j].Confidence
+	})
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, nil
 }
 
 // lexicalContradictionScan is the default at-rest detector: two active memories
