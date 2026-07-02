@@ -362,6 +362,11 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 				if !allowL1Supersede() && (winner.Layer == "l1" || loser.Layer == "l1") {
 					return nil, fmt.Errorf("refuse: l1 memory must be curated/revoked explicitly, not superseded via contradiction")
 				}
+				// Supersede is a two-object mutation (winner link + loser state)
+				// that must not half-commit. We keep the original winner so the
+				// write can be rolled back if the loser transition fails, and we
+				// only treat the pair as resolved once BOTH sides have landed.
+				origWinner := winner
 				// Winner side stays in the contradiction package: record the
 				// supersedes link and drop the (now resolved) conflicts_with marker.
 				winner.Supersedes = appendUnique(winner.Supersedes, loser.ID)
@@ -381,6 +386,25 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 					Actor:        opts.Actor,
 				})
 				if err != nil {
+					// The loser transition failed after the winner write: roll the
+					// winner back to its pre-pass state so it does NOT retain a
+					// dangling Supersedes link or a cleared conflict marker, then
+					// record a failure line so the aborted supersede is auditable.
+					if _, rbErr := writeMemory(origWinner, filepath.Dir(origWinner.Path)); rbErr != nil {
+						return nil, fmt.Errorf("resolve: revoke failed (%v) and winner rollback failed: %w", err, rbErr)
+					}
+					if logErr := appendContradictionLog(auditRecord{
+						Time:   now().Format(time.RFC3339),
+						Pair:   res.Pair,
+						Action: "supersede_failed",
+						Winner: d.winnerID,
+						Loser:  d.loserID,
+						Source: c.Source,
+						Reason: fmt.Sprintf("supersede aborted, winner rolled back: %v", err),
+						Mode:   modeOf(opts),
+					}); logErr != nil {
+						return nil, fmt.Errorf("resolve: revoke failed (%v) and failure audit failed: %w", err, logErr)
+					}
 					return nil, fmt.Errorf("resolve: %w", err)
 				}
 				res.PromotionAuditEventID = revRes.AuditEventID

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -759,6 +760,83 @@ func TestPhase8_ConcurrentResolveOnSamePair(t *testing.T) {
 				t.Errorf("winner supersedes has %d copies of loser, want 1", n)
 			}
 		}
+	}
+}
+
+// TestPhase8_SupersedeRevokeFailureRollsBackWinner (P0-1): if the loser
+// transition (Revoke) fails after the winner write, the winner must not retain
+// a dangling Supersedes link or a cleared conflict marker, the loser must stay
+// active, and a supersede_failed line must be recorded so the aborted attempt
+// is auditable.
+func TestPhase8_SupersedeRevokeFailureRollsBackWinner(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, ConflictsWith: []string{"mem_loser01"}, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, ConflictsWith: []string{"mem_winner1"}, Body: "do not use pooling"})
+
+	// Fail the loser's supersede write (Revoke) while letting the winner write
+	// through, forcing the mid-commit failure this fix must recover from.
+	prev := writeMemory
+	writeMemory = func(mem Memory, targetDir string) (string, error) {
+		if mem.ID == loser.ID && mem.PromotionState == PromotionSuperseded {
+			return "", fmt.Errorf("injected loser supersede write failure")
+		}
+		return prev(mem, targetDir)
+	}
+	t.Cleanup(func() { writeMemory = prev })
+
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Similarity: 0.8, Source: "manual"}}
+	_, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: PromotionActor{Kind: "human", Name: "alice"}})
+	if err == nil {
+		t.Fatal("supersede must fail when the loser transition fails")
+	}
+
+	// Restore the real writer so the assertions can read state back.
+	writeMemory = prev
+
+	// Winner rolled back: no dangling Supersedes, conflict marker still present.
+	act, _ := readAllMemories("active", "")
+	var w *Memory
+	for i := range act {
+		if act[i].ID == winner.ID {
+			w = &act[i]
+		}
+	}
+	if w == nil {
+		t.Fatalf("winner no longer active after rollback: %+v", act)
+	}
+	if containsString(w.Supersedes, loser.ID) {
+		t.Errorf("winner retains dangling Supersedes after failed revoke: %v", w.Supersedes)
+	}
+	if !containsString(w.ConflictsWith, loser.ID) {
+		t.Errorf("winner conflict marker was cleared despite failed revoke: %v", w.ConflictsWith)
+	}
+	// Loser stayed active (never superseded).
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 0 {
+		t.Errorf("loser superseded despite failed revoke: %+v", sup)
+	}
+
+	// A failure line is present so the aborted supersede is auditable.
+	raw, err := os.ReadFile(filepath.Join(VaultDir, contradictionsLog))
+	if err != nil {
+		t.Fatalf("read contradiction log: %v", err)
+	}
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec auditRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode contradiction line: %v", err)
+		}
+		if rec.Action == "supersede_failed" && rec.Loser == loser.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no supersede_failed audit line for aborted supersede")
 	}
 }
 
