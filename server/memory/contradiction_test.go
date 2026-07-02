@@ -763,6 +763,30 @@ func TestPhase8_ConcurrentResolveOnSamePair(t *testing.T) {
 	}
 }
 
+// TestPhase8_RunResolveUnboundedRequiresIKnow (P1-1/P1-2): an apply pass with
+// --max-pairs 0 is unbounded and must be refused unless --i-know is set,
+// regardless of surface (CLI or API both route through RunResolve).
+func TestPhase8_RunResolveUnboundedRequiresIKnow(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+	placeMemory(t, Memory{ID: "mem_pool_yes", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "always enable the database connection pooling layer for every service"})
+	placeMemory(t, Memory{ID: "mem_pool_no0", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "never enable the database connection pooling layer for every service"})
+	actor := PromotionActor{Kind: "human", Name: "alice"}
+
+	// Apply + unbounded without --i-know is refused.
+	if _, err := RunResolve(ResolveSpec{All: true, Evict: true, Apply: true, MaxPairs: 0, Actor: actor}); err == nil || !strings.Contains(err.Error(), "unbounded") {
+		t.Fatalf("unbounded apply error = %v, want unbounded refusal", err)
+	}
+	// The same spec with --i-know is allowed.
+	if _, err := RunResolve(ResolveSpec{All: true, Evict: true, Apply: true, MaxPairs: 0, IKnow: true, Actor: actor}); err != nil {
+		t.Fatalf("unbounded apply with i-know: %v", err)
+	}
+	// A dry-run (no apply) is never gated by the batch cap.
+	if _, err := RunResolve(ResolveSpec{All: true, Evict: true, Apply: false, MaxPairs: 0}); err != nil {
+		t.Fatalf("dry-run unbounded should not be gated: %v", err)
+	}
+}
+
 // TestPhase8_UnsupersedeAuditFailureRollsBack (P0-2): if the promotion audit
 // append fails after the loser file has been rewritten active, the reversal
 // must roll back so the loser stays superseded — it must never be active

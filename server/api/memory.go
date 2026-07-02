@@ -261,6 +261,13 @@ func (s *Server) handleMemoryResolve(w http.ResponseWriter, r *http.Request) {
 		IKnow:        req.IKnow,
 		SourceFilter: req.Source,
 	}
+	// The JSON zero value for max_pairs is 0 (unbounded). Match the CLI's default
+	// batch cap of 20 unless the caller deliberately opts into an unbounded run
+	// with i_know, so a request that simply omits max_pairs can't bypass the
+	// batch gate.
+	if req.MaxPairs == 0 && !req.IKnow {
+		spec.MaxPairs = 20
+	}
 	if len(req.Pair) == 2 {
 		spec.Pair = [2]string{req.Pair[0], req.Pair[1]}
 	}

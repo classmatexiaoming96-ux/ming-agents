@@ -796,9 +796,18 @@ func RunResolve(spec ResolveSpec) (ResolveSummary, error) {
 		cands = filtered
 	}
 
-	// G2: batch gate — only applies to real apply passes.
-	if spec.Apply && spec.MaxPairs > 0 && len(cands) > spec.MaxPairs && !spec.IKnow {
-		return ResolveSummary{}, fmt.Errorf("refused: %d candidates > --max-pairs %d (use --i-know to override)", len(cands), spec.MaxPairs)
+	// G2: batch gate — only applies to real apply passes. An explicit
+	// MaxPairs == 0 means "unbounded"; that must be an intentional operator
+	// choice, so it is refused unless --i-know is set. A positive MaxPairs is
+	// refused when the candidate set exceeds it without the override. Enforced
+	// here so CLI and API share one gate.
+	if spec.Apply && !spec.IKnow {
+		if spec.MaxPairs == 0 {
+			return ResolveSummary{}, fmt.Errorf("refused: --max-pairs 0 is unbounded (use --i-know to override)")
+		}
+		if spec.MaxPairs > 0 && len(cands) > spec.MaxPairs {
+			return ResolveSummary{}, fmt.Errorf("refused: %d candidates > --max-pairs %d (use --i-know to override)", len(cands), spec.MaxPairs)
+		}
 	}
 
 	opts := ResolveOptions{
