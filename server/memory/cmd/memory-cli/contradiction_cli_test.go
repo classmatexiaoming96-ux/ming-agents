@@ -138,6 +138,9 @@ func TestCmdUnsupersede_DryRunAndApply(t *testing.T) {
 	if !strings.Contains(out.String(), "dry-run") {
 		t.Fatalf("unsupersede output = %q, want dry-run", out.String())
 	}
+	if !strings.Contains(out.String(), "restore loser to active") {
+		t.Fatalf("unsupersede output = %q, want planned changes", out.String())
+	}
 
 	// Apply requires --actor and --reason.
 	out.Reset()

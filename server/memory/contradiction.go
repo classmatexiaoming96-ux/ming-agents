@@ -471,13 +471,14 @@ func flagConflict(idA, idB string, idx map[string]Memory) error {
 // CLI and API dry-run paths can validate the id and show a real plan rather
 // than echoing a bare id back.
 type UnsupersedePlan struct {
-	Loser        string         `json:"loser"`
-	Winner       string         `json:"winner,omitempty"`
-	FromState    PromotionState `json:"from_state"`
-	ToState      PromotionState `json:"to_state"`
-	FromStatus   string         `json:"from_status"`
-	ToStatus     string         `json:"to_status"`
-	WinnerActive bool           `json:"winner_active"`
+	Loser          string         `json:"loser"`
+	Winner         string         `json:"winner,omitempty"`
+	FromState      PromotionState `json:"from_state"`
+	ToState        PromotionState `json:"to_state"`
+	FromStatus     string         `json:"from_status"`
+	ToStatus       string         `json:"to_status"`
+	WinnerActive   bool           `json:"winner_active"`
+	PlannedChanges []string       `json:"planned_changes"`
 }
 
 // PlanUnsupersede loads the superseded loser and returns the reversal plan
@@ -520,6 +521,14 @@ func PlanUnsupersede(id string) (UnsupersedePlan, error) {
 		FromStatus:   "superseded",
 		ToStatus:     "active",
 		WinnerActive: winnerActive,
+		PlannedChanges: []string{
+			"restore loser to active",
+			"clear loser supersede metadata",
+			"drop loser from winner supersedes",
+			"reindex restored loser",
+			"append unsuperseded promotion audit",
+			"append secondary contradiction log",
+		},
 	}, nil
 }
 

@@ -206,15 +206,19 @@ func TestPhase8_APIUnsupersedeDryRunValidatesID(t *testing.T) {
 		t.Fatalf("dry-run plan status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		ID     string `json:"id"`
-		Winner string `json:"winner"`
-		DryRun bool   `json:"dry_run"`
+		ID             string   `json:"id"`
+		Winner         string   `json:"winner"`
+		DryRun         bool     `json:"dry_run"`
+		PlannedChanges []string `json:"planned_changes"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if body.ID != "mem_pool_no0" || body.Winner != "mem_pool_yes" || !body.DryRun {
 		t.Fatalf("dry-run plan body = %s, want loser/winner/dry_run", rec.Body.String())
+	}
+	if len(body.PlannedChanges) == 0 {
+		t.Fatalf("dry-run plan body = %s, want planned_changes", rec.Body.String())
 	}
 }
 

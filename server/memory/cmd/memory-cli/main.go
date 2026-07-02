@@ -610,8 +610,11 @@ func cmdUnsupersede(args []string, out io.Writer) error {
 		}
 		fmt.Fprintf(out, "unsupersede dry-run: %s\n", plan.Loser)
 		fmt.Fprintf(out, "  currently superseded_by=%s (winner_active=%v)\n", plan.Winner, plan.WinnerActive)
-		fmt.Fprintf(out, "  would: status=%s->%s, PromotionState=%s->%s, reindex, drop from winner supersedes\n",
+		fmt.Fprintf(out, "  would: status=%s->%s, PromotionState=%s->%s\n",
 			plan.FromStatus, plan.ToStatus, plan.FromState, plan.ToState)
+		for _, change := range plan.PlannedChanges {
+			fmt.Fprintf(out, "  planned_changes: %s\n", change)
+		}
 		return nil
 	}
 	if strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "" {

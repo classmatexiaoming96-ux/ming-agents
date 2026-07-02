@@ -328,14 +328,15 @@ func (s *Server) handleMemoryUnsupersede(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"id":            plan.Loser,
-			"winner":        plan.Winner,
-			"winner_active": plan.WinnerActive,
-			"from_state":    plan.FromState,
-			"to_state":      plan.ToState,
-			"from_status":   plan.FromStatus,
-			"to_status":     plan.ToStatus,
-			"dry_run":       true,
+			"id":              plan.Loser,
+			"winner":          plan.Winner,
+			"winner_active":   plan.WinnerActive,
+			"from_state":      plan.FromState,
+			"to_state":        plan.ToState,
+			"from_status":     plan.FromStatus,
+			"to_status":       plan.ToStatus,
+			"planned_changes": plan.PlannedChanges,
+			"dry_run":         true,
 		})
 		return
 	}

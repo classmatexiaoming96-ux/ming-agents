@@ -791,6 +791,21 @@ func TestPhase8_PlanUnsupersedeValidatesID(t *testing.T) {
 	if plan.FromStatus != "superseded" || plan.ToStatus != "active" {
 		t.Errorf("plan status = %s->%s, want superseded->active", plan.FromStatus, plan.ToStatus)
 	}
+	if len(plan.PlannedChanges) == 0 {
+		t.Fatalf("planned changes missing from unsupersede plan")
+	}
+	for _, want := range []string{"restore loser to active", "drop loser from winner supersedes", "append unsuperseded promotion audit"} {
+		found := false
+		for _, got := range plan.PlannedChanges {
+			if strings.Contains(got, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("planned changes = %v, want entry containing %q", plan.PlannedChanges, want)
+		}
+	}
 	// An id that is not superseded (the active winner) errors.
 	if _, err := PlanUnsupersede(winner.ID); err == nil {
 		t.Errorf("PlanUnsupersede(active winner) should error, got nil")
