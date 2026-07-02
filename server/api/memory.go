@@ -237,7 +237,7 @@ type resolveReq struct {
 	Project  string        `json:"project"`
 	Evict    bool          `json:"evict"`
 	Apply    bool          `json:"apply"`
-	MaxPairs int           `json:"max_pairs"`
+	MaxPairs *int          `json:"max_pairs"`
 	IKnow    bool          `json:"i_know"`
 	Actor    actorEnvelope `json:"actor"`
 	Source   string        `json:"source_filter"`
@@ -257,16 +257,17 @@ func (s *Server) handleMemoryResolve(w http.ResponseWriter, r *http.Request) {
 		Project:      req.Project,
 		Evict:        req.Evict,
 		Apply:        req.Apply,
-		MaxPairs:     req.MaxPairs,
 		IKnow:        req.IKnow,
 		SourceFilter: req.Source,
 	}
-	// The JSON zero value for max_pairs is 0 (unbounded). Match the CLI's default
-	// batch cap of 20 unless the caller deliberately opts into an unbounded run
-	// with i_know, so a request that simply omits max_pairs can't bypass the
-	// batch gate.
-	if req.MaxPairs == 0 && !req.IKnow {
+	// Distinguish an omitted max_pairs from an explicit 0. When omitted, match
+	// the CLI's default batch cap of 20. When explicitly set (including 0),
+	// pass the value straight through so an explicit unbounded run (0) reaches
+	// the shared RunResolve gate, which rejects it unless i_know is set.
+	if req.MaxPairs == nil {
 		spec.MaxPairs = 20
+	} else {
+		spec.MaxPairs = *req.MaxPairs
 	}
 	if len(req.Pair) == 2 {
 		spec.Pair = [2]string{req.Pair[0], req.Pair[1]}
