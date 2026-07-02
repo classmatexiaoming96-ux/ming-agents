@@ -76,7 +76,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `memory-cli — self-evolving memory CLI
 
 usage:
-  memory-cli add <content> [--type T] [--project P] [--tags a,b] [--source S]
+  memory-cli add <content> [--type T] [--project P] [--tags a,b] [--source S] [--inject always|query|never] [--layer l1|l2|l3] [--experience-kind K] [--source-system S] [--source-granularity G] [--scope-project P] [--scope-run-id R] [--scope-phase P] [--parents a,b] [--blocked-parents a,b]
   memory-cli search [--query Q] [--project P] [--type T] [--tags a,b] [--min-score N] [--limit N]
   memory-cli list [--type T] [--project P] [--status S] [--limit N]
   memory-cli feedback <id> [--helpful]
@@ -131,6 +131,16 @@ func cmdAdd(args []string) error {
 	project := fs.String("project", "", "project")
 	tags := fs.String("tags", "", "comma-separated tags")
 	source := fs.String("source", "manual", "source")
+	inject := fs.String("inject", "", "inject mode: always|query|never")
+	layer := fs.String("layer", "", "authority layer: l1|l2|l3")
+	experienceKind := fs.String("experience-kind", "", "experience kind")
+	sourceSystem := fs.String("source-system", "", "originating system")
+	sourceGranularity := fs.String("source-granularity", "", "source granularity")
+	scopeProject := fs.String("scope-project", "", "scope: project")
+	scopeRunID := fs.String("scope-run-id", "", "scope: run id")
+	scopePhase := fs.String("scope-phase", "", "scope: phase")
+	parents := fs.String("parents", "", "comma-separated parent memory ids")
+	blockedParents := fs.String("blocked-parents", "", "comma-separated blocked parent ids")
 	if err := fs.Parse(reorderFlags(args, nil)); err != nil {
 		return err
 	}
@@ -138,7 +148,22 @@ func cmdAdd(args []string) error {
 		return fmt.Errorf("add requires <content>")
 	}
 	content := strings.Join(fs.Args(), " ")
-	res, err := memory.Ingest(content, *typ, *project, splitTags(*tags), *source, "")
+	res, err := memory.IngestWithOptions(content, memory.IngestOptions{
+		Type:              *typ,
+		Project:           *project,
+		Tags:              splitTags(*tags),
+		Source:            *source,
+		Inject:            *inject,
+		Layer:             *layer,
+		ExperienceKind:    *experienceKind,
+		SourceSystem:      *sourceSystem,
+		SourceGranularity: *sourceGranularity,
+		ScopeProject:      *scopeProject,
+		ScopeRunID:        *scopeRunID,
+		ScopePhase:        *scopePhase,
+		Parents:           splitTags(*parents),
+		BlockedParents:    splitTags(*blockedParents),
+	})
 	if err != nil {
 		return err
 	}

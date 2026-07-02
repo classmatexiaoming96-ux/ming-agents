@@ -95,6 +95,7 @@ const (
 // sourceScores mirrors the credibility weights from the Python version.
 var sourceScores = map[string]float64{
 	"manual":        1.0,
+	"preloaded":     0.95,
 	"code-review":   0.9,
 	"debug-session": 0.8,
 	"agent-run":     0.7,
@@ -123,9 +124,23 @@ type Memory struct {
 
 	SourceSystem      string   `yaml:"source_system,omitempty"`
 	SourceGranularity string   `yaml:"source_granularity,omitempty"`
+	ExperienceKind    string   `yaml:"experience_kind,omitempty"`
 	EvidenceRef       string   `yaml:"evidence_ref,omitempty"`
 	EvidenceRefs      []string `yaml:"evidence_refs,omitempty"`
 	CrossProject      bool     `yaml:"_cross_project,omitempty"`
+
+	// Scope narrows where a memory applies (project/run/phase). All omitempty so
+	// pre-Phase-1 files parse to zero values; only the options ingest path sets
+	// them.
+	ScopeProject string `yaml:"scope_project,omitempty"`
+	ScopeRunID   string `yaml:"scope_run_id,omitempty"`
+	ScopePhase   string `yaml:"scope_phase,omitempty"`
+
+	// Parents / BlockedParents record inheritance links between memories: a
+	// preloaded principle can declare which concrete memories it derives from,
+	// and which parents are explicitly blocked from inheritance.
+	Parents        []string `yaml:"parents,omitempty"`
+	BlockedParents []string `yaml:"blocked_parents,omitempty"`
 
 	// §Phase 7 promotion authority workflow. Status answers "is this memory
 	// active in recall?"; PromotionState answers "where is this item in the
@@ -723,9 +738,59 @@ func round2(x float64) float64 {
 	return math.Round(x*100) / 100
 }
 
+// IngestOptions carries every field the memory schema can persist, so a single
+// entry point can write layer, provenance, inject mode, scope, and inheritance
+// links. Empty type/project/tags are auto-classified; Inject defaults to
+// "query" and Source to "manual" when left empty, matching legacy Ingest.
+type IngestOptions struct {
+	Type    string
+	Project string
+	Tags    []string
+	Source  string
+	Title   string
+
+	// Inject controls auto-injection: "always" / "query" (default) / "never".
+	Inject string
+
+	// Provenance / authority metadata.
+	Layer             string
+	ExperienceKind    string
+	SourceSystem      string
+	SourceGranularity string
+
+	// Scope narrows applicability to a project / run / phase.
+	ScopeProject string
+	ScopeRunID   string
+	ScopePhase   string
+
+	// Inheritance links.
+	Parents        []string
+	BlockedParents []string
+}
+
 // Ingest scores content and writes it to notes (accepted) or inbox (below
 // threshold). Empty type/project/tags are auto-classified.
+//
+// Deprecated: Ingest is a positional wrapper retained for existing callers.
+// New code should use IngestWithOptions so layer, provenance, inject, scope,
+// and inheritance links flow through a single entry point.
 func Ingest(content, memType, project string, tags []string, source, title string) (Result, error) {
+	fmt.Fprintln(os.Stderr, "[memory] Ingest is deprecated; use IngestWithOptions to persist layer/provenance/inject")
+	return IngestWithOptions(content, IngestOptions{
+		Type:    memType,
+		Project: project,
+		Tags:    tags,
+		Source:  source,
+		Title:   title,
+	})
+}
+
+// IngestWithOptions is the single ingest entry point. It scores content and
+// writes it to notes (accepted) or inbox (below threshold), persisting the full
+// schema (layer, provenance, inject, scope, inheritance) from opts.
+func IngestWithOptions(content string, opts IngestOptions) (Result, error) {
+	memType, project, tags := opts.Type, opts.Project, opts.Tags
+	source, title := opts.Source, opts.Title
 	auto := autoClassify(content)
 	if memType == "" {
 		memType = auto.Type
@@ -741,6 +806,10 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 	}
 	if source == "" {
 		source = "manual"
+	}
+	inject := opts.Inject
+	if inject == "" {
+		inject = "query"
 	}
 
 	id := computeID(content)
@@ -805,8 +874,19 @@ func Ingest(content, memType, project string, tags []string, source, title strin
 		Status:      "active",
 		Source:      source,
 		Links:       []string{},
-		Inject:      "query", // P1-3: default inject mode; omitempty keeps old files compatible
-		Body:        content,
+		Inject:      inject, // default "query"; omitempty keeps old files compatible
+
+		Layer:             opts.Layer,
+		ExperienceKind:    opts.ExperienceKind,
+		SourceSystem:      opts.SourceSystem,
+		SourceGranularity: opts.SourceGranularity,
+		ScopeProject:      opts.ScopeProject,
+		ScopeRunID:        opts.ScopeRunID,
+		ScopePhase:        opts.ScopePhase,
+		Parents:           opts.Parents,
+		BlockedParents:    opts.BlockedParents,
+
+		Body: content,
 	}
 
 	// A4: re-ingesting identical content yields the same id. Instead of resetting

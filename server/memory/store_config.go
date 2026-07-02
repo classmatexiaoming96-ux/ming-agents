@@ -47,7 +47,26 @@ func (s *Store) Ingest(content, memType, project string, tags []string, source, 
 	var result Result
 	err := s.withConfig(func() error {
 		var err error
-		result, err = Ingest(content, memType, project, tags, source, title)
+		result, err = IngestWithOptions(content, IngestOptions{
+			Type:    memType,
+			Project: project,
+			Tags:    tags,
+			Source:  source,
+			Title:   title,
+		})
+		return err
+	})
+	return result, err
+}
+
+// IngestWithOptions binds the options-based ingest to this store's config, so
+// workflow memory paths can persist layer/provenance without global VaultDir
+// drift.
+func (s *Store) IngestWithOptions(content string, opts IngestOptions) (Result, error) {
+	var result Result
+	err := s.withConfig(func() error {
+		var err error
+		result, err = IngestWithOptions(content, opts)
 		return err
 	})
 	return result, err

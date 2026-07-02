@@ -63,6 +63,17 @@ type ingestReq struct {
 	Tags    []string `json:"tags"`
 	Source  string   `json:"source"`
 	Title   string   `json:"title"`
+
+	Inject            string   `json:"inject"`
+	Layer             string   `json:"layer"`
+	ExperienceKind    string   `json:"experience_kind"`
+	SourceSystem      string   `json:"source_system"`
+	SourceGranularity string   `json:"source_granularity"`
+	ScopeProject      string   `json:"scope_project"`
+	ScopeRunID        string   `json:"scope_run_id"`
+	ScopePhase        string   `json:"scope_phase"`
+	Parents           []string `json:"parents"`
+	BlockedParents    []string `json:"blocked_parents"`
 }
 
 func (s *Server) handleMemoryIngest(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +86,23 @@ func (s *Server) handleMemoryIngest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "content is required")
 		return
 	}
-	res, err := memory.Ingest(req.Content, req.Type, req.Project, req.Tags, req.Source, req.Title)
+	res, err := memory.IngestWithOptions(req.Content, memory.IngestOptions{
+		Type:              req.Type,
+		Project:           req.Project,
+		Tags:              req.Tags,
+		Source:            req.Source,
+		Title:             req.Title,
+		Inject:            req.Inject,
+		Layer:             req.Layer,
+		ExperienceKind:    req.ExperienceKind,
+		SourceSystem:      req.SourceSystem,
+		SourceGranularity: req.SourceGranularity,
+		ScopeProject:      req.ScopeProject,
+		ScopeRunID:        req.ScopeRunID,
+		ScopePhase:        req.ScopePhase,
+		Parents:           req.Parents,
+		BlockedParents:    req.BlockedParents,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
