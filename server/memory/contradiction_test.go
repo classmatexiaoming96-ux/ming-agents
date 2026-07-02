@@ -763,6 +763,44 @@ func TestPhase8_ConcurrentResolveOnSamePair(t *testing.T) {
 	}
 }
 
+// TestPhase8_PlanUnsupersedeValidatesID (P1-4): the dry-run plan must load the
+// superseded loser, report the winner and state transition, and error on an id
+// that is not currently superseded.
+func TestPhase8_PlanUnsupersedeValidatesID(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+	actor := PromotionActor{Kind: "human", Name: "alice"}
+	if _, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: actor}); err != nil {
+		t.Fatalf("supersede setup: %v", err)
+	}
+
+	plan, err := PlanUnsupersede(loser.ID)
+	if err != nil {
+		t.Fatalf("PlanUnsupersede: %v", err)
+	}
+	if plan.Winner != winner.ID || !plan.WinnerActive {
+		t.Errorf("plan winner = %q active=%v, want %q active", plan.Winner, plan.WinnerActive, winner.ID)
+	}
+	if plan.FromState != PromotionSuperseded || plan.ToState != PromotionPromoted {
+		t.Errorf("plan states = %s->%s, want superseded->promoted", plan.FromState, plan.ToState)
+	}
+	if plan.FromStatus != "superseded" || plan.ToStatus != "active" {
+		t.Errorf("plan status = %s->%s, want superseded->active", plan.FromStatus, plan.ToStatus)
+	}
+	// An id that is not superseded (the active winner) errors.
+	if _, err := PlanUnsupersede(winner.ID); err == nil {
+		t.Errorf("PlanUnsupersede(active winner) should error, got nil")
+	}
+	// A missing id errors too.
+	if _, err := PlanUnsupersede("mem_missing"); err == nil {
+		t.Errorf("PlanUnsupersede(missing) should error, got nil")
+	}
+}
+
 // TestPhase8_RunResolvePairNotPending (P1-3): a --pair that is not a pending
 // contradiction must return an explicit error instead of a silent all-zero
 // success, and distinguish a non-active member from a merely non-conflicting

@@ -321,9 +321,20 @@ func (s *Server) handleMemoryUnsupersede(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !req.Apply {
+		plan, err := memory.PlanUnsupersede(req.ID)
+		if err != nil {
+			writeError(w, resolveErrStatus(err), err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"id":      req.ID,
-			"dry_run": true,
+			"id":            plan.Loser,
+			"winner":        plan.Winner,
+			"winner_active": plan.WinnerActive,
+			"from_state":    plan.FromState,
+			"to_state":      plan.ToState,
+			"from_status":   plan.FromStatus,
+			"to_status":     plan.ToStatus,
+			"dry_run":       true,
 		})
 		return
 	}

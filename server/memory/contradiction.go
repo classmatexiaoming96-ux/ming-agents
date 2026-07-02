@@ -461,6 +461,64 @@ func flagConflict(idA, idB string, idx map[string]Memory) error {
 	return nil
 }
 
+// UnsupersedePlan is the dry-run view of a reversal: it names the currently
+// superseded loser, the winner it is superseded_by, and the state transition
+// and file move that an apply would perform. It is computed read-only so the
+// CLI and API dry-run paths can validate the id and show a real plan rather
+// than echoing a bare id back.
+type UnsupersedePlan struct {
+	Loser        string         `json:"loser"`
+	Winner       string         `json:"winner,omitempty"`
+	FromState    PromotionState `json:"from_state"`
+	ToState      PromotionState `json:"to_state"`
+	FromStatus   string         `json:"from_status"`
+	ToStatus     string         `json:"to_status"`
+	WinnerActive bool           `json:"winner_active"`
+}
+
+// PlanUnsupersede loads the superseded loser and returns the reversal plan
+// without mutating anything. It errors if the id is not a currently superseded
+// memory, so a dry-run cannot report success for a non-existent or non-
+// superseded id. It also validates the superseded -> promoted edge so a dry-run
+// surfaces a forbidden transition before an operator commits to it.
+func PlanUnsupersede(id string) (UnsupersedePlan, error) {
+	all, err := readAllMemories("superseded", "")
+	if err != nil {
+		return UnsupersedePlan{}, err
+	}
+	var loser Memory
+	found := false
+	for _, m := range all {
+		if m.ID == id {
+			loser = m
+			found = true
+			break
+		}
+	}
+	if !found {
+		return UnsupersedePlan{}, fmt.Errorf("superseded memory %q not found", id)
+	}
+	if err := ValidatePromotionTransition(PromotionSuperseded, PromotionPromoted); err != nil {
+		return UnsupersedePlan{}, err
+	}
+	winnerID := loser.SupersededBy
+	winnerActive := false
+	if winnerID != "" {
+		if w, err := loadMemoryByID(winnerID); err == nil && w.Status == "active" {
+			winnerActive = true
+		}
+	}
+	return UnsupersedePlan{
+		Loser:        id,
+		Winner:       winnerID,
+		FromState:    PromotionSuperseded,
+		ToState:      PromotionPromoted,
+		FromStatus:   "superseded",
+		ToStatus:     "active",
+		WinnerActive: winnerActive,
+	}, nil
+}
+
 // Unsupersede restores a superseded loser to active, clears its supersede fields,
 // removes the winner's supersedes entry, records the promoted-again state
 // transition in the promotion audit, and appends a reversal record to the

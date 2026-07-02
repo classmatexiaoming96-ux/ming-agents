@@ -132,6 +132,54 @@ func TestPhase8_APIUnsupersedeApplyRequiresReason(t *testing.T) {
 	}
 }
 
+// TestPhase8_APIUnsupersedeDryRunValidatesID (P1-4): a dry-run unsupersede for
+// an id that is not currently superseded must fail (not report a bogus success)
+// and a valid superseded id must return the reversal plan.
+func TestPhase8_APIUnsupersedeDryRunValidatesID(t *testing.T) {
+	useTempMemoryVault(t)
+	t.Setenv("MEMORY_API_RATELIMIT_DISABLE", "1")
+	seedAPIPair(t)
+	srv := NewServer(nil, nil, nil, nil)
+
+	postUnsupersede := func(bodyJSON string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/memory/unsupersede", bytes.NewBufferString(bodyJSON))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Dry-run for an id that was never superseded must not report success.
+	if rec := postUnsupersede(`{"id":"mem_does_not_exist"}`); rec.Code == http.StatusOK {
+		t.Fatalf("dry-run for non-superseded id returned 200 (%s)", rec.Body.String())
+	}
+
+	// Supersede the pair so there is a real loser to plan a reversal for.
+	setup := httptest.NewRequest(http.MethodPost, "/api/memory/resolve",
+		bytes.NewBufferString(`{"pair":["mem_pool_no0","mem_pool_yes"],"evict":true,"apply":true,"actor":{"kind":"human","name":"alice"}}`))
+	setupRec := httptest.NewRecorder()
+	srv.ServeHTTP(setupRec, setup)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("supersede setup status = %d (%s)", setupRec.Code, setupRec.Body.String())
+	}
+
+	// Dry-run for the real superseded loser returns the plan.
+	rec := postUnsupersede(`{"id":"mem_pool_no0"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dry-run plan status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ID     string `json:"id"`
+		Winner string `json:"winner"`
+		DryRun bool   `json:"dry_run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ID != "mem_pool_no0" || body.Winner != "mem_pool_yes" || !body.DryRun {
+		t.Fatalf("dry-run plan body = %s, want loser/winner/dry_run", rec.Body.String())
+	}
+}
+
 func TestPhase8_APIResolveRateLimit(t *testing.T) {
 	useTempMemoryVault(t)
 	seedAPIPair(t)

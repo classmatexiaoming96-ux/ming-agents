@@ -604,8 +604,14 @@ func cmdUnsupersede(args []string, out io.Writer) error {
 	}
 	id := fs.Arg(0)
 	if !*apply {
-		fmt.Fprintf(out, "unsupersede dry-run: %s\n", id)
-		fmt.Fprintln(out, "  would: status=superseded->active, PromotionState=superseded->promoted, reindex, drop from winner supersedes")
+		plan, err := memory.PlanUnsupersede(id)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "unsupersede dry-run: %s\n", plan.Loser)
+		fmt.Fprintf(out, "  currently superseded_by=%s (winner_active=%v)\n", plan.Winner, plan.WinnerActive)
+		fmt.Fprintf(out, "  would: status=%s->%s, PromotionState=%s->%s, reindex, drop from winner supersedes\n",
+			plan.FromStatus, plan.ToStatus, plan.FromState, plan.ToState)
 		return nil
 	}
 	if strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "" {
