@@ -916,6 +916,116 @@ func TestPhase8_UnsupersedeAuditFailureRollsBack(t *testing.T) {
 	}
 }
 
+func TestPhase8_UnsupersedeOldPathRemoveFailureRollsBack(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Supersedes: []string{"mem_loser01"}, Body: "use connection pooling"})
+	loser := Memory{
+		ID:               "mem_loser01",
+		Project:          "p",
+		Status:           "superseded",
+		Score:            2.0,
+		PromotionState:   PromotionSuperseded,
+		SupersededBy:     winner.ID,
+		SupersededAt:     now().Format(dateLayout),
+		SupersededReason: "contradicted by winner",
+		Body:             "do not use pooling",
+	}
+	oldPath, err := writeMemory(loser, filepath.Join(VaultDir, "archive", "superseded", "p"))
+	if err != nil {
+		t.Fatalf("write superseded loser setup: %v", err)
+	}
+	loser.Path = oldPath
+	actor := PromotionActor{Kind: "human", Name: "alice"}
+
+	sup, _ := readAllMemories("superseded", "")
+	if len(sup) != 1 || sup[0].ID != loser.ID {
+		t.Fatalf("setup loser not superseded: %+v", sup)
+	}
+	prevRemove := removeMemoryFile
+	removeMemoryFile = func(path string) error {
+		if path == oldPath {
+			return fmt.Errorf("injected oldPath remove failure")
+		}
+		return prevRemove(path)
+	}
+	t.Cleanup(func() { removeMemoryFile = prevRemove })
+
+	if _, err := Unsupersede(loser.ID, "false positive", actor); err == nil || !strings.Contains(err.Error(), "injected oldPath remove failure") {
+		t.Fatalf("Unsupersede oldPath remove error = %v, want injected failure", err)
+	}
+
+	sup, _ = readAllMemories("superseded", "")
+	if len(sup) != 1 || sup[0].ID != loser.ID || sup[0].SupersededBy != winner.ID {
+		t.Fatalf("loser not restored to superseded after oldPath remove failure: %+v", sup)
+	}
+	act, _ := readAllMemories("active", "")
+	for _, m := range act {
+		if m.ID == loser.ID {
+			t.Fatalf("active loser copy left behind after oldPath remove failure: %+v", m)
+		}
+	}
+	winnerFound := false
+	for _, m := range act {
+		if m.ID == winner.ID {
+			winnerFound = true
+			if !containsString(m.Supersedes, loser.ID) {
+				t.Fatalf("winner supersedes link not restored: %v", m.Supersedes)
+			}
+		}
+	}
+	if !winnerFound {
+		t.Fatalf("winner missing from active set: %+v", act)
+	}
+	events, _ := ReadPromotionAudit(now())
+	for _, e := range events {
+		if e.EventType == PromotionEventUnsuperseded {
+			t.Fatalf("unsuperseded audit written despite oldPath remove failure: %+v", e)
+		}
+	}
+}
+
+func TestPhase8_UnsupersedeSecondaryLogFailureIsNonFatal(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+	actor := PromotionActor{Kind: "human", Name: "alice"}
+	if _, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: actor}); err != nil {
+		t.Fatalf("supersede setup: %v", err)
+	}
+
+	prevLog := appendContradictionLog
+	appendContradictionLog = func(rec auditRecord) error {
+		if rec.Action == "unsuperseded" {
+			return fmt.Errorf("injected contradiction log failure")
+		}
+		return prevLog(rec)
+	}
+	t.Cleanup(func() { appendContradictionLog = prevLog })
+
+	restored, err := Unsupersede(loser.ID, "false positive", actor)
+	if err != nil {
+		t.Fatalf("Unsupersede should commit despite secondary log failure: %v", err)
+	}
+	if restored.ID != loser.ID || restored.Status != "active" || restored.PromotionState != PromotionPromoted {
+		t.Fatalf("restored memory = %+v, want active promoted loser", restored)
+	}
+	events, _ := ReadPromotionAudit(now())
+	found := false
+	for _, e := range events {
+		if e.EventType == PromotionEventUnsuperseded && e.SourceID == loser.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unsuperseded promotion audit missing after secondary log failure")
+	}
+}
+
 // TestPhase8_SupersedeRevokeFailureRollsBackWinner (P0-1): if the loser
 // transition (Revoke) fails after the winner write, the winner must not retain
 // a dangling Supersedes link or a cleared conflict marker, the loser must stay

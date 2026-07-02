@@ -49,6 +49,10 @@ const contradictionsLog = "_contradictions.jsonl"
 // observe the loser as active and double-mutate promotion state.
 var resolveMu sync.Mutex
 
+// removeMemoryFile is indirected so rollback tests can inject precise remove
+// failures without relying on platform permission behavior.
+var removeMemoryFile = os.Remove
+
 // allowL1SupersedeEnv, when set to "1", relaxes the G3 gate that refuses to
 // supersede a curated global (l1) memory through the contradiction path.
 const allowL1SupersedeEnv = "MEMORY_CONTRADICTION_ALLOW_L1_SUPERSEDE"
@@ -613,7 +617,7 @@ func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
 			fmt.Fprintf(os.Stderr, "[memory] unsupersede rollback: restore loser %s: %v\n", id, err)
 		}
 		if newActivePath != "" && newActivePath != oldPath {
-			if err := os.Remove(newActivePath); err != nil && !os.IsNotExist(err) {
+			if err := removeMemoryFile(newActivePath); err != nil && !os.IsNotExist(err) {
 				fmt.Fprintf(os.Stderr, "[memory] unsupersede rollback: remove active loser copy %s: %v\n", newActivePath, err)
 			}
 		}
@@ -660,7 +664,7 @@ func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
 	}
 	loser.Path = newActivePath
 	if oldPath != "" && filepath.Dir(oldPath) != notesDir {
-		if err := os.Remove(oldPath); err != nil {
+		if err := removeMemoryFile(oldPath); err != nil {
 			rollbackLoser(newActivePath)
 			if winnerUpdated {
 				rollbackWinner(origWinner)
@@ -696,7 +700,7 @@ func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
 		Mode:                  "manual",
 		PromotionAuditEventID: unsupersededEvent.EventID,
 	}); err != nil {
-		return Memory{}, err
+		fmt.Fprintf(os.Stderr, "[memory] unsupersede secondary contradiction log failed for %s: %v\n", id, err)
 	}
 	return loser, nil
 }
@@ -1071,7 +1075,7 @@ type auditRecord struct {
 	PromotionAuditEventID string    `json:"promotion_audit_event_id,omitempty"` // cross-ref to the promotion audit event
 }
 
-func appendContradictionLog(rec auditRecord) error {
+var appendContradictionLog = func(rec auditRecord) error {
 	if err := os.MkdirAll(VaultDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir vault: %w", err)
 	}
