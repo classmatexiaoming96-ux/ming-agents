@@ -50,6 +50,12 @@ func main() {
 		err = cmdListPendingPromotion(args, os.Stdout)
 	case "revoke":
 		err = cmdRevoke(args, os.Stdout)
+	case "conflicts":
+		err = cmdConflicts(args, os.Stdout)
+	case "resolve":
+		err = cmdResolve(args, os.Stdout)
+	case "unsupersede":
+		err = cmdUnsupersede(args, os.Stdout)
 	case "migrate-promotion-state":
 		err = cmdMigratePromotionState(args, os.Stdout)
 	case "-h", "--help", "help":
@@ -81,6 +87,9 @@ usage:
   memory-cli curate --source <id> --to l1 --approver <name> --rationale "..." [--mode reject|supersede|allow_separate] [--supersedes a,b] [--apply]
   memory-cli list-pending-promotion [--project P] [--to l2|l1] [--ready-only] [--format table|json]
   memory-cli revoke --target <id> --reason "..." --actor N [--mode archive|supersede] [--superseded-by <id>] [--apply]
+  memory-cli conflicts [--project P] [--source S] [--min-confidence N] [--action A] [--format table|json] [--limit N]
+  memory-cli resolve (--pair <idA>,<idB> | --all) [--project P] [--source S] [--evict] [--apply] [--actor N] [--max-pairs N] [--i-know]
+  memory-cli unsupersede <id> [--apply] [--actor N] [--reason "..."]
   memory-cli migrate-promotion-state [--apply]
   memory-cli cleanup
   memory-cli stats`)
@@ -475,6 +484,138 @@ func cmdMigratePromotionState(args []string, out io.Writer) error {
 		mode = "dry-run"
 	}
 	fmt.Fprintf(out, "migrate-promotion-state %s: scanned=%d updated=%d\n", mode, result.Scanned, result.Updated)
+	return nil
+}
+
+func cmdConflicts(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("conflicts", flag.ExitOnError)
+	project := fs.String("project", "", "project filter")
+	source := fs.String("source", "", "detector source filter: lexical|implicit|holographic|manual")
+	minConf := fs.Float64("min-confidence", 0, "minimum candidate confidence")
+	action := fs.String("action", "", "action filter: superseded|flagged|skipped")
+	format := fs.String("format", "table", "table|json")
+	limit := fs.Int("limit", 50, "max pairs (0 = unlimited)")
+	if err := fs.Parse(reorderFlags(args, nil)); err != nil {
+		return err
+	}
+	conflicts, err := memory.ListConflicts(memory.ListConflictFilter{
+		Project:       *project,
+		Source:        *source,
+		MinConfidence: *minConf,
+		Action:        *action,
+		Limit:         *limit,
+	})
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		data, err := json.MarshalIndent(conflicts, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, string(data))
+		return nil
+	}
+	if len(conflicts) == 0 {
+		fmt.Fprintln(out, "No contradictions.")
+		return nil
+	}
+	fmt.Fprintln(out, "Contradictions (dry-run, no writes):")
+	for _, c := range conflicts {
+		fmt.Fprintf(out, "%s|%s  src=%s conf=%.2f action=%s margin=%.2f winner=%s loser=%s\n",
+			c.Pair[0], c.Pair[1], c.Source, c.Confidence, c.Action, c.Margin, c.Winner, c.Loser)
+		fmt.Fprintf(out, "  reason: %s\n", c.Reason)
+	}
+	fmt.Fprintf(out, "Total: %d pair(s).\n", len(conflicts))
+	return nil
+}
+
+func cmdResolve(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
+	pair := fs.String("pair", "", "single pair <idA>,<idB> (mutually exclusive with --all)")
+	all := fs.Bool("all", false, "process every current candidate")
+	project := fs.String("project", "", "project filter (with --all)")
+	source := fs.String("source", "", "detector source filter")
+	evict := fs.Bool("evict", false, "allow supersede (default: flag only)")
+	apply := fs.Bool("apply", false, "write changes (default is dry-run)")
+	maxPairs := fs.Int("max-pairs", 20, "max pairs per apply (0 = unlimited, needs --i-know)")
+	iKnow := fs.Bool("i-know", false, "allow --max-pairs 0 for a large batch")
+	actor := fs.String("actor", "", "operator name (required with --apply)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"all": true, "evict": true, "apply": true, "i-know": true})); err != nil {
+		return err
+	}
+	if *pair != "" && *all {
+		return fmt.Errorf("resolve: --pair and --all are mutually exclusive")
+	}
+	spec := memory.ResolveSpec{
+		All:          *all,
+		Project:      *project,
+		Evict:        *evict,
+		Apply:        *apply,
+		MaxPairs:     *maxPairs,
+		IKnow:        *iKnow,
+		SourceFilter: *source,
+	}
+	if *actor != "" {
+		spec.Actor = memory.PromotionActor{Kind: "human", Name: *actor}
+	}
+	if *pair != "" {
+		parts := strings.Split(*pair, ",")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return fmt.Errorf("resolve --pair must be <idA>,<idB>")
+		}
+		spec.Pair = [2]string{strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])}
+	}
+	summary, err := memory.RunResolve(spec)
+	if err != nil {
+		return err
+	}
+	mode := "apply"
+	if summary.DryRun {
+		mode = "dry-run"
+	}
+	fmt.Fprintf(out, "resolve %s (evict=%v):\n", mode, summary.Evict)
+	for _, r := range summary.Results {
+		fmt.Fprintf(out, "[%s] %s|%s  margin=%.2f winner=%s loser=%s\n",
+			r.Action, r.Pair[0], r.Pair[1], r.Margin, r.Winner, r.Loser)
+		fmt.Fprintf(out, "  reason: %s\n", r.Reason)
+		if r.PromotionAuditEventID != "" {
+			fmt.Fprintf(out, "  audit: %s (promotion) + %s\n", r.PromotionAuditEventID, "_contradictions.jsonl")
+		}
+	}
+	fmt.Fprintf(out, "Summary: %d superseded, %d flagged, %d skipped", summary.Superseded, summary.Flagged, summary.Skipped)
+	if summary.DryRun {
+		fmt.Fprint(out, " (dry-run)")
+	}
+	fmt.Fprintln(out)
+	return nil
+}
+
+func cmdUnsupersede(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("unsupersede", flag.ExitOnError)
+	apply := fs.Bool("apply", false, "write changes (default is dry-run)")
+	reason := fs.String("reason", "", "reversal reason (required with --apply)")
+	actor := fs.String("actor", "", "operator name (required with --apply)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{"apply": true})); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("unsupersede requires <id>")
+	}
+	id := fs.Arg(0)
+	if !*apply {
+		fmt.Fprintf(out, "unsupersede dry-run: %s\n", id)
+		fmt.Fprintln(out, "  would: status=superseded->active, PromotionState=superseded->promoted, reindex, drop from winner supersedes")
+		return nil
+	}
+	if strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "" {
+		return fmt.Errorf("unsupersede --apply requires --actor and --reason")
+	}
+	restored, err := memory.Unsupersede(id, *reason, memory.PromotionActor{Kind: "human", Name: *actor})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "unsupersede apply: %s restored status=%s PromotionState=%s\n", restored.ID, restored.Status, restored.PromotionState)
 	return nil
 }
 

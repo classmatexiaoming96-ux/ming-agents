@@ -638,6 +638,105 @@ func ListConflicts(filter ListConflictFilter) ([]ResolutionResult, error) {
 	return out, nil
 }
 
+// ResolveSummary aggregates a RunResolve pass.
+type ResolveSummary struct {
+	DryRun     bool               `json:"dry_run"`
+	Evict      bool               `json:"evict"`
+	Superseded int                `json:"superseded"`
+	Flagged    int                `json:"flagged"`
+	Skipped    int                `json:"skipped"`
+	Results    []ResolutionResult `json:"results"`
+}
+
+// RunResolve is the shared business entry point both the CLI and the HTTP API
+// translate their inputs into. It gathers the current candidates, narrows them to
+// the requested pair (or all), enforces the human-actor and batch gates, then
+// delegates to ResolveContradictions with the DryRun/AutoEvict combination the
+// spec implies. Surfaces only do IO; all policy lives here.
+//
+// Gate mapping (§7.2):
+//   - G1: apply requires a human actor with a name.
+//   - G2: an apply batch above MaxPairs is refused unless IKnow is set.
+func RunResolve(spec ResolveSpec) (ResolveSummary, error) {
+	if !spec.All && spec.Pair[0] == "" && spec.Pair[1] == "" {
+		return ResolveSummary{}, fmt.Errorf("resolve requires --pair or --all")
+	}
+	if spec.Apply && (spec.Actor.Kind != "human" || strings.TrimSpace(spec.Actor.Name) == "") {
+		return ResolveSummary{}, fmt.Errorf("resolve --apply requires --actor (human name)")
+	}
+
+	cands, err := gatherContradictionCandidates()
+	if err != nil {
+		return ResolveSummary{}, err
+	}
+
+	// Narrow to the requested target set.
+	if !spec.All {
+		a, b := spec.Pair[0], spec.Pair[1]
+		if a == "" || b == "" {
+			return ResolveSummary{}, fmt.Errorf("resolve --pair requires two ids as <idA>,<idB>")
+		}
+		if a > b {
+			a, b = b, a
+		}
+		var filtered []Contradiction
+		for _, c := range cands {
+			ca, cb := c.A, c.B
+			if ca > cb {
+				ca, cb = cb, ca
+			}
+			if ca == a && cb == b {
+				filtered = append(filtered, c)
+			}
+		}
+		cands = filtered
+	} else if spec.Project != "" {
+		var filtered []Contradiction
+		for _, c := range cands {
+			if projectOfPair([2]string{c.A, c.B}) == spec.Project {
+				filtered = append(filtered, c)
+			}
+		}
+		cands = filtered
+	}
+	if spec.SourceFilter != "" {
+		var filtered []Contradiction
+		for _, c := range cands {
+			if c.Source == spec.SourceFilter {
+				filtered = append(filtered, c)
+			}
+		}
+		cands = filtered
+	}
+
+	// G2: batch gate — only applies to real apply passes.
+	if spec.Apply && spec.MaxPairs > 0 && len(cands) > spec.MaxPairs && !spec.IKnow {
+		return ResolveSummary{}, fmt.Errorf("refused: %d candidates > --max-pairs %d (use --i-know to override)", len(cands), spec.MaxPairs)
+	}
+
+	opts := ResolveOptions{
+		DryRun:    !spec.Apply,
+		AutoEvict: spec.Evict,
+		Actor:     spec.Actor,
+	}
+	results, err := ResolveContradictions(cands, opts)
+	if err != nil {
+		return ResolveSummary{}, err
+	}
+	summary := ResolveSummary{DryRun: !spec.Apply, Evict: spec.Evict, Results: results}
+	for _, r := range results {
+		switch r.Action {
+		case "superseded":
+			summary.Superseded++
+		case "flagged":
+			summary.Flagged++
+		case "skipped":
+			summary.Skipped++
+		}
+	}
+	return summary, nil
+}
+
 // lexicalContradictionScan is the default at-rest detector: two active memories
 // with high char-bigram overlap (same subject) but differing negation polarity
 // are flagged as a candidate contradiction. Confidence is a conservative lexical
