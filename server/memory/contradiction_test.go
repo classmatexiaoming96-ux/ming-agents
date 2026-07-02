@@ -763,6 +763,76 @@ func TestPhase8_ConcurrentResolveOnSamePair(t *testing.T) {
 	}
 }
 
+// TestPhase8_UnsupersedeAuditFailureRollsBack (P0-2): if the promotion audit
+// append fails after the loser file has been rewritten active, the reversal
+// must roll back so the loser stays superseded — it must never be active
+// without a durable unsuperseded audit record.
+func TestPhase8_UnsupersedeAuditFailureRollsBack(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+	actor := PromotionActor{Kind: "human", Name: "alice"}
+	if _, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: actor}); err != nil {
+		t.Fatalf("supersede setup: %v", err)
+	}
+
+	// Force appendPreparedAudit to fail after the loser is rewritten active:
+	// replace the audit month directory with a regular file so its MkdirAll
+	// cannot recreate the path (robust even when the test runs as root).
+	auditFile := PromotionAuditPath(now())
+	monthDir := filepath.Dir(auditFile)
+	if err := os.RemoveAll(monthDir); err != nil {
+		t.Fatalf("clear audit month dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(monthDir), 0o755); err != nil {
+		t.Fatalf("mkdir audit year dir: %v", err)
+	}
+	if err := os.WriteFile(monthDir, []byte("blocker"), 0o644); err != nil {
+		t.Fatalf("plant audit blocker file: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(monthDir) })
+
+	if _, err := Unsupersede(loser.ID, "false positive", actor); err == nil {
+		t.Fatal("Unsupersede must fail when the audit append fails")
+	}
+	os.Remove(monthDir)
+
+	// Loser rolled back to superseded, not left dangling active.
+	sup, _ := readAllMemories("superseded", "")
+	if len(sup) != 1 || sup[0].ID != loser.ID || sup[0].SupersededBy != winner.ID {
+		t.Fatalf("loser not rolled back to superseded: %+v", sup)
+	}
+	act, _ := readAllMemories("active", "")
+	for _, m := range act {
+		if m.ID == loser.ID {
+			t.Fatalf("loser left active without audit after failed reversal")
+		}
+	}
+	// Winner still supersedes the loser (its rollback re-applied the link).
+	winnerActive := false
+	for _, m := range act {
+		if m.ID == winner.ID {
+			winnerActive = true
+			if !containsString(m.Supersedes, loser.ID) {
+				t.Errorf("winner lost supersedes link after rollback: %v", m.Supersedes)
+			}
+		}
+	}
+	if !winnerActive {
+		t.Fatalf("winner missing from active set after rollback: %+v", act)
+	}
+	// No unsuperseded promotion event was committed.
+	events, _ := ReadPromotionAudit(now())
+	for _, e := range events {
+		if e.EventType == PromotionEventUnsuperseded {
+			t.Fatalf("unsuperseded audit written despite failed reversal: %+v", e)
+		}
+	}
+}
+
 // TestPhase8_SupersedeRevokeFailureRollsBackWinner (P0-1): if the loser
 // transition (Revoke) fails after the winner write, the winner must not retain
 // a dangling Supersedes link or a cleared conflict marker, the loser must stay

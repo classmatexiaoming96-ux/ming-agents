@@ -515,6 +515,75 @@ func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
 		Rationale: restoreReason,
 	})
 
+	// Load the winner up front so a broken active set aborts BEFORE any file is
+	// mutated. A missing winner is tolerated (it may have been archived): only
+	// its supersedes link is dropped when present.
+	var winner *Memory
+	if winnerID != "" {
+		actives, err := readAllMemories("active", "")
+		if err != nil {
+			return Memory{}, err
+		}
+		for i := range actives {
+			if actives[i].ID == winnerID {
+				w := actives[i]
+				winner = &w
+				break
+			}
+		}
+	}
+
+	// Snapshot the pre-reversal state of both objects so any mid-commit failure
+	// can be rolled back — the loser must never end up active without a durable
+	// unsuperseded audit record.
+	origLoser := loser
+	oldPath := loser.Path
+	project := loser.Project
+	if project == "" {
+		project = "unknown"
+	}
+	notesDir := filepath.Join(VaultDir, "notes", project)
+
+	// rollbackLoser restores the superseded loser to its original file and drops
+	// any active copy written during the aborted reversal.
+	rollbackLoser := func(newActivePath string) {
+		origDir := filepath.Dir(oldPath)
+		if oldPath == "" {
+			origDir = notesDir
+		}
+		if _, err := writeMemory(origLoser, origDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] unsupersede rollback: restore loser %s: %v\n", id, err)
+		}
+		if newActivePath != "" && newActivePath != oldPath {
+			if err := os.Remove(newActivePath); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "[memory] unsupersede rollback: remove active loser copy %s: %v\n", newActivePath, err)
+			}
+		}
+		if err := DeleteFromIndex(id); err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] unsupersede rollback: deindex %s: %v\n", id, err)
+		}
+	}
+	// rollbackWinner re-applies the winner's original supersedes link.
+	rollbackWinner := func(orig Memory) {
+		if _, err := writeMemory(orig, filepath.Dir(orig.Path)); err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] unsupersede rollback: restore winner %s: %v\n", orig.ID, err)
+		}
+	}
+
+	// Update the winner first (drop the supersedes link). If this fails nothing
+	// else has changed, so the loser is still cleanly superseded.
+	var origWinner Memory
+	winnerUpdated := false
+	if winner != nil {
+		origWinner = *winner
+		w := *winner
+		w.Supersedes = removeString(w.Supersedes, id)
+		if _, err := writeMemory(w, filepath.Dir(w.Path)); err != nil {
+			return Memory{}, err
+		}
+		winnerUpdated = true
+	}
+
 	// Restore the loser: status → active, promotion_state → promoted, clear
 	// supersede metadata, move back to notes/{project} (out of archive).
 	loser.Status = "active"
@@ -524,17 +593,20 @@ func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
 	loser.SupersededAt = ""
 	loser.SupersededReason = ""
 	loser.PromotionAudit = auditReferenceForEvent(unsupersededEvent)
-	project := loser.Project
-	if project == "" {
-		project = "unknown"
-	}
-	notesDir := filepath.Join(VaultDir, "notes", project)
-	oldPath := loser.Path
-	if _, err := writeMemory(loser, notesDir); err != nil {
+	newActivePath, err := writeMemory(loser, notesDir)
+	if err != nil {
+		if winnerUpdated {
+			rollbackWinner(origWinner)
+		}
 		return Memory{}, err
 	}
+	loser.Path = newActivePath
 	if oldPath != "" && filepath.Dir(oldPath) != notesDir {
 		if err := os.Remove(oldPath); err != nil {
+			rollbackLoser(newActivePath)
+			if winnerUpdated {
+				rollbackWinner(origWinner)
+			}
 			return Memory{}, fmt.Errorf("remove %s: %w", oldPath, err)
 		}
 	}
@@ -543,28 +615,19 @@ func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
 		fmt.Fprintf(os.Stderr, "[memory] FTS5 index error for %s: %v\n", loser.ID, err)
 	}
 
-	// Remove the loser from the winner's supersedes list, if the winner is around.
-	if winnerID != "" {
-		actives, err := readAllMemories("active", "")
-		if err != nil {
-			return Memory{}, err
-		}
-		for _, w := range actives {
-			if w.ID == winnerID {
-				w.Supersedes = removeString(w.Supersedes, id)
-				if _, err := writeMemory(w, filepath.Dir(w.Path)); err != nil {
-					return Memory{}, err
-				}
-				break
-			}
-		}
-	}
-
-	// All file state committed: append the promotion audit (memory-level state
-	// transition), then the contradiction log (pair-level reversal record).
+	// Commit gate: append the promotion audit (the state-transition authority)
+	// only after every file mutation has succeeded. If it fails, roll every file
+	// mutation back so the loser is superseded again — it must never remain
+	// active without this record.
 	if err := appendPreparedAudit(unsupersededEvent); err != nil {
+		rollbackLoser(newActivePath)
+		if winnerUpdated {
+			rollbackWinner(origWinner)
+		}
 		return Memory{}, err
 	}
+	// The reversal is committed and audited. The pair-level contradiction log is
+	// a secondary record; a failure here leaves consistent, audited state.
 	if err := appendContradictionLog(auditRecord{
 		Time:                  now().Format(time.RFC3339),
 		Pair:                  [2]string{winnerID, id},
