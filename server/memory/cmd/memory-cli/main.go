@@ -26,6 +26,8 @@ func main() {
 	switch cmd {
 	case "add":
 		err = cmdAdd(args)
+	case "preload":
+		err = cmdPreload(args, os.Stdout)
 	case "search":
 		err = cmdSearch(args)
 	case "list":
@@ -77,6 +79,7 @@ func usage() {
 
 usage:
   memory-cli add <content> [--type T] [--project P] [--tags a,b] [--source S] [--inject always|query|never] [--layer l1|l2|l3] [--experience-kind K] [--source-system S] [--source-granularity G] [--scope-project P] [--scope-run-id R] [--scope-phase P] [--parents a,b] [--blocked-parents a,b]
+  memory-cli preload <file.yaml|file.json|file.md> [--project P] [--layer l1|l2|l3] [--source preloaded] [--inject always|query|never] [--dry-run] [--strict]
   memory-cli search [--query Q] [--project P] [--type T] [--tags a,b] [--min-score N] [--limit N]
   memory-cli list [--type T] [--project P] [--status S] [--limit N]
   memory-cli feedback <id> [--helpful]
