@@ -1,9 +1,11 @@
 package memory
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -96,16 +98,17 @@ func TestResolveContradictionsDryRun(t *testing.T) {
 		t.Errorf("DryRun wrote %s, must write nothing", contradictionsLog)
 	}
 
-	// Real run: loser is superseded and moved to archive; winner gains supersedes.
-	res, err = ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true})
+	// Real run: loser is superseded in place (Revoke rewrites the file) and the
+	// winner gains supersedes.
+	res, err = ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: PromotionActor{Kind: "human", Name: "alice"}})
 	if err != nil {
 		t.Fatalf("real ResolveContradictions: %v", err)
 	}
 	if res[0].Action != "superseded" {
 		t.Fatalf("real action = %q, want superseded", res[0].Action)
 	}
-	if _, err := os.Stat(loser.Path); !os.IsNotExist(err) {
-		t.Errorf("loser file still at original path %s", loser.Path)
+	if res[0].PromotionAuditEventID == "" {
+		t.Errorf("superseded result missing promotion audit event id")
 	}
 	sup, _ := readAllMemories("superseded", "")
 	if len(sup) != 1 || sup[0].ID != loser.ID {
@@ -114,8 +117,8 @@ func TestResolveContradictionsDryRun(t *testing.T) {
 	if sup[0].SupersededBy != winner.ID || sup[0].SupersededAt == "" || sup[0].SupersededReason == "" {
 		t.Errorf("superseded metadata incomplete: %+v", sup[0])
 	}
-	if filepath.Dir(sup[0].Path) != filepath.Join(VaultDir, "archive", "p") {
-		t.Errorf("loser not in archive/p: %s", sup[0].Path)
+	if sup[0].PromotionState != PromotionSuperseded {
+		t.Errorf("loser promotion state = %q, want superseded", sup[0].PromotionState)
 	}
 	act, _ := readAllMemories("active", "")
 	if len(act) != 1 || act[0].ID != winner.ID {
@@ -129,12 +132,15 @@ func TestResolveContradictionsDryRun(t *testing.T) {
 	}
 
 	// Unsupersede reverses it: loser back to active, winner's supersedes cleared.
-	restored, err := Unsupersede(loser.ID)
+	restored, err := Unsupersede(loser.ID, "detector false positive", PromotionActor{Kind: "human", Name: "alice"})
 	if err != nil {
 		t.Fatalf("Unsupersede: %v", err)
 	}
 	if restored.Status != "active" || restored.SupersededBy != "" {
 		t.Errorf("restored memory not clean: %+v", restored)
+	}
+	if restored.PromotionState != PromotionPromoted {
+		t.Errorf("restored promotion state = %q, want promoted", restored.PromotionState)
 	}
 	act, _ = readAllMemories("active", "")
 	if len(act) != 2 {
@@ -457,6 +463,302 @@ func TestPhase8_ListConflicts(t *testing.T) {
 	}
 	if len(none) != 0 {
 		t.Errorf("project filter returned %d, want 0", len(none))
+	}
+}
+
+// TestPhase8_ResolveApplyEvictThroughRevoke (§6.2): an apply+evict pass routes
+// the loser through promote.Revoke, leaving exactly one promotion audit event
+// and one contradiction log line cross-referenced by event id.
+func TestPhase8_ResolveApplyEvictThroughRevoke(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Similarity: 0.8, Source: "manual"}}
+	res, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: PromotionActor{Kind: "human", Name: "alice"}})
+	if err != nil {
+		t.Fatalf("apply ResolveContradictions: %v", err)
+	}
+	if res[0].Action != "superseded" || res[0].Loser != loser.ID {
+		t.Fatalf("apply result = %+v, want loser superseded", res[0])
+	}
+	evtID := res[0].PromotionAuditEventID
+	if evtID == "" {
+		t.Fatal("apply result missing promotion audit event id")
+	}
+
+	// Loser is superseded with the phase-7 promotion state.
+	sup, _ := readAllMemories("superseded", "")
+	if len(sup) != 1 || sup[0].SupersededBy != winner.ID || sup[0].PromotionState != PromotionSuperseded {
+		t.Fatalf("loser not superseded via revoke: %+v", sup)
+	}
+	// Winner keeps the supersedes link.
+	act, _ := readAllMemories("active", "")
+	if len(act) != 1 || act[0].ID != winner.ID || !containsString(act[0].Supersedes, loser.ID) {
+		t.Fatalf("winner supersedes not updated: %+v", act)
+	}
+
+	// Promotion audit has exactly one revoked event for the loser.
+	events, err := ReadPromotionAudit(now())
+	if err != nil {
+		t.Fatalf("ReadPromotionAudit: %v", err)
+	}
+	var revoked []PromotionAuditEvent
+	for _, e := range events {
+		if e.EventType == PromotionEventRevoked && e.SourceID == loser.ID {
+			revoked = append(revoked, e)
+		}
+	}
+	if len(revoked) != 1 {
+		t.Fatalf("promotion audit revoked events = %d, want 1", len(revoked))
+	}
+	if revoked[0].FromState != PromotionPromoted || revoked[0].ToState != PromotionSuperseded {
+		t.Errorf("revoked event states = %s->%s, want promoted->superseded", revoked[0].FromState, revoked[0].ToState)
+	}
+	if revoked[0].EventID != evtID {
+		t.Errorf("result event id %q != audit event id %q", evtID, revoked[0].EventID)
+	}
+	// G7: rationale is prefixed so forensics can tell this is contradiction-driven.
+	if !strings.HasPrefix(revoked[0].Rationale, "contradiction:") {
+		t.Errorf("revoked rationale = %q, want contradiction: prefix", revoked[0].Rationale)
+	}
+}
+
+// TestPhase8_UnsupersedeRestoresAndReindexes (§6.3): unsupersede restores the
+// loser to active/promoted, clears the winner link, and writes an unsuperseded
+// promotion audit event.
+func TestPhase8_UnsupersedeRestoresAndReindexes(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+	if _, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: PromotionActor{Kind: "human", Name: "alice"}}); err != nil {
+		t.Fatalf("supersede setup: %v", err)
+	}
+
+	restored, err := Unsupersede(loser.ID, "detector false positive", PromotionActor{Kind: "human", Name: "alice"})
+	if err != nil {
+		t.Fatalf("Unsupersede: %v", err)
+	}
+	if restored.Status != "active" || restored.PromotionState != PromotionPromoted {
+		t.Errorf("restored not active/promoted: %+v", restored)
+	}
+	if restored.SupersededBy != "" || restored.SupersededAt != "" || restored.SupersededReason != "" {
+		t.Errorf("restored supersede fields not cleared: %+v", restored)
+	}
+	// Winner supersedes list no longer contains the loser.
+	act, _ := readAllMemories("active", "")
+	for _, m := range act {
+		if m.ID == winner.ID && containsString(m.Supersedes, loser.ID) {
+			t.Errorf("winner still supersedes restored loser: %v", m.Supersedes)
+		}
+	}
+	// Promotion audit has the unsuperseded event.
+	events, err := ReadPromotionAudit(now())
+	if err != nil {
+		t.Fatalf("ReadPromotionAudit: %v", err)
+	}
+	var un []PromotionAuditEvent
+	for _, e := range events {
+		if e.EventType == PromotionEventUnsuperseded && e.SourceID == loser.ID {
+			un = append(un, e)
+		}
+	}
+	if len(un) != 1 {
+		t.Fatalf("unsuperseded events = %d, want 1", len(un))
+	}
+	if un[0].FromState != PromotionSuperseded || un[0].ToState != PromotionPromoted {
+		t.Errorf("unsuperseded states = %s->%s, want superseded->promoted", un[0].FromState, un[0].ToState)
+	}
+}
+
+// TestPhase8_AuditDualLogsAlignment (§6.4): repeated supersede/unsupersede/
+// supersede keeps the promotion audit and the contradiction log in lockstep,
+// with every contradiction line cross-referencing an existing promotion event.
+func TestPhase8_AuditDualLogsAlignment(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+	actor := PromotionActor{Kind: "human", Name: "alice"}
+
+	if _, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: actor}); err != nil {
+		t.Fatalf("first supersede: %v", err)
+	}
+	if _, err := Unsupersede(loser.ID, "reversal", actor); err != nil {
+		t.Fatalf("unsupersede: %v", err)
+	}
+	if _, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: actor}); err != nil {
+		t.Fatalf("second supersede: %v", err)
+	}
+
+	events, err := ReadPromotionAudit(now())
+	if err != nil {
+		t.Fatalf("ReadPromotionAudit: %v", err)
+	}
+	promoEventIDs := map[string]bool{}
+	var revoked, unsuperseded int
+	for _, e := range events {
+		promoEventIDs[e.EventID] = true
+		switch e.EventType {
+		case PromotionEventRevoked:
+			revoked++
+		case PromotionEventUnsuperseded:
+			unsuperseded++
+		}
+	}
+	if revoked != 2 || unsuperseded != 1 {
+		t.Fatalf("promotion audit = %d revoked / %d unsuperseded, want 2/1", revoked, unsuperseded)
+	}
+
+	// Every contradiction line that carries a promotion_audit_event_id must point
+	// at a real promotion event.
+	raw, err := os.ReadFile(filepath.Join(VaultDir, contradictionsLog))
+	if err != nil {
+		t.Fatalf("read contradiction log: %v", err)
+	}
+	stateChanging := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec auditRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode contradiction line: %v", err)
+		}
+		if rec.Action == "superseded" || rec.Action == "unsuperseded" {
+			stateChanging++
+			if rec.PromotionAuditEventID == "" {
+				t.Errorf("%s line missing promotion_audit_event_id: %s", rec.Action, line)
+				continue
+			}
+			if !promoEventIDs[rec.PromotionAuditEventID] {
+				t.Errorf("%s line references unknown promotion event %q", rec.Action, rec.PromotionAuditEventID)
+			}
+		}
+	}
+	if stateChanging != 3 {
+		t.Errorf("state-changing contradiction lines = %d, want 3", stateChanging)
+	}
+}
+
+// TestPhase8_SupersedeGoesThroughRevokeOnly (§6.5): the eviction path calls
+// Revoke exactly once per superseded pair, so all promotion-state mutation flows
+// through the single Revoke chokepoint.
+func TestPhase8_SupersedeGoesThroughRevokeOnly(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+
+	if _, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: PromotionActor{Kind: "human", Name: "alice"}}); err != nil {
+		t.Fatalf("supersede: %v", err)
+	}
+
+	// Exactly one revoked promotion event proves the loser's state transition ran
+	// through Revoke once and only once (no second direct-write path).
+	events, err := ReadPromotionAudit(now())
+	if err != nil {
+		t.Fatalf("ReadPromotionAudit: %v", err)
+	}
+	revoked := 0
+	for _, e := range events {
+		if e.EventType == PromotionEventRevoked && e.SourceID == loser.ID {
+			revoked++
+		}
+	}
+	if revoked != 1 {
+		t.Errorf("revoke calls (via audit) = %d, want exactly 1", revoked)
+	}
+}
+
+// TestPhase8_RefusesL1Supersede (§7.2 G3): a contradiction pass must refuse to
+// supersede a curated global (l1) memory.
+func TestPhase8_RefusesL1Supersede(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Layer: "l1", Score: 4.0, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+
+	_, err := ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: PromotionActor{Kind: "human", Name: "alice"}})
+	if err == nil || !strings.Contains(err.Error(), "l1 memory must be curated") {
+		t.Fatalf("l1 supersede error = %v, want refusal", err)
+	}
+	// Nothing was superseded.
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 0 {
+		t.Errorf("l1 refusal still superseded %d memories", len(sup))
+	}
+}
+
+// TestPhase8_ConcurrentResolveOnSamePair (§6.7): two goroutines racing to
+// supersede the same pair must leave exactly one audit record and one archived
+// loser (no double eviction). Run with -race.
+func TestPhase8_ConcurrentResolveOnSamePair(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+
+	winner := placeMemory(t, Memory{ID: "mem_winner1", Project: "p", Score: 4.0, PromotionState: PromotionPromoted, Body: "use connection pooling"})
+	loser := placeMemory(t, Memory{ID: "mem_loser01", Project: "p", Score: 2.0, PromotionState: PromotionPromoted, Body: "do not use pooling"})
+	cands := []Contradiction{{A: winner.ID, B: loser.ID, Confidence: 0.9, Source: "manual"}}
+	actor := PromotionActor{Kind: "human", Name: "alice"}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = ResolveContradictions(cands, ResolveOptions{DryRun: false, AutoEvict: true, Actor: actor})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+
+	// Exactly one revoked event: the second pass sees the loser already gone.
+	events, err := ReadPromotionAudit(now())
+	if err != nil {
+		t.Fatalf("ReadPromotionAudit: %v", err)
+	}
+	revoked := 0
+	for _, e := range events {
+		if e.EventType == PromotionEventRevoked && e.SourceID == loser.ID {
+			revoked++
+		}
+	}
+	if revoked != 1 {
+		t.Errorf("concurrent supersede produced %d revoke events, want 1", revoked)
+	}
+	// Loser superseded exactly once, winner supersedes list has no duplicate.
+	if sup, _ := readAllMemories("superseded", ""); len(sup) != 1 {
+		t.Errorf("superseded count = %d, want 1", len(sup))
+	}
+	act, _ := readAllMemories("active", "")
+	for _, m := range act {
+		if m.ID == winner.ID {
+			n := 0
+			for _, s := range m.Supersedes {
+				if s == loser.ID {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Errorf("winner supersedes has %d copies of loser, want 1", n)
+			}
+		}
 	}
 }
 

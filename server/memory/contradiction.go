@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,20 @@ const (
 
 // contradictionsLog is the append-only audit file inside the vault.
 const contradictionsLog = "_contradictions.jsonl"
+
+// resolveMu serialises real (non-dry-run, auto-evict) resolution passes and
+// unsupersede restores so concurrent operations on the same pair can't both
+// observe the loser as active and double-mutate promotion state.
+var resolveMu sync.Mutex
+
+// allowL1SupersedeEnv, when set to "1", relaxes the G3 gate that refuses to
+// supersede a curated global (l1) memory through the contradiction path.
+const allowL1SupersedeEnv = "MEMORY_CONTRADICTION_ALLOW_L1_SUPERSEDE"
+
+// allowL1Supersede reports whether the G3 l1 gate is disabled via env.
+func allowL1Supersede() bool {
+	return os.Getenv(allowL1SupersedeEnv) == "1"
+}
 
 // Contradiction is one candidate conflicting pair, detector-agnostic.
 type Contradiction struct {
@@ -253,6 +268,13 @@ func decide(a, b Memory, c Contradiction) decision {
 // §13.2 tiers, performs the §13.3 supersede action (unless DryRun or !AutoEvict),
 // and appends every decision — abstentions included — to _contradictions.jsonl.
 func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]ResolutionResult, error) {
+	// Serialise real eviction passes so two concurrent resolves on the same pair
+	// can't both read the loser as active and double-supersede it. Dry-run and
+	// flag-only passes don't mutate promotion state, so they run lock-free.
+	if !opts.DryRun && opts.AutoEvict {
+		resolveMu.Lock()
+		defer resolveMu.Unlock()
+	}
 	// Dedup by PairKey, keeping the strongest (highest-Confidence) signal.
 	byKey := map[string]Contradiction{}
 	var order []string
@@ -280,7 +302,6 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 		idx[m.ID] = m
 	}
 
-	today := now().Format(dateLayout)
 	supersededThisPass := map[string]bool{}
 	var results []ResolutionResult
 
@@ -335,16 +356,34 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 			case "superseded":
 				winner := idx[d.winnerID]
 				loser := idx[d.loserID]
+				// G3: a curated global (l1) memory must be retired explicitly via
+				// Curate/Revoke, never auto-superseded by a contradiction pass — a
+				// lexical false positive must not silently drop a global rule.
+				if !allowL1Supersede() && (winner.Layer == "l1" || loser.Layer == "l1") {
+					return nil, fmt.Errorf("refuse: l1 memory must be curated/revoked explicitly, not superseded via contradiction")
+				}
+				// Winner side stays in the contradiction package: record the
+				// supersedes link and drop the (now resolved) conflicts_with marker.
 				winner.Supersedes = appendUnique(winner.Supersedes, loser.ID)
 				winner.ConflictsWith = removeString(winner.ConflictsWith, loser.ID)
-				loser.Status = "superseded"
-				loser.SupersededBy = winner.ID
-				loser.SupersededAt = today
-				loser.SupersededReason = reason
-				loser.ConflictsWith = nil
-				if err := persistSupersede(winner, loser); err != nil {
+				if _, err := writeMemory(winner, filepath.Dir(winner.Path)); err != nil {
 					return nil, err
 				}
+				// Loser side goes through the single promotion state-transition
+				// path so the eviction lands in the promotion audit exactly once.
+				// G7: prefix the rationale so forensics can tell a
+				// contradiction-driven revoke from an operator revoke.
+				revRes, err := Revoke(RevokeRequest{
+					TargetID:     loser.ID,
+					Reason:       "contradiction: " + reason,
+					Mode:         "supersede",
+					SupersededBy: winner.ID,
+					Actor:        opts.Actor,
+				})
+				if err != nil {
+					return nil, fmt.Errorf("resolve: %w", err)
+				}
+				res.PromotionAuditEventID = revRes.AuditEventID
 				supersededThisPass[loser.ID] = true
 				idx[winner.ID] = winner // keep fresh for later pairs touching the winner
 				delete(idx, loser.ID)
@@ -358,19 +397,20 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 				continue
 			}
 			if err := appendContradictionLog(auditRecord{
-				Time:       now().Format(time.RFC3339),
-				Pair:       res.Pair,
-				Action:     res.Action,
-				Winner:     res.Winner,
-				Loser:      res.Loser,
-				ScoreA:     round2(survivorScore(a)),
-				ScoreB:     round2(survivorScore(b)),
-				Source:     c.Source,
-				Confidence: c.Confidence,
-				Similarity: c.Similarity,
-				Margin:     res.Margin,
-				Reason:     res.Reason,
-				Mode:       modeOf(opts),
+				Time:                  now().Format(time.RFC3339),
+				Pair:                  res.Pair,
+				Action:                res.Action,
+				Winner:                res.Winner,
+				Loser:                 res.Loser,
+				ScoreA:                round2(survivorScore(a)),
+				ScoreB:                round2(survivorScore(b)),
+				Source:                c.Source,
+				Confidence:            c.Confidence,
+				Similarity:            c.Similarity,
+				Margin:                res.Margin,
+				Reason:                res.Reason,
+				Mode:                  modeOf(opts),
+				PromotionAuditEventID: res.PromotionAuditEventID,
 			}); err != nil {
 				return nil, err
 			}
@@ -379,34 +419,6 @@ func ResolveContradictions(cands []Contradiction, opts ResolveOptions) ([]Resolu
 		results = append(results, res)
 	}
 	return results, nil
-}
-
-// persistSupersede moves the loser into archive/{project} and rewrites the winner
-// in place. Reuses the Cleanup archive pattern (write new + remove old).
-func persistSupersede(winner, loser Memory) error {
-	project := loser.Project
-	if project == "" {
-		project = "unknown"
-	}
-	archiveDir := filepath.Join(VaultDir, "archive", project)
-	oldPath := loser.Path
-	if _, err := writeMemory(loser, archiveDir); err != nil {
-		return err
-	}
-	if oldPath != "" && filepath.Dir(oldPath) != archiveDir {
-		if err := os.Remove(oldPath); err != nil {
-			return fmt.Errorf("remove %s: %w", oldPath, err)
-		}
-	}
-	if _, err := writeMemory(winner, filepath.Dir(winner.Path)); err != nil {
-		return err
-	}
-	// B2: the loser is now superseded (out of the active set) — drop it from the
-	// FTS index so it stops occupying BM25 candidate slots. Non-fatal.
-	if err := DeleteFromIndex(loser.ID); err != nil {
-		fmt.Fprintf(os.Stderr, "[memory] FTS5 delete error for %s: %v\n", loser.ID, err)
-	}
-	return nil
 }
 
 // flagConflict records the unresolved pair on both sides (durable pending queue).
@@ -426,8 +438,16 @@ func flagConflict(idA, idB string, idx map[string]Memory) error {
 }
 
 // Unsupersede restores a superseded loser to active, clears its supersede fields,
-// removes the winner's supersedes entry, and appends a reversal record.
-func Unsupersede(id string) (Memory, error) {
+// removes the winner's supersedes entry, records the promoted-again state
+// transition in the promotion audit, and appends a reversal record to the
+// contradiction log. The superseded -> promoted edge is validated against the
+// state machine so a future forbidden edge can't be silently reversed.
+func Unsupersede(id, reason string, actor PromotionActor) (Memory, error) {
+	// Serialise against concurrent resolves so a restore and an eviction can't
+	// race on the same loser.
+	resolveMu.Lock()
+	defer resolveMu.Unlock()
+
 	all, err := readAllMemories("superseded", "")
 	if err != nil {
 		return Memory{}, err
@@ -445,15 +465,41 @@ func Unsupersede(id string) (Memory, error) {
 		return Memory{}, fmt.Errorf("superseded memory %q not found", id)
 	}
 
+	// G5: only reverse the eviction if the state machine still allows the
+	// superseded -> promoted edge. Defensive: phase 7 permits it today.
+	if err := ValidatePromotionTransition(PromotionSuperseded, PromotionPromoted); err != nil {
+		return Memory{}, err
+	}
+
 	winnerID := loser.SupersededBy
 
-	// Restore the loser: status → active, clear supersede metadata, move back to
-	// notes/{project} (out of archive).
+	// Prepare (but do not append) the promotion audit event so the restored file
+	// can reference it and the log line is written only after every mutation
+	// succeeds.
+	restoreReason := reason
+	if strings.TrimSpace(restoreReason) == "" {
+		restoreReason = "manual reversal"
+	}
+	unsupersededEvent := prepareAuditEvent(PromotionAuditEvent{
+		EventType: PromotionEventUnsuperseded,
+		Actor:     actor,
+		SourceID:  id,
+		TargetID:  winnerID,
+		FromState: PromotionSuperseded,
+		ToState:   PromotionPromoted,
+		Outcome:   "unsuperseded",
+		Rationale: restoreReason,
+	})
+
+	// Restore the loser: status → active, promotion_state → promoted, clear
+	// supersede metadata, move back to notes/{project} (out of archive).
 	loser.Status = "active"
+	loser.PromotionState = PromotionPromoted
 	loser.SupersededBy = ""
 	loser.Supersedes = nil
 	loser.SupersededAt = ""
 	loser.SupersededReason = ""
+	loser.PromotionAudit = auditReferenceForEvent(unsupersededEvent)
 	project := loser.Project
 	if project == "" {
 		project = "unknown"
@@ -490,14 +536,20 @@ func Unsupersede(id string) (Memory, error) {
 		}
 	}
 
+	// All file state committed: append the promotion audit (memory-level state
+	// transition), then the contradiction log (pair-level reversal record).
+	if err := appendPreparedAudit(unsupersededEvent); err != nil {
+		return Memory{}, err
+	}
 	if err := appendContradictionLog(auditRecord{
-		Time:   now().Format(time.RFC3339),
-		Pair:   [2]string{winnerID, id},
-		Action: "unsuperseded",
-		Winner: winnerID,
-		Loser:  id,
-		Reason: "manual reversal",
-		Mode:   "manual",
+		Time:                  now().Format(time.RFC3339),
+		Pair:                  [2]string{winnerID, id},
+		Action:                "unsuperseded",
+		Winner:                winnerID,
+		Loser:                 id,
+		Reason:                restoreReason,
+		Mode:                  "manual",
+		PromotionAuditEventID: unsupersededEvent.EventID,
 	}); err != nil {
 		return Memory{}, err
 	}
@@ -733,19 +785,20 @@ func removeString(s []string, v string) []string {
 
 // auditRecord is one line in _contradictions.jsonl.
 type auditRecord struct {
-	Time       string    `json:"time"`
-	Pair       [2]string `json:"pair"`
-	Action     string    `json:"action"` // superseded | flagged | skipped | unsuperseded
-	Winner     string    `json:"winner,omitempty"`
-	Loser      string    `json:"loser,omitempty"`
-	ScoreA     float64   `json:"score_a,omitempty"`
-	ScoreB     float64   `json:"score_b,omitempty"`
-	Source     string    `json:"source,omitempty"`
-	Confidence float64   `json:"confidence,omitempty"`
-	Similarity float64   `json:"similarity,omitempty"`
-	Margin     float64   `json:"margin,omitempty"`
-	Reason     string    `json:"reason"`
-	Mode       string    `json:"mode"` // auto | manual
+	Time                  string    `json:"time"`
+	Pair                  [2]string `json:"pair"`
+	Action                string    `json:"action"` // superseded | flagged | skipped | unsuperseded
+	Winner                string    `json:"winner,omitempty"`
+	Loser                 string    `json:"loser,omitempty"`
+	ScoreA                float64   `json:"score_a,omitempty"`
+	ScoreB                float64   `json:"score_b,omitempty"`
+	Source                string    `json:"source,omitempty"`
+	Confidence            float64   `json:"confidence,omitempty"`
+	Similarity            float64   `json:"similarity,omitempty"`
+	Margin                float64   `json:"margin,omitempty"`
+	Reason                string    `json:"reason"`
+	Mode                  string    `json:"mode"`                               // auto | manual
+	PromotionAuditEventID string    `json:"promotion_audit_event_id,omitempty"` // cross-ref to the promotion audit event
 }
 
 func appendContradictionLog(rec auditRecord) error {

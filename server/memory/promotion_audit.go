@@ -47,6 +47,7 @@ const (
 	PromotionEventBlocked       = "blocked"
 	PromotionEventRevoked       = "revoked"
 	PromotionEventSuperseded    = "superseded"
+	PromotionEventUnsuperseded  = "unsuperseded"
 )
 
 // promotionAuditSchemaVersion versions the audit record shape.
