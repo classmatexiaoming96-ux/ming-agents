@@ -88,6 +88,7 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 		}
 		subtaskReports[result.Subtask.ID] = subtaskReport
 		reviewOutBySubtask[result.Subtask.ID] = reviewOut
+		applyImplicitFeedback(brief, reviewOut)
 	}
 	aggregateReport, aggregateOut, _, err := runAggregateReviewWithMemoryForNode(ctx, req.RepoRoot, req.RunID, &plan, subtaskReports, briefMarkdown(brief))
 	if err != nil {
@@ -95,8 +96,7 @@ func (n *reviewNode) Execute(ctx context.Context, req NodeRequest) (*NodeResult,
 	}
 	report := MergeReviewReports(subtaskReports, aggregateReport)
 	reviewOutBySubtask["aggregate"] = aggregateOut
-	// Close the brief -> output -> score loop: the review turns share one brief,
-	// so score its injected memories against the aggregate review output.
+	// Close the brief -> output -> score loop for the aggregate review turn too.
 	applyImplicitFeedback(brief, aggregateOut)
 	mirrorBriefAuditToRunBundle(req, brief, "")
 	mirrorReuseAckFileToRunBundle(req, string(req.Spec.Kind))

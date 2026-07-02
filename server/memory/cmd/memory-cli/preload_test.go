@@ -136,6 +136,35 @@ func TestCmdPreload_JSON(t *testing.T) {
 	}
 }
 
+// TestCmdPreload_SeedIsRecallable exercises the operator path end to end:
+// preload writes through IngestWithOptions and the resulting memory is visible
+// to project-scoped Recall.
+func TestCmdPreload_SeedIsRecallable(t *testing.T) {
+	useTempCLIVault(t)
+	file := writePreloadFile(t, "seed.yaml", `- content: "operator preload recall needle because seeded lessons must be retrievable"
+  type: decision
+  project: ming-agents
+  layer: l1
+`)
+	var out bytes.Buffer
+	if err := cmdPreload([]string{file}, &out); err != nil {
+		t.Fatalf("cmdPreload: %v", err)
+	}
+	got, _, err := memory.Recall("operator preload recall needle", "ming-agents", "", nil, 0, "active", 10)
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("preloaded seed was not recalled")
+	}
+	if !strings.Contains(got[0].Body, "operator preload recall needle") {
+		t.Fatalf("Recall first body = %q, want preloaded seed", got[0].Body)
+	}
+	if got[0].Source != "preloaded" {
+		t.Fatalf("Recall first source = %q, want preloaded", got[0].Source)
+	}
+}
+
 // TestCmdPreload_DryRunNoWrites confirms --dry-run never touches the vault.
 func TestCmdPreload_DryRunNoWrites(t *testing.T) {
 	vault := useTempCLIVault(t)

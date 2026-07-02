@@ -56,6 +56,12 @@ func (c *implicitCapture) sawLogContaining(sub string) bool {
 	return false
 }
 
+func (c *implicitCapture) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.calls)
+}
+
 func stubImplicitFeedback(t *testing.T) *implicitCapture {
 	t.Helper()
 	cap := &implicitCapture{}
@@ -100,6 +106,39 @@ func TestClarificationNode_InvokesImplicitFeedback(t *testing.T) {
 	}
 }
 
+func TestPlanningNode_InvokesImplicitFeedback(t *testing.T) {
+	restoreBrief := stubWorkflowBrief(t, "planning memory", memory.BriefAudit{InjectedIDs: []string{"mem_plan"}})
+	defer restoreBrief()
+	cap := stubImplicitFeedback(t)
+
+	prevRun := runPlanningWithMemoryForNode
+	runPlanningWithMemoryForNode = func(ctx context.Context, repoRoot, clarFile, memoryBlock string) (*Plan, error) {
+		return &Plan{
+			TaskID: "run-plan-impl",
+			Subtasks: []Subtask{
+				{ID: "st1", RepoPath: "server/api", Description: "preserve tenant-scoped recall ordering"},
+			},
+		}, nil
+	}
+	defer func() { runPlanningWithMemoryForNode = prevRun }()
+
+	_, err := (&planningNode{}).Execute(context.Background(), NodeRequest{
+		RunID:    "run-plan-impl",
+		RepoRoot: t.TempDir(),
+		Spec:     NodeSpec{ID: "planning", Kind: NodeKindPlanning},
+		Inputs:   NodeInputs{"clarification": {Outputs: map[string]string{"clarification_output": ""}}},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !cap.sawID("mem_plan") {
+		t.Fatal("planning node did not feed injected id into implicit feedback")
+	}
+	if !cap.sawLogContaining("tenant-scoped recall ordering") {
+		t.Fatal("planning node did not feed the serialised plan into implicit feedback")
+	}
+}
+
 func TestDevelopmentNode_InvokesImplicitFeedback(t *testing.T) {
 	restoreBrief := stubWorkflowBrief(t, "dev memory", memory.BriefAudit{InjectedIDs: []string{"mem_dev"}})
 	defer restoreBrief()
@@ -135,6 +174,58 @@ func TestDevelopmentNode_InvokesImplicitFeedback(t *testing.T) {
 	}
 	if !cap.sawLogContaining("pooling fix") {
 		t.Fatal("development node did not feed subtask output into implicit feedback")
+	}
+}
+
+func TestReviewNode_InvokesImplicitFeedbackForEveryReviewTurn(t *testing.T) {
+	restoreBrief := stubWorkflowBrief(t, "review memory", memory.BriefAudit{InjectedIDs: []string{"mem_review"}})
+	defer restoreBrief()
+	cap := stubImplicitFeedback(t)
+
+	prevSubtask := runSubtaskReviewWithMemoryForNode
+	prevAggregate := runAggregateReviewWithMemoryForNode
+	runSubtaskReviewWithMemoryForNode = func(ctx context.Context, repoRoot, runID string, plan *Plan, result *SubtaskResult, diffFile, memoryBlock string) (*ReviewReport, string, ReviewSubtaskPaths, error) {
+		return &ReviewReport{Passed: true, Summary: "ok"}, "subtask-only finding references retry budget", ReviewSubtaskPaths{}, nil
+	}
+	runAggregateReviewWithMemoryForNode = func(ctx context.Context, repoRoot, runID string, plan *Plan, subtaskReports map[string]*ReviewReport, memoryBlock string) (*ReviewReport, string, ReviewAggregatePaths, error) {
+		return &ReviewReport{Passed: true, Summary: "ok"}, "aggregate-only finding references release gate", ReviewAggregatePaths{}, nil
+	}
+	defer func() {
+		runSubtaskReviewWithMemoryForNode = prevSubtask
+		runAggregateReviewWithMemoryForNode = prevAggregate
+	}()
+
+	plan := Plan{TaskID: "run-review-impl", Subtasks: []Subtask{{ID: "st1", RepoPath: "server/api", Description: "review api"}}}
+	planBytes, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("Marshal(plan) error = %v", err)
+	}
+	state := &WorkflowState{Details: map[string]any{
+		"subtask_results": []*SubtaskResult{{Subtask: plan.Subtasks[0], Status: "completed", Output: "done"}},
+	}}
+	_, err = (&reviewNode{}).Execute(context.Background(), NodeRequest{
+		RunID:    "run-review-impl",
+		RepoRoot: t.TempDir(),
+		Spec:     NodeSpec{ID: "review", Kind: NodeKindReview},
+		Inputs: NodeInputs{
+			"planning":    {Values: map[string]any{"plan": json.RawMessage(planBytes)}},
+			"development": {Values: map[string]any{"state": state}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if cap.count() != 2 {
+		t.Fatalf("implicit feedback calls = %d, want subtask and aggregate turns", cap.count())
+	}
+	if !cap.sawID("mem_review") {
+		t.Fatal("review node did not feed injected id into implicit feedback")
+	}
+	if !cap.sawLogContaining("subtask-only finding") {
+		t.Fatal("review node did not feed subtask review output into implicit feedback")
+	}
+	if !cap.sawLogContaining("aggregate-only finding") {
+		t.Fatal("review node did not feed aggregate review output into implicit feedback")
 	}
 }
 

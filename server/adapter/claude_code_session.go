@@ -197,6 +197,7 @@ func (m *ClaudeCodeSessionManager) StartSession(ctx context.Context, workDir str
 			if lastAutoReplyOffset < offset && shouldAutoReplyYes(output[lastAutoReplyOffset:]) {
 				if _, err := session.pty.Write([]byte("y\r")); err != nil {
 					session.Close()
+					cancel()
 					return nil, fmt.Errorf("reply to claude-code trust prompt: %w", err)
 				}
 				lastAutoReplyOffset = offset
