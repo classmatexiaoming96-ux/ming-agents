@@ -84,6 +84,17 @@ func TestCmdResolve_ApplyRequiresActor(t *testing.T) {
 	}
 }
 
+func TestCmdResolve_ApplyMaxPairsZeroRequiresIKnow(t *testing.T) {
+	useTempCLIVault(t)
+	seedContradictoryPair(t)
+
+	var out bytes.Buffer
+	err := cmdResolve([]string{"--all", "--evict", "--apply", "--max-pairs", "0", "--actor", "alice"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "unbounded") {
+		t.Fatalf("resolve --apply --max-pairs 0 error = %v, want unbounded refusal", err)
+	}
+}
+
 func TestCmdResolve_MutuallyExclusivePairAll(t *testing.T) {
 	useTempCLIVault(t)
 	var out bytes.Buffer

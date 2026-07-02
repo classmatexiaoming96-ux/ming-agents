@@ -118,6 +118,44 @@ func TestPhase8_APIResolveMissingPair(t *testing.T) {
 	}
 }
 
+func TestPhase8_APIResolveNonPendingActivePairReturns422(t *testing.T) {
+	useTempMemoryVault(t)
+	t.Setenv("MEMORY_API_RATELIMIT_DISABLE", "1")
+	seedAPINote(t, "mem_alpha0", "p", "prefer structured logging in services", 3.0)
+	seedAPINote(t, "mem_beta00", "p", "database migrations run in the deploy step", 3.0)
+	srv := NewServer(nil, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/memory/resolve",
+		bytes.NewBufferString(`{"pair":["mem_alpha0","mem_beta00"],"evict":true}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("non-pending active pair status = %d, want 422 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPhase8_APIResolveOmittedMaxPairsDefaultsTo20(t *testing.T) {
+	useTempMemoryVault(t)
+	t.Setenv("MEMORY_API_RATELIMIT_DISABLE", "1")
+	for i := 0; i < 21; i++ {
+		project := "p" + floatStr(float64(i))
+		seedAPINote(t, "mem_yes_"+floatStr(float64(i)), project, "always enable the database connection pooling layer for every service", 4.0)
+		seedAPINote(t, "mem_no_"+floatStr(float64(i)), project, "never enable the database connection pooling layer for every service", 2.0)
+	}
+	srv := NewServer(nil, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/memory/resolve",
+		bytes.NewBufferString(`{"all":true,"evict":true,"apply":true,"actor":{"kind":"human","name":"alice"}}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("omitted max_pairs status = %d, want 422 default-cap refusal (%s)", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("--max-pairs 20")) {
+		t.Fatalf("omitted max_pairs body = %s, want default cap 20 refusal", rec.Body.String())
+	}
+}
+
 func TestPhase8_APIUnsupersedeApplyRequiresReason(t *testing.T) {
 	useTempMemoryVault(t)
 	t.Setenv("MEMORY_API_RATELIMIT_DISABLE", "1")

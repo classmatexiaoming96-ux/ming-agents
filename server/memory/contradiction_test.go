@@ -822,6 +822,21 @@ func TestPhase8_RunResolvePairNotPending(t *testing.T) {
 	}
 }
 
+func TestPhase8_RunResolvePairRejectsArchivedAndSupersededMembers(t *testing.T) {
+	useTempVault(t)
+	fixedNow(t, time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC))
+	active := placeMemory(t, Memory{ID: "mem_active1", Project: "p", Score: 3.0, PromotionState: PromotionPromoted, Body: "active memory"})
+	archived := placeMemory(t, Memory{ID: "mem_archiv1", Project: "p", Status: "archived", Score: 2.0, PromotionState: PromotionArchived, Body: "archived memory"})
+	superseded := placeMemory(t, Memory{ID: "mem_super01", Project: "p", Status: "superseded", Score: 2.0, PromotionState: PromotionSuperseded, SupersededBy: active.ID, Body: "superseded memory"})
+
+	if _, err := RunResolve(ResolveSpec{Pair: [2]string{active.ID, archived.ID}, Evict: true}); err == nil || !strings.Contains(err.Error(), `status "archived"`) {
+		t.Fatalf("archived member error = %v, want archived not-active status", err)
+	}
+	if _, err := RunResolve(ResolveSpec{Pair: [2]string{active.ID, superseded.ID}, Evict: true}); err == nil || !strings.Contains(err.Error(), `status "superseded"`) {
+		t.Fatalf("superseded member error = %v, want superseded not-active status", err)
+	}
+}
+
 // TestPhase8_RunResolveUnboundedRequiresIKnow (P1-1/P1-2): an apply pass with
 // --max-pairs 0 is unbounded and must be refused unless --i-know is set,
 // regardless of surface (CLI or API both route through RunResolve).
